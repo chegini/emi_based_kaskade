@@ -7,6 +7,8 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <numeric>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -31,6 +33,7 @@
 #include "linalg/dynamicMatrix.hh"
 #include "linalg/jacobiPreconditioner.hh"
 #include "timestepping/semieuler.hh"
+#include "timestepping/sdc.hh"
 #include "utilities/kaskopt.hh"
 #include "utilities/timing.hh"
 
@@ -59,10 +62,21 @@ struct EmiOptions
   int maxCGIter = 10000;
   int writeVTK = 1;
   int diagnostics = 0;
+  int sdc = 0;
+  int sdcCollocationPoints = 3;
+  int sdcStartCollocationPoints = 3;
+  int minimumSdcSweeps = 3;
+  int maximumSdcSweeps = 5;
+  int sdcSweepType = 1;
+  int algebraicAdaptivity = 0;
 
   double finalTime = 0.01;
   double dt = 0.01;
   double cgTol = 1e-8;
+  double sdcTolerance = 1e-6;
+  double sdcAbsoluteTolerance = 1e-12;
+  double sdcInitialContraction = 0.2;
+  double algebraicAdaptivityTolerance = 0.0;
   double penalty = 1e6;
   double sigmaI = 3.0;
   double sigmaE = 20.0;
@@ -258,6 +272,360 @@ void printVectorDiagnostics(Vector const& v, std::string const& name)
             << " max=" << maxValue << "\n";
 }
 
+template <class Matrix, class Vectors, class ReactionDerivatives, class Solver>
+typename Matrix::field_type sdcIterationStepJacobi(SDCTimeGrid const& grid,
+                                                   SDCTimeGrid::RealMatrix const& Shat,
+                                                   Solver const& solve,
+                                                   Matrix const& M,
+                                                   Matrix const& stiffness,
+                                                   Vectors const& residuals,
+                                                   ReactionDerivatives const& reactionDerivatives,
+                                                   Vectors const& massDifferences,
+                                                   Vectors& corrections)
+{
+  auto const& points = grid.points();
+  int const intervals = points.size()-1;
+  using Vector = typename Vectors::value_type;
+
+  corrections[0] = 0.0;
+  Matrix J = M;
+  Vector rhs(massDifferences[0].size());
+  Vector tmp(massDifferences[0].size());
+  auto const& S = grid.integrationMatrix();
+  typename Matrix::field_type norm = 0.0;
+
+  for (int i = 1; i <= intervals; ++i)
+  {
+    for (size_t row = 0; row < J.N(); ++row)
+    {
+      auto colJ = J[row].begin();
+      auto const endJ = J[row].end();
+      auto colM = M[row].begin();
+      auto colA = stiffness[row].begin();
+      auto colR = reactionDerivatives[i][row].begin();
+      auto const endR = reactionDerivatives[i][row].end();
+
+      while (colJ != endJ)
+      {
+        *colJ = *colM - Shat[i-1][i] * *colA;
+        if (colR != endR && colJ.index() == colR.index())
+        {
+          *colJ -= std::min(0.5 * *colM, Shat[i-1][i] * *colR);
+          ++colR;
+        }
+        ++colJ;
+        ++colM;
+        ++colA;
+      }
+    }
+
+    rhs = massDifferences[i-1];
+    M.umv(corrections[i-1],rhs);
+    for (int j = 0; j <= intervals; ++j)
+      rhs.axpy(S[i-1][j],residuals[j]);
+
+    tmp = 0.0;
+    for (int j = 0; j < i; ++j)
+    {
+      reactionDerivatives[j].usmv(Shat[i-1][j],corrections[j],rhs);
+      tmp.axpy(Shat[i-1][j],corrections[j]);
+    }
+    stiffness.umv(tmp,rhs);
+
+    corrections[i] = corrections[i-1];
+    solve(J,corrections[i],rhs);
+    norm += (points[i]-points[i-1]) * (corrections[i] * rhs);
+  }
+
+  return std::sqrt(std::max<typename Matrix::field_type>(0.0,norm/(points[intervals]-points[0])));
+}
+
+template <class Matrix>
+void addMatrixNeighborhood(Matrix const& A, std::vector<std::vector<size_t>>& dofNeighborhood)
+{
+  for (size_t row = 0; row < A.N(); ++row)
+  {
+    dofNeighborhood[row].push_back(row);
+    for (auto col = A[row].begin(); col != A[row].end(); ++col)
+    {
+      dofNeighborhood[row].push_back(col.index());
+      if (col.index() < dofNeighborhood.size())
+        dofNeighborhood[col.index()].push_back(row);
+    }
+  }
+}
+
+template <class Matrix>
+std::vector<std::vector<size_t>> buildMatrixNeighborhood(Matrix const& mass, Matrix const& stiffness)
+{
+  std::vector<std::vector<size_t>> dofNeighborhood(mass.N());
+  addMatrixNeighborhood(mass,dofNeighborhood);
+  addMatrixNeighborhood(stiffness,dofNeighborhood);
+
+  for (auto& neighbors : dofNeighborhood)
+  {
+    std::sort(neighbors.begin(),neighbors.end());
+    neighbors.erase(std::unique(neighbors.begin(),neighbors.end()),neighbors.end());
+  }
+
+  return dofNeighborhood;
+}
+
+template <class Functional, class State, class StateU, class TimeGrid, class Assembler, class Vector>
+void computeFullSdcResiduals(Functional& F,
+                             SemiImplicitEulerStep<Functional>& equation,
+                             State const& stateAtStart,
+                             std::vector<StateU> const& collocationStates,
+                             TimeGrid const& grid,
+                             std::vector<size_t> const& expandedIndices,
+                             size_t nDofs,
+                             int sweep,
+                             double t,
+                             double dt,
+                             Assembler& assembler,
+                             EmiOptions const& options,
+                             std::vector<Vector>& residuals)
+{
+  using SemiLinearization = SemiLinearizationAtInner<SemiImplicitEulerStep<Functional>>;
+
+  State stateTmp(stateAtStart);
+  State dstateTmp(stateAtStart);
+  dstateTmp *= 0.0;
+  equation.setTau(dt);
+  F.Mass_stiff(0);
+  Vector fullResidual(nDofs);
+
+  auto const& points = grid.points();
+  for (int i = 0; i < points.N(); ++i)
+  {
+    if (sweep == 0 && i > 0)
+    {
+      residuals[i] = residuals[i-1];
+      continue;
+    }
+
+    F.time(t + points[i] - points[0]);
+    boost::fusion::at_c<0>(stateTmp.data) = collocationStates[i];
+    assembler.assemble(SemiLinearization(equation,stateTmp,stateTmp,dstateTmp),
+                       Assembler::RHS,
+                       options.assemblyThreads);
+
+    auto rhs = assembler.rhs();
+    rhs.write(fullResidual.begin());
+    for (size_t j = 0; j < expandedIndices.size(); ++j)
+      residuals[i][j] = fullResidual[expandedIndices[j]];
+    residuals[i] *= (1.0/dt);
+  }
+}
+
+template <class Matrix, class StateU, class Vector>
+void computeFullMassDifferences(Matrix const& M,
+                                std::vector<StateU> const& collocationStates,
+                                std::vector<size_t> const& expandedIndices,
+                                std::vector<Vector>& massDifferences)
+{
+  for (int i = 0; i < static_cast<int>(collocationStates.size())-1; ++i)
+    massDifferences[i] = 0.0;
+
+  for (size_t localRow = 0; localRow < expandedIndices.size(); ++localRow)
+  {
+    size_t const row = expandedIndices[localRow];
+    for (auto col = M[row].begin(); col != M[row].end(); ++col)
+    {
+      for (int i = 0; i < static_cast<int>(collocationStates.size())-1; ++i)
+      {
+        auto const diff = collocationStates[i].coefficients()[col.index()]
+                        - collocationStates[i+1].coefficients()[col.index()];
+        massDifferences[i][localRow] += *col * diff;
+      }
+    }
+  }
+}
+
+template <class Functional, class Spaces, class State, class Element>
+State runFullSdc(Functional& F,
+                 Spaces const& spaces,
+                 State state,
+                 Element& uAll,
+                 size_t nDofs,
+                 int steps,
+                 EmiOptions const& options)
+{
+  using SemiLinearization = SemiLinearizationAtInner<SemiImplicitEulerStep<Functional>>;
+  using Assembler = VariationalFunctionalAssembler<SemiLinearization>;
+  using Matrix = NumaBCRSMatrix<Dune::FieldMatrix<double,1,1>>;
+  using Vector = Dune::BlockVector<Dune::FieldVector<double,1>>;
+  using StateU = typename boost::fusion::result_of::value_at_c<typename State::Sequence,0>::type;
+  using DiagonalMatrix = Dune::BDMatrix<typename Matrix::block_type>;
+
+  Assembler assembler(spaces);
+  State zeroState(state);
+  zeroState *= 0.0;
+
+  SemiImplicitEulerStep<Functional> equation(&F,options.dt);
+  equation.setTau(0.0);
+  F.Mass_stiff(1);
+  assembler.assemble(SemiLinearization(equation,state,state,zeroState),
+                     Assembler::MATRIX|Assembler::RHS,
+                     options.assemblyThreads);
+  Matrix mass = assembler.template get<Matrix>(false);
+
+  equation.setTau(1.0);
+  F.Mass_stiff(0);
+  assembler.assemble(SemiLinearization(equation,state,state,zeroState),
+                     Assembler::MATRIX|Assembler::RHS,
+                     options.assemblyThreads);
+  Matrix stiffness = assembler.template get<Matrix>(false);
+
+  printMatrixDiagnostics(mass,"sdc mass");
+  printMatrixDiagnostics(stiffness,"sdc stiffness");
+  auto const dofNeighborhood = buildMatrixNeighborhood(mass,stiffness);
+
+  for (int step = 0; step < steps; ++step)
+  {
+    double const t = step * options.dt;
+    double const stepEnd = std::min(options.finalTime,t+options.dt);
+    double const stepDt = stepEnd - t;
+    F.time(t);
+
+    RadauTimeGrid grid(options.sdcStartCollocationPoints,t,stepEnd);
+    std::vector<StateU> collocationStates(grid.points().N(),component<0>(state));
+    std::vector<size_t> expandedIndices(nDofs);
+    std::iota(expandedIndices.begin(),expandedIndices.end(),0);
+    std::vector<size_t> compressedIndex(nDofs);
+    std::iota(compressedIndex.begin(),compressedIndex.end(),0);
+
+    double sdcContraction = options.sdcInitialContraction;
+    std::vector<double> sweepNorms;
+    int sweep = 0;
+
+    std::cout << "SDC step " << step+1 << "/" << steps
+              << ", time [" << t << ", " << stepEnd << "]\n";
+
+    for (; sweep < options.maximumSdcSweeps; ++sweep)
+    {
+      size_t const activeDofs = expandedIndices.size();
+      std::vector<Vector> residuals(grid.points().N(),Vector(activeDofs));
+      computeFullSdcResiduals(F,equation,state,collocationStates,grid,expandedIndices,nDofs,
+                              sweep,t,stepDt,assembler,options,residuals);
+
+      SDCTimeGrid::RealMatrix Shat;
+      if (options.sdcSweepType == 0)
+        eulerIntegrationMatrix(grid,Shat);
+      else if (options.sdcSweepType == 1)
+        luIntegrationMatrix(grid,Shat);
+      else
+        throw std::runtime_error("sdcSweepType must be 0 (Euler) or 1 (LU)");
+
+      Matrix activeMass(expandedIndices,compressedIndex,mass);
+      Matrix activeStiffness(expandedIndices,compressedIndex,stiffness);
+      std::vector<Vector> massDifferences(grid.points().N(),Vector(activeDofs));
+      std::vector<Vector> corrections(grid.points().N(),Vector(activeDofs));
+      computeFullMassDifferences(mass,collocationStates,expandedIndices,massDifferences);
+
+      std::vector<DiagonalMatrix> reactionDerivatives(grid.points().N(),DiagonalMatrix(activeDofs));
+      for (auto& derivative : reactionDerivatives)
+        derivative = 0.0;
+
+      auto solver = [&options](Matrix const& J, Vector& du, Vector& rhs) {
+        solveLinearSystem(J,du,rhs,options);
+      };
+
+      sweepNorms.push_back(sdcIterationStepJacobi(grid,Shat,solver,activeMass,activeStiffness,
+                                                  residuals,reactionDerivatives,
+                                                  massDifferences,corrections));
+
+      for (int i = 1; i < grid.points().N(); ++i)
+        for (size_t j = 0; j < activeDofs; ++j)
+          collocationStates[i].coefficients()[expandedIndices[j]] += corrections[i][j];
+
+      State tmpState(state);
+      component<0>(tmpState) = collocationStates.back();
+      Vector tmp(nDofs);
+      Vector sol(nDofs);
+      tmp = 0.0;
+      sol = 0.0;
+      tmpState.write(sol.begin());
+      mass.mv(sol,tmp);
+      double const normU = std::sqrt(std::max(0.0,sol*tmp));
+
+      if (sweepNorms.size() > 1)
+      {
+        double const c = sweepNorms.back()/sweepNorms[sweepNorms.size()-2];
+        sdcContraction = std::sqrt(c*sdcContraction);
+      }
+
+      std::cout << "  sweep " << sweep+1
+                << ": ||du||=" << sweepNorms.back()
+                << ", ||u||=" << normU
+                << ", contraction=" << sdcContraction
+                << ", active dofs=" << activeDofs << "\n";
+
+      bool const reachedMinimumSweeps = sweep+1 >= options.minimumSdcSweeps;
+      bool const smallCorrection = sweepNorms.back() < options.sdcTolerance;
+      bool const reliableContraction = sdcContraction < 1.0;
+      bool const estimatedSmall = reliableContraction
+                               && sweepNorms.back()*sdcContraction/(1.0-sdcContraction) <= options.sdcAbsoluteTolerance;
+      if (reachedMinimumSweeps && (smallCorrection || estimatedSmall))
+        break;
+
+      if (options.algebraicAdaptivity && options.algebraicAdaptivityTolerance > 0.0)
+      {
+        std::set<size_t> nextIndices;
+        for (size_t j = 0; j < activeDofs; ++j)
+        {
+          double duMax = 0.0;
+          for (auto const& correction : corrections)
+            duMax = std::max(duMax,std::abs(correction[j][0]));
+
+          bool const selected = sdcContraction >= 1.0
+                             || sdcContraction*duMax/(1.0-sdcContraction) > options.algebraicAdaptivityTolerance;
+          if (selected)
+          {
+            size_t const globalDof = expandedIndices[j];
+            nextIndices.insert(dofNeighborhood[globalDof].begin(),dofNeighborhood[globalDof].end());
+          }
+        }
+
+        if (nextIndices.empty())
+        {
+          std::cout << "  AA selected no active dofs for the next sweep\n";
+          break;
+        }
+
+        expandedIndices.assign(nextIndices.begin(),nextIndices.end());
+        compressedIndex.assign(nDofs,nDofs);
+        for (size_t i = 0; i < expandedIndices.size(); ++i)
+          compressedIndex[expandedIndices[i]] = i;
+
+        std::cout << "  AA selected active dofs for next sweep: " << expandedIndices.size() << "\n";
+      }
+
+      if (grid.points().N() < options.sdcCollocationPoints+1 && sweep+1 < options.maximumSdcSweeps)
+      {
+        SDCTimeGrid::RealMatrix prolongation;
+        grid.refine(prolongation);
+        std::vector<StateU> refinedStates(grid.points().N(),collocationStates[0]);
+        for (int i = 0; i < static_cast<int>(refinedStates.size()); ++i)
+        {
+          refinedStates[i] = 0.0;
+          for (int j = 0; j < static_cast<int>(collocationStates.size()); ++j)
+            refinedStates[i].axpy(prolongation[i][j],collocationStates[j]);
+        }
+        collocationStates.swap(refinedStates);
+      }
+    }
+
+    component<0>(state) = collocationStates.back();
+    F.time(stepEnd);
+
+    if (options.writeVTK)
+      writeState(state,uAll,options.order,options.outputDir + "/emiSdcStep" + paddedString(step+1,3));
+  }
+
+  return state;
+}
+
 int main(int argc, char* argv[])
 {
   using namespace boost::fusion;
@@ -280,6 +648,17 @@ int main(int argc, char* argv[])
     ("CG_shift", options.cgShift, options.cgShift, "apply constant shift correction after PCG")
     ("vtk", options.writeVTK, options.writeVTK, "write VTK output: 0=no, 1=yes")
     ("diagnostics", options.diagnostics, options.diagnostics, "print per-step vector diagnostics: 0=no, 1=yes")
+    ("sdc", options.sdc, options.sdc, "use SDC time integrator: 0=no, 1=yes")
+    ("sdcCollocationPoints", options.sdcCollocationPoints, options.sdcCollocationPoints, "target number of SDC collocation points")
+    ("sdcStartCollocationPoints", options.sdcStartCollocationPoints, options.sdcStartCollocationPoints, "initial number of SDC collocation points")
+    ("minimumSdcSweeps", options.minimumSdcSweeps, options.minimumSdcSweeps, "minimum number of SDC sweeps")
+    ("maximumSdcSweeps", options.maximumSdcSweeps, options.maximumSdcSweeps, "maximum number of SDC sweeps")
+    ("sdcSweepType", options.sdcSweepType, options.sdcSweepType, "SDC sweep matrix: 0=Euler, 1=LU")
+    ("sdcTolerance", options.sdcTolerance, options.sdcTolerance, "stop SDC when correction norm is below this value")
+    ("sdcAbsoluteTolerance", options.sdcAbsoluteTolerance, options.sdcAbsoluteTolerance, "absolute SDC error-estimate tolerance")
+    ("sdcInitialContraction", options.sdcInitialContraction, options.sdcInitialContraction, "initial SDC contraction estimate")
+    ("algebraicAdaptivity", options.algebraicAdaptivity, options.algebraicAdaptivity, "prepare/run algebraic adaptivity mode: 0=no, 1=yes")
+    ("algebraicAdaptivityTolerance", options.algebraicAdaptivityTolerance, options.algebraicAdaptivityTolerance, "AA dof-selection tolerance; 0 disables selection")
     ("nThreads", options.assemblyThreads, options.assemblyThreads, "assembler threads")
     ("penalty", options.penalty, options.penalty, "boundary penalty")
     ("sigma_i", options.sigmaI, options.sigmaI, "intracellular conductivity")
@@ -293,6 +672,12 @@ int main(int argc, char* argv[])
     throw std::runtime_error("dt must be positive");
   if (options.finalTime < 0.0)
     throw std::runtime_error("finalTime must be nonnegative");
+  if (options.minimumSdcSweeps < 1)
+    throw std::runtime_error("minimumSdcSweeps must be at least 1");
+  if (options.maximumSdcSweeps < options.minimumSdcSweeps)
+    throw std::runtime_error("maximumSdcSweeps must be >= minimumSdcSweeps");
+  if (options.sdcStartCollocationPoints < 1 || options.sdcCollocationPoints < options.sdcStartCollocationPoints)
+    throw std::runtime_error("Require 1 <= sdcStartCollocationPoints <= sdcCollocationPoints");
 
   std::filesystem::create_directories(options.outputDir);
 
@@ -420,6 +805,18 @@ int main(int argc, char* argv[])
                   ? std::min(options.maximumNumberOfTimeSteps,requestedNumberOfTimeSteps)
                   : requestedNumberOfTimeSteps;
   std::cout << "time steps: " << steps << "\n";
+
+  if (options.sdc)
+  {
+    std::cout << "time integrator: SDC\n";
+    u = runFullSdc(F,spaces,u,uAll,nDofs,steps,options);
+    writeState(u,uAll,options.order,options.outputDir + "/emiSDCLast");
+    std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
+    std::cout << "End EMI-only model\n";
+    return 0;
+  }
+
+  std::cout << "time integrator: semi-implicit Euler\n";
   for (int step = 0; step < steps; ++step)
   {
     double const time = step*options.dt;
