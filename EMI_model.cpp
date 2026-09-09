@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -53,7 +54,7 @@ struct EmiOptions
 
   int refinements = 0;
   int order = 1;
-  int maxSteps = 5;
+  int maximumNumberOfTimeSteps = 0;
   int assemblyThreads = 1;
   int maxCGIter = 10000;
   int writeVTK = 1;
@@ -269,7 +270,7 @@ int main(int argc, char* argv[])
     ("dir", options.outputDir, options.outputDir, "output directory")
     ("refine", options.refinements, options.refinements, "uniform mesh refinements")
     ("order", options.order, options.order, "FE polynomial order")
-    ("maxSteps", options.maxSteps, options.maxSteps, "maximum number of time steps")
+    ("maximumNumberOfTimeSteps", options.maximumNumberOfTimeSteps, options.maximumNumberOfTimeSteps, "maximum number of time steps; 0 means automatic from finalTime/dt")
     ("finalTime", options.finalTime, options.finalTime, "final time")
     ("dt", options.dt, options.dt, "time step size")
     ("cgTol", options.cgTol, options.cgTol, "PCG tolerance")
@@ -286,11 +287,23 @@ int main(int argc, char* argv[])
     ("R_extra", options.extraConductance, options.extraConductance, "extracellular interface conductance")
   )) return 0;
 
+  if (options.dt <= 0.0)
+    throw std::runtime_error("dt must be positive");
+  if (options.finalTime < 0.0)
+    throw std::runtime_error("finalTime must be nonnegative");
+
   std::filesystem::create_directories(options.outputDir);
 
   std::cout << "Start EMI-only model\n";
   std::cout << "mesh: " << options.input << "\n";
-  std::cout << "dt: " << options.dt << ", finalTime: " << options.finalTime << ", maxSteps: " << options.maxSteps << "\n";
+  std::cout << "dt: " << options.dt
+            << ", finalTime: " << options.finalTime
+            << ", maximumNumberOfTimeSteps: ";
+  if (options.maximumNumberOfTimeSteps > 0)
+    std::cout << options.maximumNumberOfTimeSteps;
+  else
+    std::cout << "automatic";
+  std::cout << "\n";
 
   std::vector<int> extraTags;
   std::vector<int> intraTags;
@@ -398,9 +411,13 @@ int main(int argc, char* argv[])
   Matrix lhs = assembler.template get<Matrix>(false);
   printMatrixDiagnostics(lhs,"lhs");
 
-  // maxSteps is a debugging safety cap; finalTime/dt determines the requested
-  // physical number of steps.
-  int const steps = std::min(options.maxSteps, static_cast<int>(std::ceil(options.finalTime/options.dt)));
+  int const requestedNumberOfTimeSteps = static_cast<int>(std::ceil(options.finalTime/options.dt));
+  // maximumNumberOfTimeSteps is optional. If it is positive, use it as a
+  // debugging safety cap; otherwise run all steps requested by finalTime/dt.
+  int const steps = options.maximumNumberOfTimeSteps > 0
+                  ? std::min(options.maximumNumberOfTimeSteps,requestedNumberOfTimeSteps)
+                  : requestedNumberOfTimeSteps;
+  std::cout << "time steps: " << steps << "\n";
   for (int step = 0; step < steps; ++step)
   {
     double const time = step*options.dt;
