@@ -628,6 +628,29 @@ namespace EmiBddc
       for (size_t subdomain = 0; subdomain < data.localMatrices.size(); ++subdomain)
         subdomains.emplace_back(static_cast<int>(subdomain),data.localMatrices[subdomain],interfaceAverages);
 
+      if constexpr (requires(Transfer& transfer) {
+                      transfer.setQuantizationBits(0);
+                      transfer.setRestrictEncoding(true);
+                      transfer.setProlongateEncoding(true);
+                      transfer.setRestrictTransform(true);
+                      transfer.setProlongateTransform(true);
+                      transfer.setRestrictBitlengthEncoding(true);
+                      transfer.setProlongateBitlengthEncoding(true);
+                    })
+      {
+        for (auto& subdomain : subdomains)
+        {
+          subdomain.transfer().setQuantizationBits(options.bddcCompressionBits);
+          subdomain.transfer().enableTransform(Kaskade::BDDC::TransformType::DCT);
+          subdomain.transfer().setRestrictEncoding(true);
+          subdomain.transfer().setProlongateEncoding(true);
+          subdomain.transfer().setRestrictTransform(true);
+          subdomain.transfer().setProlongateTransform(true);
+          subdomain.transfer().setRestrictBitlengthEncoding(true);
+          subdomain.transfer().setProlongateBitlengthEncoding(true);
+        }
+      }
+
       std::vector<int> activeIds(subdomains.size());
       std::iota(activeIds.begin(),activeIds.end(),0);
       bool useCgSolver = options.bddcUseCg != 0;

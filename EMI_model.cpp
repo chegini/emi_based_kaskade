@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <boost/timer/timer.hpp>
+#include <cstdint>
 
 #include "dune/grid/config.h"
 #include "dune/grid/uggrid.hh"
@@ -72,6 +73,7 @@ struct EmiOptions
   int algebraicAdaptivity = 0;
   int bddc = 0;
   int bddcCompression = 0;
+  int bddcCompressionBits = 16;
   int bddcIterations = 3000;
   int bddcInterfaceTypes = 7;
   int bddcVerbose = 0;
@@ -669,6 +671,7 @@ int main(int argc, char* argv[])
     ("algebraicAdaptivityTolerance", options.algebraicAdaptivityTolerance, options.algebraicAdaptivityTolerance, "AA dof-selection tolerance; 0 disables selection")
     ("bddc", options.bddc, options.bddc, "use BDDC solver for EMI: 0=no, 1=yes")
     ("bddcCompression", options.bddcCompression, options.bddcCompression, "use quantized BDDC transfer: 0=no, 1=yes")
+    ("bddcCompressionBits", options.bddcCompressionBits, options.bddcCompressionBits, "quantization bits for compressed BDDC transfer")
     ("bddcIterations", options.bddcIterations, options.bddcIterations, "maximum BDDC iterations per time step")
     ("bddcTolerance", options.bddcTolerance, options.bddcTolerance, "BDDC residual tolerance")
     ("bddcInterfaceTypes", options.bddcInterfaceTypes, options.bddcInterfaceTypes, "BDDC interface flags: 1=corner, 2=edge, 4=face, 7=all")
@@ -872,7 +875,7 @@ int main(int argc, char* argv[])
       gridManager.grid(),uSpace,material,lhs,nDofs);
     if (options.bddcCompression)
     {
-      using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double>;
+      using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint16_t,std::uint8_t>;
       u = EmiBddc::runBddc<CompressedTransfer>(F,spaces,u,uAll,bddcData,nDofs,steps,options);
     }
     else
