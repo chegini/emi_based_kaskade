@@ -1,0 +1,11 @@
+*.o
+*.d
+*.d.extended
+._*
+gccerr.txt
+emiModel
+output/
+matlab_dir/
+output/*.vtu
+output/*.vtk
+output/*.m
