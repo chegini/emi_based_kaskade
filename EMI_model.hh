@@ -281,6 +281,9 @@ public:
       if (cellDomain == neighbourDomain || twoExtra || F.massMode == 0)
         return 0.0;
 
+      if (F.massSubmatrix && (cellDomain != F.rowSubmatrix || neighbourDomain != F.colSubmatrix))
+        return 0.0;
+
       Scalar const sign = centerCell ? 1.0 : -1.0;
       return C_m*sign*argT.value*argA.value;
     }
@@ -390,6 +393,14 @@ public:
 
   void Mass_stiff(int mass) { massMode = mass; }
 
+  void setMassSubmatrix(bool enabled) { massSubmatrix = enabled; }
+
+  void setRowColSubdomain(int row, int col)
+  {
+    rowSubmatrix = row;
+    colSubmatrix = col;
+  }
+
   Membrane const& membrane() const { return memb; }
 
   void extracellularMaterials(std::vector<int> const& tags)
@@ -416,6 +427,9 @@ private:
   Spaces const& spaces;
   MembraneModel memb;
   int massMode = 10;
+  bool massSubmatrix = false;
+  int rowSubmatrix = 0;
+  int colSubmatrix = 0;
   std::vector<int> extraTags;
 };
 
