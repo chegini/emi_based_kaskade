@@ -71,6 +71,7 @@ struct EmiOptions
   int sdcSweepType = 1;
   int algebraicAdaptivity = 0;
   int bddc = 0;
+  int bddcCompression = 0;
   int bddcIterations = 3000;
   int bddcInterfaceTypes = 7;
   int bddcVerbose = 0;
@@ -667,6 +668,7 @@ int main(int argc, char* argv[])
     ("algebraicAdaptivity", options.algebraicAdaptivity, options.algebraicAdaptivity, "prepare/run algebraic adaptivity mode: 0=no, 1=yes")
     ("algebraicAdaptivityTolerance", options.algebraicAdaptivityTolerance, options.algebraicAdaptivityTolerance, "AA dof-selection tolerance; 0 disables selection")
     ("bddc", options.bddc, options.bddc, "use BDDC solver for EMI: 0=no, 1=yes")
+    ("bddcCompression", options.bddcCompression, options.bddcCompression, "use quantized BDDC transfer: 0=no, 1=yes")
     ("bddcIterations", options.bddcIterations, options.bddcIterations, "maximum BDDC iterations per time step")
     ("bddcTolerance", options.bddcTolerance, options.bddcTolerance, "BDDC residual tolerance")
     ("bddcInterfaceTypes", options.bddcInterfaceTypes, options.bddcInterfaceTypes, "BDDC interface flags: 1=corner, 2=edge, 4=face, 7=all")
@@ -868,7 +870,13 @@ int main(int argc, char* argv[])
     std::cout << "time integrator: semi-implicit Euler with BDDC\n";
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
       gridManager.grid(),uSpace,material,lhs,nDofs);
-    u = EmiBddc::runBddc(F,spaces,u,uAll,bddcData,nDofs,steps,options);
+    if (options.bddcCompression)
+    {
+      using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double>;
+      u = EmiBddc::runBddc<CompressedTransfer>(F,spaces,u,uAll,bddcData,nDofs,steps,options);
+    }
+    else
+      u = EmiBddc::runBddc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,nDofs,steps,options);
     writeState(u,uAll,options.order,options.outputDir + "/emiBDDCLast");
     std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
     std::cout << "End EMI-only model\n";

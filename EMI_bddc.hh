@@ -567,7 +567,7 @@ namespace EmiBddc
     return state;
   }
 
-  template <class Functional, class Spaces, class State, class Element, class Matrix, class Vector, class Options>
+  template <class Transfer, class Functional, class Spaces, class State, class Element, class Matrix, class Vector, class Options>
   State runBddc(Functional& F,
                 Spaces const& spaces,
                 State state,
@@ -580,7 +580,7 @@ namespace EmiBddc
     using SemiLinearization = Kaskade::SemiLinearizationAtInner<Kaskade::SemiImplicitEulerStep<Functional>>;
     using Assembler = Kaskade::VariationalFunctionalAssembler<SemiLinearization>;
     using TransmissionScalar = double;
-    using BddcSubdomain = Kaskade::BDDC::Subdomain<1,double,double,Kaskade::BDDC::SpaceTransfer<1,double,TransmissionScalar>>;
+    using BddcSubdomain = Kaskade::BDDC::Subdomain<1,double,double,Transfer>;
 
     Kaskade::BDDC::InterfaceAverages<1,int> interfaceAverages(data.sharedDofs,
                                                               data.subdomainSizes,
