@@ -127,6 +127,9 @@ void writeState(VariableSet const& u, Element& uAll, int order, std::string cons
 template <class Matrix, class Vector>
 void applyConstantShift(Matrix const& A, Vector& du, Vector const& rhs)
 {
+  // EMI systems with pure Neumann-type coupling can contain a constant-mode
+  // ambiguity. After PCG, correct only that constant shift without changing
+  // the resolved potential differences.
   Vector ones(du.size());
   Vector Aones(du.size());
   ones = 1.0;
@@ -324,6 +327,9 @@ int main(int argc, char* argv[])
   for (int tag : intraTags)
     domainMap[tag] = static_cast<double>(tag);
 
+  // The piecewise-continuous mapper is what makes EMI possible with one scalar
+  // variable: extracellular regions share one potential, while each
+  // intracellular material tag gets its own disconnected potential component.
   FEFunctionSpace uSpace(gridManager,
                          PiecewiseContinuousLagrangeMapper(gridManager.grid().leafGridView(),
                                                            options.order,
@@ -385,10 +391,15 @@ int main(int argc, char* argv[])
   duState *= 0.0;
   stepState *= 0.0;
 
+  // assemble(f, flags, nThreads): the second argument is a bit mask, not the
+  // thread count. Request MATRIX explicitly, otherwise nThreads=1 assembles
+  // only Assembler::VALUE and leaves a structurally nonempty but zero matrix.
   assembler.assemble(SemiLinearization(equation,u,u,duState),Assembler::MATRIX|Assembler::RHS,options.assemblyThreads);
   Matrix lhs = assembler.template get<Matrix>(false);
   printMatrixDiagnostics(lhs,"lhs");
 
+  // maxSteps is a debugging safety cap; finalTime/dt determines the requested
+  // physical number of steps.
   int const steps = std::min(options.maxSteps, static_cast<int>(std::ceil(options.finalTime/options.dt)));
   for (int step = 0; step < steps; ++step)
   {
