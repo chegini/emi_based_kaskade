@@ -691,8 +691,6 @@ int main(int argc, char* argv[])
     throw std::runtime_error("maximumSdcSweeps must be >= minimumSdcSweeps");
   if (options.sdcStartCollocationPoints < 1 || options.sdcCollocationPoints < options.sdcStartCollocationPoints)
     throw std::runtime_error("Require 1 <= sdcStartCollocationPoints <= sdcCollocationPoints");
-  if (options.bddc && options.sdc)
-    throw std::runtime_error("BDDC+SDC is not enabled yet. Use only one of --bddc 1 or --sdc 1.");
   if (options.bddcIterations < 1)
     throw std::runtime_error("bddcIterations must be at least 1");
   if (options.bddcTolerance <= 0.0)
@@ -824,6 +822,36 @@ int main(int argc, char* argv[])
                   ? std::min(options.maximumNumberOfTimeSteps,requestedNumberOfTimeSteps)
                   : requestedNumberOfTimeSteps;
   std::cout << "time steps: " << steps << "\n";
+
+  if (options.sdc && options.bddc)
+  {
+    std::cout << "time integrator: SDC with BDDC linear solves\n";
+
+    equation.setTau(0.0);
+    F.Mass_stiff(1);
+    assembler.assemble(SemiLinearization(equation,u,u,duState),
+                       Assembler::MATRIX|Assembler::RHS,
+                       options.assemblyThreads);
+    Matrix mass = assembler.template get<Matrix>(false);
+
+    equation.setTau(1.0);
+    F.Mass_stiff(0);
+    assembler.assemble(SemiLinearization(equation,u,u,duState),
+                       Assembler::MATRIX|Assembler::RHS,
+                       options.assemblyThreads);
+    Matrix stiffness = assembler.template get<Matrix>(false);
+
+    printMatrixDiagnostics(mass,"sdc mass");
+    printMatrixDiagnostics(stiffness,"sdc stiffness");
+
+    auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
+      gridManager.grid(),uSpace,material,lhs,nDofs);
+    u = EmiBddc::runBddcSdc(F,spaces,u,uAll,bddcData,mass,stiffness,nDofs,steps,options);
+    writeState(u,uAll,options.order,options.outputDir + "/emiSDCBDDCLast");
+    std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
+    std::cout << "End EMI-only model\n";
+    return 0;
+  }
 
   if (options.sdc)
   {
