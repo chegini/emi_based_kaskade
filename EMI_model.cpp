@@ -39,6 +39,7 @@
 
 #include "fem/diffops/membraneModels.hh"
 
+#include "EMI_bddc.hh"
 #include "EMI_model.hh"
 
 using namespace Kaskade;
@@ -69,6 +70,11 @@ struct EmiOptions
   int maximumSdcSweeps = 5;
   int sdcSweepType = 1;
   int algebraicAdaptivity = 0;
+  int bddc = 0;
+  int bddcIterations = 3000;
+  int bddcInterfaceTypes = 7;
+  int bddcVerbose = 0;
+  int bddcUseCg = 1;
 
   double finalTime = 0.01;
   double dt = 0.01;
@@ -77,6 +83,7 @@ struct EmiOptions
   double sdcAbsoluteTolerance = 1e-12;
   double sdcInitialContraction = 0.2;
   double algebraicAdaptivityTolerance = 0.0;
+  double bddcTolerance = 1e-8;
   double penalty = 1e6;
   double sigmaI = 3.0;
   double sigmaE = 20.0;
@@ -659,6 +666,12 @@ int main(int argc, char* argv[])
     ("sdcInitialContraction", options.sdcInitialContraction, options.sdcInitialContraction, "initial SDC contraction estimate")
     ("algebraicAdaptivity", options.algebraicAdaptivity, options.algebraicAdaptivity, "prepare/run algebraic adaptivity mode: 0=no, 1=yes")
     ("algebraicAdaptivityTolerance", options.algebraicAdaptivityTolerance, options.algebraicAdaptivityTolerance, "AA dof-selection tolerance; 0 disables selection")
+    ("bddc", options.bddc, options.bddc, "use BDDC solver for EMI: 0=no, 1=yes")
+    ("bddcIterations", options.bddcIterations, options.bddcIterations, "maximum BDDC iterations per time step")
+    ("bddcTolerance", options.bddcTolerance, options.bddcTolerance, "BDDC residual tolerance")
+    ("bddcInterfaceTypes", options.bddcInterfaceTypes, options.bddcInterfaceTypes, "BDDC interface flags: 1=corner, 2=edge, 4=face, 7=all")
+    ("bddcVerbose", options.bddcVerbose, options.bddcVerbose, "print BDDC iteration residuals: 0=no, 1=yes")
+    ("bddcUseCg", options.bddcUseCg, options.bddcUseCg, "use CG in BDDC coarse solve path: 0=no, 1=yes")
     ("nThreads", options.assemblyThreads, options.assemblyThreads, "assembler threads")
     ("penalty", options.penalty, options.penalty, "boundary penalty")
     ("sigma_i", options.sigmaI, options.sigmaI, "intracellular conductivity")
@@ -678,6 +691,12 @@ int main(int argc, char* argv[])
     throw std::runtime_error("maximumSdcSweeps must be >= minimumSdcSweeps");
   if (options.sdcStartCollocationPoints < 1 || options.sdcCollocationPoints < options.sdcStartCollocationPoints)
     throw std::runtime_error("Require 1 <= sdcStartCollocationPoints <= sdcCollocationPoints");
+  if (options.bddc && options.sdc)
+    throw std::runtime_error("BDDC+SDC is not enabled yet. Use only one of --bddc 1 or --sdc 1.");
+  if (options.bddcIterations < 1)
+    throw std::runtime_error("bddcIterations must be at least 1");
+  if (options.bddcTolerance <= 0.0)
+    throw std::runtime_error("bddcTolerance must be positive");
 
   std::filesystem::create_directories(options.outputDir);
 
@@ -811,6 +830,18 @@ int main(int argc, char* argv[])
     std::cout << "time integrator: SDC\n";
     u = runFullSdc(F,spaces,u,uAll,nDofs,steps,options);
     writeState(u,uAll,options.order,options.outputDir + "/emiSDCLast");
+    std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
+    std::cout << "End EMI-only model\n";
+    return 0;
+  }
+
+  if (options.bddc)
+  {
+    std::cout << "time integrator: semi-implicit Euler with BDDC\n";
+    auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
+      gridManager.grid(),uSpace,material,lhs,nDofs);
+    u = EmiBddc::runBddc(F,spaces,u,uAll,bddcData,nDofs,steps,options);
+    writeState(u,uAll,options.order,options.outputDir + "/emiBDDCLast");
     std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
     std::cout << "End EMI-only model\n";
     return 0;
