@@ -30,6 +30,7 @@ namespace EmiBddc
     std::vector<int> tags;
     std::vector<std::vector<size_t>> localDofs;
     std::vector<std::vector<Kaskade::BDDC::LocalDof>> sharedDofs;
+    std::vector<std::vector<int>> dofSubdomains;
     std::vector<int> subdomainSizes;
     std::vector<Matrix> localMatrices;
     std::vector<Vector> weights;
@@ -81,6 +82,11 @@ namespace EmiBddc
     for (auto const& occurrence : dofOccurrences)
       if (occurrence.size() > 1)
         data.sharedDofs.push_back(occurrence);
+
+    data.dofSubdomains.resize(nDofs);
+    for (size_t global = 0; global < dofOccurrences.size(); ++global)
+      for (auto const& occurrence : dofOccurrences[global])
+        data.dofSubdomains[global].push_back(occurrence.s);
 
     if (data.sharedDofs.empty() && data.tags.size() > 1)
       throw std::runtime_error("BDDC setup found multiple subdomains but no shared dofs.");
@@ -150,6 +156,82 @@ namespace EmiBddc
         global[globalDof] += data.weights[subdomain][i][0] * local[subdomain][i];
       }
     return global;
+  }
+
+  template <class Matrix>
+  void addMatrixNeighborhood(Matrix const& A, std::vector<std::vector<size_t>>& dofNeighborhood)
+  {
+    for (size_t row = 0; row < A.N(); ++row)
+    {
+      dofNeighborhood[row].push_back(row);
+      for (auto col = A[row].begin(); col != A[row].end(); ++col)
+      {
+        dofNeighborhood[row].push_back(col.index());
+        if (col.index() < dofNeighborhood.size())
+          dofNeighborhood[col.index()].push_back(row);
+      }
+    }
+  }
+
+  template <class Matrix>
+  std::vector<std::vector<size_t>> buildMatrixNeighborhood(Matrix const& mass, Matrix const& stiffness)
+  {
+    std::vector<std::vector<size_t>> dofNeighborhood(mass.N());
+    addMatrixNeighborhood(mass,dofNeighborhood);
+    addMatrixNeighborhood(stiffness,dofNeighborhood);
+
+    for (auto& neighbors : dofNeighborhood)
+    {
+      std::sort(neighbors.begin(),neighbors.end());
+      neighbors.erase(std::unique(neighbors.begin(),neighbors.end()),neighbors.end());
+    }
+
+    return dofNeighborhood;
+  }
+
+  inline std::vector<int> allSubdomains(size_t nSubdomains)
+  {
+    std::vector<int> activeIds(nSubdomains);
+    std::iota(activeIds.begin(),activeIds.end(),0);
+    return activeIds;
+  }
+
+  template <class Matrix, class Vector, class Options>
+  std::vector<int> selectActiveSubdomains(BddcData<Matrix,Vector> const& data,
+                                          std::vector<std::vector<Vector>> const& corrections,
+                                          std::vector<int> const& activeIds,
+                                          std::vector<std::vector<size_t>> const& dofNeighborhood,
+                                          double sdcContraction,
+                                          Options const& options)
+  {
+    if (!options.algebraicAdaptivity || options.algebraicAdaptivityTolerance <= 0.0)
+      return allSubdomains(data.localDofs.size());
+
+    std::set<int> nextActiveIds;
+    for (int subdomain : activeIds)
+    {
+      for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
+      {
+        double duMax = 0.0;
+        for (auto const& pointCorrections : corrections)
+          duMax = std::max(duMax,std::abs(pointCorrections[subdomain][local][0]));
+
+        bool const selected = sdcContraction >= 1.0
+                           || sdcContraction*duMax/(1.0-sdcContraction) > options.algebraicAdaptivityTolerance;
+        if (!selected)
+          continue;
+
+        // BDDC subproblems are assembled and constrained subdomain-wise.
+        // Therefore AA may detect activity at one dof, but the next solve must
+        // activate every local dof of each touched owner subdomain.
+        size_t const globalDof = data.localDofs[subdomain][local];
+        for (size_t neighborDof : dofNeighborhood[globalDof])
+          for (int owner : data.dofSubdomains[neighborDof])
+            nextActiveIds.insert(owner);
+      }
+    }
+
+    return std::vector<int>(nextActiveIds.begin(),nextActiveIds.end());
   }
 
   template <class Functional, class State, class StateU, class TimeGrid, class Assembler, class Matrix, class Vector, class Options>
@@ -264,6 +346,7 @@ namespace EmiBddc
                                                    std::vector<std::vector<Vector>> const& residuals,
                                                    std::vector<std::vector<Vector>> const& massDifferences,
                                                    std::vector<std::vector<Vector>>& corrections,
+                                                   std::vector<int> const& activeIds,
                                                    Options const& options)
   {
     using TransmissionScalar = double;
@@ -281,8 +364,7 @@ namespace EmiBddc
                                                               data.subdomainSizes,
                                                               options.bddcInterfaceTypes);
 
-    std::vector<int> activeIds(data.localDofs.size());
-    std::iota(activeIds.begin(),activeIds.end(),0);
+    std::vector<int> solverActiveIds(activeIds);
     bool useCgSolver = options.bddcUseCg != 0;
     bool verbose = options.bddcVerbose != 0;
 
@@ -323,7 +405,7 @@ namespace EmiBddc
 
       Kaskade::BDDC::BDDCSolver<BddcSubdomain> solver(subdomains,
                                                       interfaceAverages.coarseConstraints(),
-                                                      activeIds,
+                                                      solverActiveIds,
                                                       useCgSolver,
                                                       verbose);
       solver.setRhs(rhs);
@@ -337,7 +419,7 @@ namespace EmiBddc
           break;
       }
 
-      for (size_t subdomain = 0; subdomain < subdomains.size(); ++subdomain)
+      for (int subdomain : activeIds)
         corrections[i][subdomain] = subdomains[subdomain].getSolution();
 
       if (verbose)
@@ -345,7 +427,7 @@ namespace EmiBddc
                   << ": iterations=" << std::min(iteration+1,options.bddcIterations)
                   << ", residual=" << residual << "\n";
 
-      for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
+      for (int subdomain : activeIds)
         norm += (points[i]-points[i-1]) * (corrections[i][subdomain] * rhs[subdomain]);
     }
 
@@ -368,11 +450,9 @@ namespace EmiBddc
     using Assembler = Kaskade::VariationalFunctionalAssembler<SemiLinearization>;
     using StateU = typename boost::fusion::result_of::value_at_c<typename State::Sequence,0>::type;
 
-    if (options.algebraicAdaptivity)
-      throw std::runtime_error("BDDC+SDC algebraic adaptivity is not enabled yet. Run without --algebraicAdaptivity.");
-
     auto const localMassMatrices = extractLocalMatrices(data,mass);
     auto const localStiffnessMatrices = extractLocalMatrices(data,stiffness);
+    auto const dofNeighborhood = buildMatrixNeighborhood(mass,stiffness);
 
     Assembler assembler(spaces);
     Kaskade::SemiImplicitEulerStep<Functional> equation(&F,options.dt);
@@ -388,6 +468,7 @@ namespace EmiBddc
       std::vector<StateU> collocationStates(grid.points().N(),Kaskade::component<0>(state));
       double sdcContraction = options.sdcInitialContraction;
       std::vector<double> sweepNorms;
+      std::vector<int> activeIds = allSubdomains(data.localDofs.size());
       int sweep = 0;
 
       std::cout << "BDDC+SDC step " << step+1 << "/" << steps
@@ -422,7 +503,7 @@ namespace EmiBddc
           }
 
         sweepNorms.push_back(sdcIterationStepBddc(grid,Shat,data,localMassMatrices,localStiffnessMatrices,
-                                                  residuals,massDifferences,corrections,options));
+                                                  residuals,massDifferences,corrections,activeIds,options));
 
         for (int i = 1; i < grid.points().N(); ++i)
         {
@@ -439,7 +520,8 @@ namespace EmiBddc
 
         std::cout << "  sweep " << sweep+1
                   << ": ||du||=" << sweepNorms.back()
-                  << ", contraction=" << sdcContraction << "\n";
+                  << ", contraction=" << sdcContraction
+                  << ", active subdomains=" << activeIds.size() << "\n";
 
         bool const reachedMinimumSweeps = sweep+1 >= options.minimumSdcSweeps;
         bool const smallCorrection = sweepNorms.back() < options.sdcTolerance;
@@ -448,6 +530,20 @@ namespace EmiBddc
                                  && sweepNorms.back()*sdcContraction/(1.0-sdcContraction) <= options.sdcAbsoluteTolerance;
         if (reachedMinimumSweeps && (smallCorrection || estimatedSmall))
           break;
+
+        std::vector<int> nextActiveIds = selectActiveSubdomains(data,corrections,activeIds,
+                                                                dofNeighborhood,sdcContraction,options);
+        if (options.algebraicAdaptivity && options.algebraicAdaptivityTolerance > 0.0)
+        {
+          if (nextActiveIds.empty())
+          {
+            std::cout << "  AA selected no active subdomains for the next sweep\n";
+            break;
+          }
+          std::cout << "  AA selected active subdomains for next sweep: "
+                    << nextActiveIds.size() << "\n";
+        }
+        activeIds.swap(nextActiveIds);
 
         if (grid.points().N() < options.sdcCollocationPoints+1 && sweep+1 < options.maximumSdcSweeps)
         {
