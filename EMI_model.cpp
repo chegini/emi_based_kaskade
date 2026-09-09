@@ -58,6 +58,7 @@ struct EmiOptions
   int assemblyThreads = 1;
   int maxCGIter = 10000;
   int writeVTK = 1;
+  int diagnostics = 0;
 
   double finalTime = 0.01;
   double dt = 0.01;
@@ -278,6 +279,7 @@ int main(int argc, char* argv[])
     ("direct", options.direct, options.direct, "use direct solver instead of PCG")
     ("CG_shift", options.cgShift, options.cgShift, "apply constant shift correction after PCG")
     ("vtk", options.writeVTK, options.writeVTK, "write VTK output: 0=no, 1=yes")
+    ("diagnostics", options.diagnostics, options.diagnostics, "print per-step vector diagnostics: 0=no, 1=yes")
     ("nThreads", options.assemblyThreads, options.assemblyThreads, "assembler threads")
     ("penalty", options.penalty, options.penalty, "boundary penalty")
     ("sigma_i", options.sigmaI, options.sigmaI, "intracellular conductivity")
@@ -429,7 +431,8 @@ int main(int argc, char* argv[])
     Vector rhsVector(nDofs);
     Vector stepVector(nDofs);
     rhs.write(rhsVector.begin());
-    printVectorDiagnostics(rhsVector,"rhs");
+    if (options.diagnostics)
+      printVectorDiagnostics(rhsVector,"rhs");
 
     std::cout << "EMI step " << step+1 << "/" << steps << "\n";
     solveLinearSystem(lhs,stepVector,rhsVector,options);
