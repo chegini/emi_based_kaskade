@@ -381,8 +381,30 @@ std::vector<std::vector<size_t>> buildMatrixNeighborhood(Matrix const& mass, Mat
   return dofNeighborhood;
 }
 
-template <class Functional, class State, class StateU, class TimeGrid, class Assembler, class Vector>
-void computeFullSdcResiduals(Functional& F,
+// Build the inverse element-to-DOF relation once. A filtered residual must
+// include every element that contributes to an active residual row.
+template <class Space>
+std::vector<std::vector<size_t>> buildDofCellMap(Space const& space, size_t nDofs)
+{
+  std::vector<std::vector<size_t>> dofCells(nDofs);
+  for (auto const& cell : elements(space.gridView()))
+  {
+    size_t const cellIndex = space.indexSet().index(cell);
+    for (size_t dof : space.mapper().globalIndices(cell))
+      if (dof < nDofs)
+        dofCells[dof].push_back(cellIndex);
+  }
+
+  for (auto& cells : dofCells)
+  {
+    std::sort(cells.begin(),cells.end());
+    cells.erase(std::unique(cells.begin(),cells.end()),cells.end());
+  }
+  return dofCells;
+}
+
+template <class Functional, class State, class StateU, class TimeGrid, class Assembler, class Vector, class IndexSet>
+void computeSdcResiduals(Functional& F,
                              SemiImplicitEulerStep<Functional>& equation,
                              State const& stateAtStart,
                              std::vector<StateU> const& collocationStates,
@@ -394,6 +416,8 @@ void computeFullSdcResiduals(Functional& F,
                              double dt,
                              Assembler& assembler,
                              EmiOptions const& options,
+                             std::vector<std::vector<size_t>> const& dofCells,
+                             IndexSet const& indexSet,
                              std::vector<Vector>& residuals)
 {
   using SemiLinearization = SemiLinearizationAtInner<SemiImplicitEulerStep<Functional>>;
@@ -404,6 +428,16 @@ void computeFullSdcResiduals(Functional& F,
   equation.setTau(dt);
   F.Mass_stiff(0);
   Vector fullResidual(nDofs);
+
+  bool const allDofsActive = expandedIndices.size() == nDofs;
+  std::vector<char> activeCells;
+  if (!allDofsActive)
+  {
+    activeCells.assign(indexSet.size(0),0);
+    for (size_t dof : expandedIndices)
+      for (size_t cell : dofCells[dof])
+        activeCells[cell] = 1;
+  }
 
   auto const& points = grid.points();
   for (int i = 0; i < points.N(); ++i)
@@ -416,9 +450,24 @@ void computeFullSdcResiduals(Functional& F,
 
     F.time(t + points[i] - points[0]);
     boost::fusion::at_c<0>(stateTmp.data) = collocationStates[i];
-    assembler.assemble(SemiLinearization(equation,stateTmp,stateTmp,dstateTmp),
-                       Assembler::RHS,
-                       options.assemblyThreads);
+    if (allDofsActive)
+    {
+      assembler.assemble(SemiLinearization(equation,stateTmp,stateTmp,dstateTmp),
+                         Assembler::RHS,
+                         options.assemblyThreads);
+    }
+    else
+    {
+      auto cellFilter = [&activeCells,&indexSet](auto const& cell)
+      {
+        return activeCells[indexSet.index(cell)] != 0;
+      };
+      assembler.template assemble<AssemblyDetail::TakeAllBlocks>(
+                         SemiLinearization(equation,stateTmp,stateTmp,dstateTmp),
+                         cellFilter,
+                         Assembler::RHS,
+                         options.assemblyThreads);
+    }
 
     auto rhs = assembler.rhs();
     rhs.write(fullResidual.begin());
@@ -452,12 +501,14 @@ void computeFullMassDifferences(Matrix const& M,
   }
 }
 
-template <class Functional, class Spaces, class State, class Element>
+template <class Functional, class Spaces, class State, class Element, class IndexSet>
 State runFullSdc(Functional& F,
                  Spaces const& spaces,
                  State state,
                  Element& uAll,
                  size_t nDofs,
+                 std::vector<std::vector<size_t>> const& dofCells,
+                 IndexSet const& indexSet,
                  int steps,
                  EmiOptions const& options)
 {
@@ -516,8 +567,8 @@ State runFullSdc(Functional& F,
     {
       size_t const activeDofs = expandedIndices.size();
       std::vector<Vector> residuals(grid.points().N(),Vector(activeDofs));
-      computeFullSdcResiduals(F,equation,state,collocationStates,grid,expandedIndices,nDofs,
-                              sweep,t,stepDt,assembler,options,residuals);
+      computeSdcResiduals(F,equation,state,collocationStates,grid,expandedIndices,nDofs,
+                              sweep,t,stepDt,assembler,options,dofCells,indexSet,residuals);
 
       SDCTimeGrid::RealMatrix Shat;
       if (options.sdcSweepType == 0)
@@ -798,6 +849,7 @@ int main(int argc, char* argv[])
   F.template scaleInitialValue<0>(InitialValue(material,excitedTags),u);
 
   size_t const nDofs = variableSetDesc.degreesOfFreedom(0,Functional::AnsatzVars::noOfVariables);
+  auto const dofCells = buildDofCellMap(uSpace,nDofs);
   std::cout << "cells: " << gridManager.grid().size(0) << "\n";
   std::cout << "dofs: " << nDofs << "\n";
 
@@ -870,7 +922,7 @@ int main(int argc, char* argv[])
   if (options.sdc)
   {
     std::cout << "time integrator: SDC\n";
-    u = runFullSdc(F,spaces,u,uAll,nDofs,steps,options);
+    u = runFullSdc(F,spaces,u,uAll,nDofs,dofCells,uSpace.indexSet(),steps,options);
     writeState(u,uAll,options.order,options.outputDir + "/emiSDCLast");
     std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
     std::cout << "End EMI-only model\n";
