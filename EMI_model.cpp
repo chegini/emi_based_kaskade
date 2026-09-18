@@ -906,10 +906,10 @@ int main(int argc, char* argv[])
     if (options.bddcCompression)
     {
       using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint16_t,std::uint8_t>;
-      u = EmiBddc::runBddcSdc<CompressedTransfer>(F,spaces,u,uAll,bddcData,mass,stiffness,nDofs,steps,options);
+      u = EmiBddc::runBddcSdc<CompressedTransfer>(F,spaces,u,uAll,bddcData,mass,stiffness,nDofs,steps,options,uSpace.indexSet());
     }
     else
-      u = EmiBddc::runBddcSdc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,mass,stiffness,nDofs,steps,options);
+      u = EmiBddc::runBddcSdc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,mass,stiffness,nDofs,steps,options,uSpace.indexSet());
     writeState(u,uAll,options.order,
                options.outputDir + (options.bddcCompression
                                       ? "/emiSDCBDDCLastCompression"
