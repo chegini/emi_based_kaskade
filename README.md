@@ -7,7 +7,7 @@ optional compressed BDDC interface transfer.
 The old project and old compression tree are separate:
 
 ```text
-emiModelBddcSdc_new_scratch  -> kaskade7_new
+emiModelBddcSdc  -> kaskade7_new
 emiModelBddcSdc_new           -> kaskade7_compression
 ```
 
@@ -15,20 +15,31 @@ The old `kaskade7_compression` tree must not be modified by this project.
 
 ## Podman environment
 
-Run this command on `chill` from any directory:
+Set these two host paths first:
+
+```bash
+PATH_TO_KASKADE=/path/to/kaskade7_new
+PATH_TO_PARENT_PROJECT=/path/to/BDDC
+PATH_TO_BUILD_ENVIRONMENT=/path/to/kaskade7-build-environment.tar.gz
+```
+
+Here, `PATH_TO_PARENT_PROJECT` is the parent directory that contains
+`emiModelBddcSdc` and `input_emi_mesh`.
+
+Run this command from any directory:
 
 ```bash
 podman run -it --rm \
-  -v /data/numerik/people/fchegini/kaskade7_new:/kaskade7 \
-  -v /data/numerik/people/fchegini/project/fatemeh/MicroCard/current_papers/BDDC_petsc_SDC_2023/gatevariables/20Nov2023/BDDC:/BDDC \
-  -w /BDDC/emiModelBddcSdc_new_scratch \
+  -v "${PATH_TO_KASKADE}:/kaskade7" \
+  -v "${PATH_TO_PARENT_PROJECT}:/BDDC" \
+  -w /BDDC/emiModelBddcSdc \
   localhost/kaskade7-build-environment:latest
 ```
 
 If the image has not been loaded:
 
 ```bash
-gunzip -c /data/numerik/people/fchegini/kaskade7-build-environment.tar.gz | \
+gunzip -c "${PATH_TO_BUILD_ENVIRONMENT}" | \
   podman load
 ```
 
