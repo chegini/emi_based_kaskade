@@ -31,6 +31,7 @@ namespace EmiBddc
     std::vector<std::vector<size_t>> localDofs;
     std::vector<std::vector<Kaskade::BDDC::LocalDof>> sharedDofs;
     std::vector<std::vector<int>> dofSubdomains;
+    std::vector<std::vector<size_t>> dofCells;
     std::vector<int> subdomainSizes;
     std::vector<Matrix> localMatrices;
     std::vector<Vector> weights;
@@ -60,6 +61,20 @@ namespace EmiBddc
       throw std::runtime_error("BDDC setup found no material subdomains.");
 
     BddcData<Matrix,Vector> data;
+    data.dofCells.resize(nDofs);
+    for (auto const& cell : Dune::elements(grid.leafGridView()))
+    {
+      size_t const cellIndex = space.indexSet().index(cell);
+      for (size_t dof : space.mapper().globalIndices(cell))
+        if (dof < nDofs)
+          data.dofCells[dof].push_back(cellIndex);
+    }
+    for (auto& cells : data.dofCells)
+    {
+      std::sort(cells.begin(),cells.end());
+      cells.erase(std::unique(cells.begin(),cells.end()),cells.end());
+    }
+
     data.tags.reserve(dofsByTag.size());
     data.localDofs.reserve(dofsByTag.size());
     data.subdomainSizes.reserve(dofsByTag.size());
@@ -260,8 +275,8 @@ namespace EmiBddc
     return std::vector<int>(nextActiveIds.begin(),nextActiveIds.end());
   }
 
-  template <class Functional, class State, class StateU, class TimeGrid, class Assembler, class Matrix, class Vector, class Options>
-  void computeBddcSdcResiduals(Functional& F,
+template <class Functional, class State, class StateU, class TimeGrid, class Assembler, class Matrix, class Vector, class Options, class IndexSet>
+void computeBddcSdcResiduals(Functional& F,
                                Kaskade::SemiImplicitEulerStep<Functional>& equation,
                                State const& stateAtStart,
                                std::vector<StateU> const& collocationStates,
@@ -273,6 +288,8 @@ namespace EmiBddc
                                double dt,
                                Assembler& assembler,
                                Options const& options,
+                               std::vector<int> const& activeIds,
+                               IndexSet const& indexSet,
                                std::vector<std::vector<Vector>>& residuals)
   {
     using SemiLinearization = Kaskade::SemiLinearizationAtInner<Kaskade::SemiImplicitEulerStep<Functional>>;
@@ -283,6 +300,17 @@ namespace EmiBddc
     equation.setTau(dt);
     F.Mass_stiff(0);
     Vector fullResidual(nDofs);
+
+    bool const allSubdomainsActive = activeIds.size() == data.localDofs.size();
+    std::vector<char> activeCells;
+    if (!allSubdomainsActive)
+    {
+      activeCells.assign(indexSet.size(0),0);
+      for (int subdomain : activeIds)
+        for (size_t globalDof : data.localDofs[subdomain])
+          for (size_t cell : data.dofCells[globalDof])
+            activeCells[cell] = 1;
+    }
 
     auto const& points = grid.points();
     for (int i = 0; i < points.N(); ++i)
@@ -295,9 +323,24 @@ namespace EmiBddc
 
       F.time(t + points[i] - points[0]);
       boost::fusion::at_c<0>(stateTmp.data) = collocationStates[i];
-      assembler.assemble(SemiLinearization(equation,stateTmp,stateTmp,dstateTmp),
-                         Assembler::RHS,
-                         options.assemblyThreads);
+      if (allSubdomainsActive)
+      {
+        assembler.assemble(SemiLinearization(equation,stateTmp,stateTmp,dstateTmp),
+                           Assembler::RHS,
+                           options.assemblyThreads);
+      }
+      else
+      {
+        auto cellFilter = [&activeCells,&indexSet](auto const& cell)
+        {
+          return activeCells[indexSet.index(cell)] != 0;
+        };
+        assembler.template assemble<Kaskade::AssemblyDetail::TakeAllBlocks>(
+                           SemiLinearization(equation,stateTmp,stateTmp,dstateTmp),
+                           cellFilter,
+                           Assembler::RHS,
+                           options.assemblyThreads);
+      }
 
       auto rhs = assembler.rhs();
       rhs.write(fullResidual.begin());
@@ -462,8 +505,8 @@ namespace EmiBddc
     return std::sqrt(std::max<typename Matrix::field_type>(0.0,norm/(points[intervals]-points[0])));
   }
 
-  template <class Transfer, class Functional, class Spaces, class State, class Element, class Matrix, class Vector, class Options>
-  State runBddcSdc(Functional& F,
+template <class Transfer, class Functional, class Spaces, class State, class Element, class Matrix, class Vector, class Options, class IndexSet>
+State runBddcSdc(Functional& F,
                    Spaces const& spaces,
                    State state,
                    Element&,
@@ -472,7 +515,8 @@ namespace EmiBddc
                    Matrix const& stiffness,
                    size_t nDofs,
                    int steps,
-                   Options const& options)
+                   Options const& options,
+                   IndexSet const& indexSet)
   {
     using SemiLinearization = Kaskade::SemiLinearizationAtInner<Kaskade::SemiImplicitEulerStep<Functional>>;
     using Assembler = Kaskade::VariationalFunctionalAssembler<SemiLinearization>;
@@ -506,7 +550,7 @@ namespace EmiBddc
       {
         std::vector<std::vector<Vector>> residuals(grid.points().N());
         computeBddcSdcResiduals(F,equation,state,collocationStates,grid,data,nDofs,
-                                sweep,t,stepDt,assembler,options,residuals);
+                                sweep,t,stepDt,assembler,options,activeIds,indexSet,residuals);
 
         Kaskade::SDCTimeGrid::RealMatrix Shat;
         if (options.sdcSweepType == 0)
