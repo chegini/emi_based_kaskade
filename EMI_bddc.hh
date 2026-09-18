@@ -196,6 +196,32 @@ namespace EmiBddc
     return activeIds;
   }
 
+  // Configure compression only for transfer types that provide the optional
+  // compression API. The ordinary SpaceTransfer remains unchanged.
+  template <class Transfer, class Options>
+  void configureTransfer(Transfer& transfer, Options const& options)
+  {
+    if constexpr (requires(Transfer& candidate) {
+                    candidate.setQuantizationBits(0);
+                    candidate.setRestrictEncoding(true);
+                    candidate.setProlongateEncoding(true);
+                    candidate.setRestrictTransform(true);
+                    candidate.setProlongateTransform(true);
+                    candidate.setRestrictBitlengthEncoding(true);
+                    candidate.setProlongateBitlengthEncoding(true);
+                  })
+    {
+      transfer.setQuantizationBits(options.bddcCompressionBits);
+      transfer.enableTransform(Kaskade::BDDC::TransformType::DCT);
+      transfer.setRestrictEncoding(true);
+      transfer.setProlongateEncoding(true);
+      transfer.setRestrictTransform(true);
+      transfer.setProlongateTransform(true);
+      transfer.setRestrictBitlengthEncoding(true);
+      transfer.setProlongateBitlengthEncoding(true);
+    }
+  }
+
   template <class Matrix, class Vector, class Options>
   std::vector<int> selectActiveSubdomains(BddcData<Matrix,Vector> const& data,
                                           std::vector<std::vector<Vector>> const& corrections,
@@ -337,7 +363,7 @@ namespace EmiBddc
     }
   }
 
-  template <class Matrix, class Vector, class Options>
+  template <class Transfer, class Matrix, class Vector, class Options>
   typename Matrix::field_type sdcIterationStepBddc(Kaskade::SDCTimeGrid const& grid,
                                                    Kaskade::SDCTimeGrid::RealMatrix const& Shat,
                                                    BddcData<Matrix,Vector> const& data,
@@ -349,8 +375,7 @@ namespace EmiBddc
                                                    std::vector<int> const& activeIds,
                                                    Options const& options)
   {
-    using TransmissionScalar = double;
-    using BddcSubdomain = Kaskade::BDDC::Subdomain<1,double,double,Kaskade::BDDC::SpaceTransfer<1,double,TransmissionScalar>>;
+    using BddcSubdomain = Kaskade::BDDC::Subdomain<1,double,double,Transfer>;
 
     auto const& points = grid.points();
     int const intervals = points.size()-1;
@@ -403,6 +428,9 @@ namespace EmiBddc
       for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
         subdomains.emplace_back(static_cast<int>(subdomain),localJ[subdomain],interfaceAverages);
 
+      for (auto& subdomain : subdomains)
+        configureTransfer(subdomain.transfer(),options);
+
       Kaskade::BDDC::BDDCSolver<BddcSubdomain> solver(subdomains,
                                                       interfaceAverages.coarseConstraints(),
                                                       solverActiveIds,
@@ -434,7 +462,7 @@ namespace EmiBddc
     return std::sqrt(std::max<typename Matrix::field_type>(0.0,norm/(points[intervals]-points[0])));
   }
 
-  template <class Functional, class Spaces, class State, class Element, class Matrix, class Vector, class Options>
+  template <class Transfer, class Functional, class Spaces, class State, class Element, class Matrix, class Vector, class Options>
   State runBddcSdc(Functional& F,
                    Spaces const& spaces,
                    State state,
@@ -502,8 +530,8 @@ namespace EmiBddc
             pointData.back() = 0.0;
           }
 
-        sweepNorms.push_back(sdcIterationStepBddc(grid,Shat,data,localMassMatrices,localStiffnessMatrices,
-                                                  residuals,massDifferences,corrections,activeIds,options));
+        sweepNorms.push_back(sdcIterationStepBddc<Transfer>(grid,Shat,data,localMassMatrices,localStiffnessMatrices,
+                                                            residuals,massDifferences,corrections,activeIds,options));
 
         for (int i = 1; i < grid.points().N(); ++i)
         {

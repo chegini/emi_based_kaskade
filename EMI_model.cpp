@@ -851,8 +851,17 @@ int main(int argc, char* argv[])
 
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
       gridManager.grid(),uSpace,material,lhs,nDofs);
-    u = EmiBddc::runBddcSdc(F,spaces,u,uAll,bddcData,mass,stiffness,nDofs,steps,options);
-    writeState(u,uAll,options.order,options.outputDir + "/emiSDCBDDCLast");
+    if (options.bddcCompression)
+    {
+      using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint16_t,std::uint8_t>;
+      u = EmiBddc::runBddcSdc<CompressedTransfer>(F,spaces,u,uAll,bddcData,mass,stiffness,nDofs,steps,options);
+    }
+    else
+      u = EmiBddc::runBddcSdc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,mass,stiffness,nDofs,steps,options);
+    writeState(u,uAll,options.order,
+               options.outputDir + (options.bddcCompression
+                                      ? "/emiSDCBDDCLastCompression"
+                                      : "/emiSDCBDDCLast"));
     std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
     std::cout << "End EMI-only model\n";
     return 0;
@@ -880,7 +889,10 @@ int main(int argc, char* argv[])
     }
     else
       u = EmiBddc::runBddc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,nDofs,steps,options);
-    writeState(u,uAll,options.order,options.outputDir + "/emiBDDCLast");
+    writeState(u,uAll,options.order,
+               options.outputDir + (options.bddcCompression
+                                      ? "/emiBDDCLastCompression"
+                                      : "/emiBDDCLast"));
     std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
     std::cout << "End EMI-only model\n";
     return 0;
