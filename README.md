@@ -140,7 +140,11 @@ collocation matrix/RHS construction, interface setup, subdomain construction
 and factorization, transfer configuration, BDDC solver/coarse setup, RHS setup,
 BDDC solve calls and time, SDC updates, and AA selection. `PROFILE_ARGS` and
 `VTK` are also available on the other SDC+BDDC targets. Profiling is off by
-default and currently instruments the SDC+BDDC path.
+default and currently instruments the SDC+BDDC path. It also reports the number
+of subdomain constructions. Although interval operators repeat between time
+steps, caching their factorizations is deferred: BDDC subdomains retain mutable
+solution and transfer state, so reuse first needs a well-defined reset operation
+in the BDDC layer.
 
 ## Compression controls
 
