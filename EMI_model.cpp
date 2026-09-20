@@ -920,10 +920,11 @@ int main(int argc, char* argv[])
     }
     else
       u = EmiBddc::runBddcSdc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,mass,stiffness,nDofs,steps,options,uSpace.indexSet());
-    writeState(u,uAll,options.order,
-               options.outputDir + (options.bddcCompression
-                                      ? "/emiSDCBDDCLastCompression"
-                                      : "/emiSDCBDDCLast"));
+    if (options.writeVTK)
+      writeState(u,uAll,options.order,
+                 options.outputDir + (options.bddcCompression
+                                        ? "/emiSDCBDDCLastCompression"
+                                        : "/emiSDCBDDCLast"));
     std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
     std::cout << "End EMI-only model\n";
     return 0;
@@ -933,7 +934,8 @@ int main(int argc, char* argv[])
   {
     std::cout << "time integrator: SDC\n";
     u = runFullSdc(F,spaces,u,uAll,nDofs,dofCells,uSpace.indexSet(),steps,options);
-    writeState(u,uAll,options.order,options.outputDir + "/emiSDCLast");
+    if (options.writeVTK)
+      writeState(u,uAll,options.order,options.outputDir + "/emiSDCLast");
     std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
     std::cout << "End EMI-only model\n";
     return 0;
@@ -961,10 +963,11 @@ int main(int argc, char* argv[])
     }
     else
       u = EmiBddc::runBddc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,nDofs,steps,options);
-    writeState(u,uAll,options.order,
-               options.outputDir + (options.bddcCompression
-                                      ? "/emiBDDCLastCompression"
-                                      : "/emiBDDCLast"));
+    if (options.writeVTK)
+      writeState(u,uAll,options.order,
+                 options.outputDir + (options.bddcCompression
+                                        ? "/emiBDDCLastCompression"
+                                        : "/emiBDDCLast"));
     std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
     std::cout << "End EMI-only model\n";
     return 0;
@@ -997,7 +1000,8 @@ int main(int argc, char* argv[])
       writeState(u,uAll,options.order,options.outputDir + "/emiStep" + paddedString(step+1,3));
   }
 
-  writeState(u,uAll,options.order,options.outputDir + "/emiLast");
+  if (options.writeVTK)
+    writeState(u,uAll,options.order,options.outputDir + "/emiLast");
 
   std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
   std::cout << "End EMI-only model\n";
