@@ -20,6 +20,11 @@ SDC_ARGS := \
   --minimumSdcSweeps 2 \
   --maximumSdcSweeps 4
 
+VTK_TEST_TIME_ARGS := \
+  --finalTime 0.01 \
+  --dt 0.01 \
+  --maximumNumberOfTimeSteps 1
+
 BDDC_ARGS := \
   --bddcIterations 100 \
   --bddcVerbose 0
@@ -31,7 +36,7 @@ AA_ARGS := \
 .PHONY: help build clean \
   run-emi run-sdc run-sdc-aa run-bddc run-bddc-compression \
   run-sdc-bddc run-sdc-bddc-aa run-sdc-bddc-compression \
-  run-sdc-bddc-aa-compression run-all
+  run-sdc-bddc-aa-compression run-sdc-bddc-aa-vtk-off-test run-all
 
 help:
 	@echo "Build:"
@@ -47,6 +52,7 @@ help:
 	@echo "  make -f steps_to_run.mk run-sdc-bddc-aa"
 	@echo "  make -f steps_to_run.mk run-sdc-bddc-compression"
 	@echo "  make -f steps_to_run.mk run-sdc-bddc-aa-compression"
+	@echo "  make -f steps_to_run.mk run-sdc-bddc-aa-vtk-off-test"
 	@echo "  make -f steps_to_run.mk run-all"
 
 build:
@@ -93,6 +99,11 @@ run-sdc-bddc-aa-compression: build
 	./$(TARGET) --sdc 1 --bddc 1 --bddcCompression 1 --bddcCompressionBits 16 $(AA_ARGS) \
 	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) $(PROFILE_ARGS) \
 	  --dir output/compression/sdc_bddc_aa --vtk $(VTK)
+
+run-sdc-bddc-aa-vtk-off-test: build
+	./$(TARGET) --sdc 1 --bddc 1 $(AA_ARGS) \
+	  $(THREAD_ARGS) $(COMMON_ARGS) $(VTK_TEST_TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) \
+	  --dir output/vtk_disabled_after_rebuild --vtk 0
 
 run-all: run-emi run-sdc run-sdc-aa run-bddc run-bddc-compression \
          run-sdc-bddc run-sdc-bddc-aa run-sdc-bddc-compression \
