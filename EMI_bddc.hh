@@ -32,11 +32,14 @@ namespace EmiBddc
     using Clock = std::chrono::steady_clock;
 
     double residualAssembly = 0.0;
-    double bddcSetup = 0.0;
+    double localCollocationSystem = 0.0;
+    double bddcObjectSetup = 0.0;
     double bddcSolve = 0.0;
     double sdcUpdate = 0.0;
     double adaptivity = 0.0;
     double localOperatorExtraction = 0.0;
+    size_t bddcSystems = 0;
+    size_t bddcSolveCalls = 0;
 
     static double seconds(Clock::time_point start)
     {
@@ -48,8 +51,13 @@ namespace EmiBddc
       std::cout << "Profile (wall seconds, " << label << "):\n"
                 << "  local operator extraction: " << localOperatorExtraction << "\n"
                 << "  residual assembly: " << residualAssembly << "\n"
-                << "  BDDC setup: " << bddcSetup << "\n"
-                << "  BDDC iterations: " << bddcSolve << "\n"
+                << "  local collocation matrix/RHS: " << localCollocationSystem << "\n"
+                << "  BDDC object setup: " << bddcObjectSetup << "\n"
+                << "  BDDC solve calls: " << bddcSolveCalls
+                << " across " << bddcSystems << " interval systems (wall seconds: "
+                << bddcSolve << ", average calls/system: "
+                << (bddcSystems > 0 ? static_cast<double>(bddcSolveCalls)/bddcSystems : 0.0)
+                << ")\n"
                 << "  SDC update/bookkeeping: " << sdcUpdate << "\n"
                 << "  algebraic adaptivity: " << adaptivity << "\n";
     }
@@ -493,7 +501,7 @@ void computeBddcSdcResiduals(Functional& F,
                                                               data.subdomainSizes,
                                                               options.bddcInterfaceTypes);
     if (profile)
-      profile->bddcSetup += ProfileTimes::seconds(interfaceSetupStart);
+      profile->bddcObjectSetup += ProfileTimes::seconds(interfaceSetupStart);
 
     std::vector<int> solverActiveIds(activeIds);
     bool useCgSolver = options.bddcUseCg != 0;
@@ -501,7 +509,9 @@ void computeBddcSdcResiduals(Functional& F,
 
     for (int i = 1; i <= intervals; ++i)
     {
-      auto const setupStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
+      if (profile)
+        ++profile->bddcSystems;
+      auto const systemStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
       // The diagonal SDC coefficient varies by interval; restricted operators are reused across intervals.
       std::vector<Matrix> localJ;
       localJ.reserve(data.localDofs.size());
@@ -531,7 +541,12 @@ void computeBddcSdcResiduals(Functional& F,
           tmp[subdomain].axpy(Shat[i-1][j],corrections[j][subdomain]);
         localStiffnessMatrices[subdomain].umv(tmp[subdomain],rhs[subdomain]);
       }
+      if (profile)
+      {
+        profile->localCollocationSystem += ProfileTimes::seconds(systemStart);
+      }
 
+      auto const objectSetupStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
       std::vector<BddcSubdomain> subdomains;
       subdomains.reserve(data.localDofs.size());
       for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
@@ -547,7 +562,7 @@ void computeBddcSdcResiduals(Functional& F,
                                                       verbose);
       solver.setRhs(rhs);
       if (profile)
-        profile->bddcSetup += ProfileTimes::seconds(setupStart);
+        profile->bddcObjectSetup += ProfileTimes::seconds(objectSetupStart);
 
       // Solve the collocation interval system to the requested BDDC residual tolerance.
       auto const solveStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
@@ -556,6 +571,8 @@ void computeBddcSdcResiduals(Functional& F,
       for (; iteration < options.bddcIterations; ++iteration)
       {
         residual = solver.solve();
+        if (profile)
+          ++profile->bddcSolveCalls;
         if (residual < options.bddcTolerance)
           break;
       }

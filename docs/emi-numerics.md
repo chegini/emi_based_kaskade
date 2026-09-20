@@ -176,8 +176,13 @@ already been run. Compression quality and solver convergence should be measured
 for each mesh and parameter set.
 
 For SDC+BDDC, `--profile 1` reports cumulative wall time in selected phases:
-local operator extraction, residual assembly, BDDC setup, BDDC iterations,
-SDC updates, and AA selection. These categories do not cover every operation
-(for example, VTK output), so they need not sum to total runtime. Use `--vtk 0`
-for solver-focused timing and compare runs with the same mesh, thread count,
-solver tolerances, and time steps. Profiling is disabled by default.
+local operator extraction, residual assembly, local collocation matrix/RHS
+construction, BDDC object setup, BDDC solve calls/time, SDC updates, and AA
+selection. The solve-call count is reported alongside the number of interval
+systems, making the average number of iterations per system easy to compute.
+The matrix/RHS phase includes forming each interval's local `J` and RHS; BDDC
+object setup includes constructing interface constraints, subdomains, and the
+solver. These categories do not cover every operation (for example, VTK
+output), so they need not sum to total runtime. Use `--vtk 0` for solver-focused
+timing and compare runs with the same mesh, thread count, solver tolerances,
+and time steps. Profiling is disabled by default.
