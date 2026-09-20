@@ -4,10 +4,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <numeric>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -307,6 +310,52 @@ namespace EmiBddc
     }
   }
 
+  // Construct independent BDDC subdomains concurrently, then move them into the
+  // ordered vector required by BDDCSolver. Each worker writes to a distinct slot.
+  template <class Subdomain, class Matrix, class Interfaces>
+  std::vector<Subdomain> constructSubdomains(std::vector<Matrix> const& localOperators,
+                                             Interfaces const& interfaces,
+                                             int nThreads)
+  {
+    std::vector<std::optional<Subdomain>> slots(localOperators.size());
+    std::exception_ptr constructionError;
+    std::mutex constructionErrorMutex;
+    auto construct = [&](size_t subdomain)
+    {
+      try
+      {
+        slots[subdomain].emplace(static_cast<int>(subdomain),localOperators[subdomain],interfaces);
+      }
+      catch (...)
+      {
+        std::lock_guard<std::mutex> lock(constructionErrorMutex);
+        if (!constructionError)
+          constructionError = std::current_exception();
+      }
+    };
+
+    size_t const taskLimit = nThreads > 0 ? static_cast<size_t>(nThreads)
+                                         : std::numeric_limits<size_t>::max();
+    if (taskLimit > 1)
+      Kaskade::parallelFor(0,localOperators.size(),construct,taskLimit);
+    else
+      for (size_t subdomain = 0; subdomain < localOperators.size(); ++subdomain)
+        construct(subdomain);
+
+    if (constructionError)
+      std::rethrow_exception(constructionError);
+
+    std::vector<Subdomain> subdomains;
+    subdomains.reserve(localOperators.size());
+    for (auto& slot : slots)
+    {
+      if (!slot)
+        throw std::runtime_error("BDDC subdomain construction did not populate every slot.");
+      subdomains.emplace_back(std::move(*slot));
+    }
+    return subdomains;
+  }
+
   template <class Matrix, class Vector, class Options>
   std::vector<int> selectActiveSubdomains(BddcData<Matrix,Vector> const& data,
                                           std::vector<std::vector<Vector>> const& corrections,
@@ -557,17 +606,13 @@ void computeBddcSdcResiduals(Functional& F,
       }
 
       auto const subdomainStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
-      std::vector<BddcSubdomain> subdomains;
-      subdomains.reserve(data.localDofs.size());
       if (profile)
         profile->bddcSubdomainConstructions += data.localDofs.size();
 
-      // Each construction factors the interval matrix. Reusing these objects across
-      // SDC systems is not yet safe: Subdomain also retains mutable solution and
-      // transfer state, and setRhs() does not reset all of that state. Factor reuse
-      // needs an explicit reset contract in the BDDC layer before it can be cached here.
-      for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
-        subdomains.emplace_back(static_cast<int>(subdomain),localJ[subdomain],interfaceAverages);
+      // Each construction factors one interval matrix; these independent factorizations
+      // are parallelized, but the resulting mutable subdomains are not reused across systems.
+      auto subdomains = constructSubdomains<BddcSubdomain>(localJ,interfaceAverages,
+                                                            options.assemblyThreads);
       if (profile)
         profile->subdomainConstruction += ProfileTimes::seconds(subdomainStart);
 
@@ -832,10 +877,8 @@ State runBddcSdc(Functional& F,
         }
       }
 
-      std::vector<BddcSubdomain> subdomains;
-      subdomains.reserve(data.localMatrices.size());
-      for (size_t subdomain = 0; subdomain < data.localMatrices.size(); ++subdomain)
-        subdomains.emplace_back(static_cast<int>(subdomain),data.localMatrices[subdomain],interfaceAverages);
+      auto subdomains = constructSubdomains<BddcSubdomain>(data.localMatrices,interfaceAverages,
+                                                            options.assemblyThreads);
 
       if constexpr (requires(Transfer& transfer) {
                       transfer.setQuantizationBits(0);
