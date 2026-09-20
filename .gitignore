@@ -9,3 +9,8 @@ matlab_dir/
 output/*.vtu
 output/*.vtk
 output/*.m
+<<<<<<< HEAD
+steps_to_run.mk
+=======
+>>>>>>> 774b61e (Ignore local run and timing files)
+timing.gnu
