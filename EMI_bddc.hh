@@ -43,7 +43,6 @@ namespace EmiBddc
   BddcData<Matrix,Vector> buildBddcData(Grid const& grid,
                                         Space const& space,
                                         Material const& material,
-                                        Matrix const& globalMatrix,
                                         size_t nDofs,
                                         int nTasks)
   {
@@ -109,14 +108,11 @@ namespace EmiBddc
     if (data.sharedDofs.empty() && data.tags.size() > 1)
       throw std::runtime_error("BDDC setup found multiple subdomains but no shared dofs.");
 
-    data.localMatrices.resize(data.localDofs.size());
     data.weights.resize(data.localDofs.size());
     size_t const taskLimit = nTasks > 0 ? static_cast<size_t>(nTasks)
                                         : std::numeric_limits<size_t>::max();
     auto buildSubdomainData = [&](size_t subdomain)
     {
-      data.localMatrices[subdomain] = Matrix(data.localDofs[subdomain],globalMatrix);
-
       Vector weight(data.localDofs[subdomain].size());
       weight = 1.0;
       for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
