@@ -27,6 +27,8 @@ struct HashPair
   }
 };
 
+// Weak EMI model: bulk conductivity acts in each material region, while membrane and gap currents
+// couple the traces on distinct material interfaces.
 template <class Scalar_, class VarSet, class Material, class Grid_, class Spaces, class MembraneModel>
 class EMIModel : public Kaskade::FunctionalBase<Kaskade::WeakFormulation>
 {
@@ -391,6 +393,7 @@ public:
   Scalar time() const { return t; }
   void time(Scalar tnew) { t = tnew; }
 
+  // Select Jacobian terms for assembly: 1=membrane mass only, 0=spatial operator only, >1=combined Euler operator.
   void Mass_stiff(int mass) { massMode = mass; }
 
   void setMassSubmatrix(bool enabled) { massSubmatrix = enabled; }

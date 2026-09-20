@@ -282,6 +282,7 @@ void printVectorDiagnostics(Vector const& v, std::string const& name)
             << " max=" << maxValue << "\n";
 }
 
+// Perform one forward SDC sweep; vectors use the current active-DOF ordering.
 template <class Matrix, class Vectors, class ReactionDerivatives, class Solver>
 typename Matrix::field_type sdcIterationStepJacobi(SDCTimeGrid const& grid,
                                                    SDCTimeGrid::RealMatrix const& Shat,
@@ -306,6 +307,7 @@ typename Matrix::field_type sdcIterationStepJacobi(SDCTimeGrid const& grid,
 
   for (int i = 1; i <= intervals; ++i)
   {
+    // The diagonal interval matrix is M - Shat[i-1][i] A, with an optional reaction-Jacobian correction.
     for (size_t row = 0; row < J.N(); ++row)
     {
       auto colJ = J[row].begin();
@@ -329,6 +331,7 @@ typename Matrix::field_type sdcIterationStepJacobi(SDCTimeGrid const& grid,
       }
     }
 
+    // Add the mass jump, quadrature of all collocation residuals, and contributions from earlier corrections.
     rhs = massDifferences[i-1];
     M.umv(corrections[i-1],rhs);
     for (int j = 0; j <= intervals; ++j)
@@ -368,6 +371,7 @@ void addMatrixNeighborhood(Matrix const& A, std::vector<std::vector<size_t>>& do
 template <class Matrix>
 std::vector<std::vector<size_t>> buildMatrixNeighborhood(Matrix const& mass, Matrix const& stiffness)
 {
+  // Use the union graph so AA expansion preserves couplings from both operators.
   std::vector<std::vector<size_t>> dofNeighborhood(mass.N());
   addMatrixNeighborhood(mass,dofNeighborhood);
   addMatrixNeighborhood(stiffness,dofNeighborhood);
@@ -434,6 +438,7 @@ void computeSdcResiduals(Functional& F,
   if (!allDofsActive)
   {
     activeCells.assign(indexSet.size(0),0);
+    // Assemble every cell incident to an active residual row; filtering only by cell-owned DOFs would miss couplings.
     for (size_t dof : expandedIndices)
       for (size_t cell : dofCells[dof])
         activeCells[cell] = 1;
@@ -442,6 +447,7 @@ void computeSdcResiduals(Functional& F,
   auto const& points = grid.points();
   for (int i = 0; i < points.N(); ++i)
   {
+    // This autonomous EMI model has identical first-sweep guesses at every node, so the residual can be reused.
     if (sweep == 0 && i > 0)
     {
       residuals[i] = residuals[i-1];
@@ -471,18 +477,21 @@ void computeSdcResiduals(Functional& F,
 
     auto rhs = assembler.rhs();
     rhs.write(fullResidual.begin());
+    // SemiImplicitEuler scales the assembled spatial residual by dt; SDC stores the unscaled residual.
     for (size_t j = 0; j < expandedIndices.size(); ++j)
       residuals[i][j] = fullResidual[expandedIndices[j]];
     residuals[i] *= (1.0/dt);
   }
 }
 
+// Compute each interval's mass contribution using only the currently active matrix rows.
 template <class Matrix, class StateU, class Vector>
 void computeFullMassDifferences(Matrix const& M,
                                 std::vector<StateU> const& collocationStates,
                                 std::vector<size_t> const& expandedIndices,
                                 std::vector<Vector>& massDifferences)
 {
+  // Restrict M (u_i - u_{i+1}) to the currently active rows.
   for (int i = 0; i < static_cast<int>(collocationStates.size())-1; ++i)
     massDifferences[i] = 0.0;
 
@@ -501,6 +510,7 @@ void computeFullMassDifferences(Matrix const& M,
   }
 }
 
+// Advance the EMI state with SDC; AA optionally reduces the spatial DOF set solved on later sweeps.
 template <class Functional, class Spaces, class State, class Element, class IndexSet>
 State runFullSdc(Functional& F,
                  Spaces const& spaces,
@@ -524,6 +534,7 @@ State runFullSdc(Functional& F,
   zeroState *= 0.0;
 
   SemiImplicitEulerStep<Functional> equation(&F,options.dt);
+  // Assemble the time-independent mass and spatial Jacobian separately for SDC interval systems.
   equation.setTau(0.0);
   F.Mass_stiff(1);
   assembler.assemble(SemiLinearization(equation,state,state,zeroState),
@@ -578,6 +589,7 @@ State runFullSdc(Functional& F,
       else
         throw std::runtime_error("sdcSweepType must be 0 (Euler) or 1 (LU)");
 
+      // Restrict both operators to the active rows/columns using the global-to-compact index map.
       Matrix activeMass(expandedIndices,compressedIndex,mass);
       Matrix activeStiffness(expandedIndices,compressedIndex,stiffness);
       std::vector<Vector> massDifferences(grid.points().N(),Vector(activeDofs));
@@ -632,6 +644,8 @@ State runFullSdc(Functional& F,
 
       if (options.algebraicAdaptivity && options.algebraicAdaptivityTolerance > 0.0)
       {
+        // For q<1, retain DOFs with q*|du|/(1-q) above tolerance; q>=1 retains all candidates.
+        // Then add operator neighbors to preserve couplings in the reduced solve.
         std::set<size_t> nextIndices;
         for (size_t j = 0; j < activeDofs; ++j)
         {
@@ -655,6 +669,7 @@ State runFullSdc(Functional& F,
         }
 
         expandedIndices.assign(nextIndices.begin(),nextIndices.end());
+        // Map global DOF numbers to the compact indices used by the active submatrices.
         compressedIndex.assign(nDofs,nDofs);
         for (size_t i = 0; i < expandedIndices.size(); ++i)
           compressedIndex[expandedIndices[i]] = i;
