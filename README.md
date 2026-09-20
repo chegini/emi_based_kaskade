@@ -127,6 +127,19 @@ To run all nine configurations sequentially:
 make -f steps_to_run.mk run-all
 ```
 
+For an SDC+BDDC+AA timing run, use:
+
+```bash
+make -f steps_to_run.mk run-sdc-bddc-aa \
+  PROFILE_ARGS="--profile 1" VTK=0 \
+  TIME_ARGS="--finalTime 1 --dt 0.01 --maximumNumberOfTimeSteps 100"
+```
+
+The report separates local operator extraction, residual assembly, BDDC setup,
+BDDC iterations, SDC updates, and AA selection. `PROFILE_ARGS` and `VTK` are
+also available on the other SDC+BDDC targets. Profiling is off by default and
+currently instruments the SDC+BDDC path.
+
 ## Compression controls
 
 Compression is disabled with:

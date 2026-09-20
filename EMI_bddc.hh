@@ -2,6 +2,7 @@
 #define EMI_BDDC_HH
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -26,6 +27,34 @@
 
 namespace EmiBddc
 {
+  struct ProfileTimes
+  {
+    using Clock = std::chrono::steady_clock;
+
+    double residualAssembly = 0.0;
+    double bddcSetup = 0.0;
+    double bddcSolve = 0.0;
+    double sdcUpdate = 0.0;
+    double adaptivity = 0.0;
+    double localOperatorExtraction = 0.0;
+
+    static double seconds(Clock::time_point start)
+    {
+      return std::chrono::duration<double>(Clock::now()-start).count();
+    }
+
+    void print(char const* label) const
+    {
+      std::cout << "Profile (wall seconds, " << label << "):\n"
+                << "  local operator extraction: " << localOperatorExtraction << "\n"
+                << "  residual assembly: " << residualAssembly << "\n"
+                << "  BDDC setup: " << bddcSetup << "\n"
+                << "  BDDC iterations: " << bddcSolve << "\n"
+                << "  SDC update/bookkeeping: " << sdcUpdate << "\n"
+                << "  algebraic adaptivity: " << adaptivity << "\n";
+    }
+  };
+
   template <class Matrix, class Vector>
   struct BddcData
   {
@@ -446,7 +475,8 @@ void computeBddcSdcResiduals(Functional& F,
                                                    std::vector<std::vector<Vector>> const& massDifferences,
                                                    std::vector<std::vector<Vector>>& corrections,
                                                    std::vector<int> const& activeIds,
-                                                   Options const& options)
+                                                   Options const& options,
+                                                   ProfileTimes* profile = nullptr)
   {
     using BddcSubdomain = Kaskade::BDDC::Subdomain<1,double,double,Transfer>;
 
@@ -458,9 +488,12 @@ void computeBddcSdcResiduals(Functional& F,
     for (auto& localCorrection : corrections[0])
       localCorrection = 0.0;
 
+    auto const interfaceSetupStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
     Kaskade::BDDC::InterfaceAverages<1,int> interfaceAverages(data.sharedDofs,
                                                               data.subdomainSizes,
                                                               options.bddcInterfaceTypes);
+    if (profile)
+      profile->bddcSetup += ProfileTimes::seconds(interfaceSetupStart);
 
     std::vector<int> solverActiveIds(activeIds);
     bool useCgSolver = options.bddcUseCg != 0;
@@ -468,6 +501,7 @@ void computeBddcSdcResiduals(Functional& F,
 
     for (int i = 1; i <= intervals; ++i)
     {
+      auto const setupStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
       // The diagonal SDC coefficient varies by interval; restricted operators are reused across intervals.
       std::vector<Matrix> localJ;
       localJ.reserve(data.localDofs.size());
@@ -512,8 +546,11 @@ void computeBddcSdcResiduals(Functional& F,
                                                       useCgSolver,
                                                       verbose);
       solver.setRhs(rhs);
+      if (profile)
+        profile->bddcSetup += ProfileTimes::seconds(setupStart);
 
       // Solve the collocation interval system to the requested BDDC residual tolerance.
+      auto const solveStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
       double residual = std::numeric_limits<double>::infinity();
       int iteration = 0;
       for (; iteration < options.bddcIterations; ++iteration)
@@ -522,6 +559,8 @@ void computeBddcSdcResiduals(Functional& F,
         if (residual < options.bddcTolerance)
           break;
       }
+      if (profile)
+        profile->bddcSolve += ProfileTimes::seconds(solveStart);
 
       for (int subdomain : activeIds)
         corrections[i][subdomain] = subdomains[subdomain].getSolution();
@@ -555,10 +594,14 @@ State runBddcSdc(Functional& F,
     using Assembler = Kaskade::VariationalFunctionalAssembler<SemiLinearization>;
     using StateU = typename boost::fusion::result_of::value_at_c<typename State::Sequence,0>::type;
 
+    ProfileTimes profile;
+    auto const extractionStart = options.profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
     // The operators are fixed for this model, so extract their local blocks once and reuse them.
     auto const localMassMatrices = extractLocalMatrices(data,mass,options.assemblyThreads);
     auto const localStiffnessMatrices = extractLocalMatrices(data,stiffness,options.assemblyThreads);
     auto const dofNeighborhood = buildMatrixNeighborhood(mass,stiffness);
+    if (options.profile)
+      profile.localOperatorExtraction = ProfileTimes::seconds(extractionStart);
 
     Assembler assembler(spaces);
     Kaskade::SemiImplicitEulerStep<Functional> equation(&F,options.dt);
@@ -584,9 +627,13 @@ State runBddcSdc(Functional& F,
       for (; sweep < options.maximumSdcSweeps; ++sweep)
       {
         std::vector<std::vector<Vector>> residuals(grid.points().N());
+        auto const residualStart = options.profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
         computeBddcSdcResiduals(F,equation,state,collocationStates,grid,data,nDofs,
                                 sweep,t,stepDt,assembler,options,activeIds,indexSet,residuals);
+        if (options.profile)
+          profile.residualAssembly += ProfileTimes::seconds(residualStart);
 
+        auto const updateStart = options.profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
         Kaskade::SDCTimeGrid::RealMatrix Shat;
         if (options.sdcSweepType == 0)
           Kaskade::eulerIntegrationMatrix(grid,Shat);
@@ -600,6 +647,8 @@ State runBddcSdc(Functional& F,
           for (auto const& localDofs : data.localDofs)
             intervalData.emplace_back(localDofs.size());
         computeBddcMassDifferences(data,localMassMatrices,collocationStates,massDifferences);
+        if (options.profile)
+          profile.sdcUpdate += ProfileTimes::seconds(updateStart);
 
         std::vector<std::vector<Vector>> corrections(grid.points().N());
         for (auto& pointData : corrections)
@@ -610,14 +659,18 @@ State runBddcSdc(Functional& F,
           }
 
         sweepNorms.push_back(sdcIterationStepBddc<Transfer>(grid,Shat,data,localMassMatrices,localStiffnessMatrices,
-                                                            residuals,massDifferences,corrections,activeIds,options));
+                                                            residuals,massDifferences,corrections,activeIds,options,
+                                                            options.profile ? &profile : nullptr));
 
+        auto const correctionUpdateStart = options.profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
         for (int i = 1; i < grid.points().N(); ++i)
         {
           Vector globalCorrection = combineSubdomainVector(data,corrections[i],nDofs);
           for (size_t j = 0; j < nDofs; ++j)
             collocationStates[i].coefficients()[j] += globalCorrection[j];
         }
+        if (options.profile)
+          profile.sdcUpdate += ProfileTimes::seconds(correctionUpdateStart);
 
         if (sweepNorms.size() > 1)
         {
@@ -638,8 +691,11 @@ State runBddcSdc(Functional& F,
         if (reachedMinimumSweeps && (smallCorrection || estimatedSmall))
           break;
 
+        auto const adaptivityStart = options.profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
         std::vector<int> nextActiveIds = selectActiveSubdomains(data,corrections,activeIds,
                                                                 dofNeighborhood,sdcContraction,options);
+        if (options.profile)
+          profile.adaptivity += ProfileTimes::seconds(adaptivityStart);
         if (options.algebraicAdaptivity && options.algebraicAdaptivityTolerance > 0.0)
         {
           if (nextActiveIds.empty())
@@ -671,6 +727,8 @@ State runBddcSdc(Functional& F,
       F.time(stepEnd);
     }
 
+    if (options.profile)
+      profile.print("SDC + BDDC");
     return state;
   }
 

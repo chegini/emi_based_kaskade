@@ -174,3 +174,10 @@ comparisons, use identical mesh, time-step, SDC, and BDDC tolerances:
 These are validation recommendations, not claims that all comparisons have
 already been run. Compression quality and solver convergence should be measured
 for each mesh and parameter set.
+
+For SDC+BDDC, `--profile 1` reports cumulative wall time in selected phases:
+local operator extraction, residual assembly, BDDC setup, BDDC iterations,
+SDC updates, and AA selection. These categories do not cover every operation
+(for example, VTK output), so they need not sum to total runtime. Use `--vtk 0`
+for solver-focused timing and compare runs with the same mesh, thread count,
+solver tolerances, and time steps. Profiling is disabled by default.
