@@ -29,16 +29,19 @@ namespace EmiBddc
   template <class Matrix, class Vector>
   struct BddcData
   {
-    std::vector<int> tags;
-    std::vector<std::vector<size_t>> localDofs;
-    std::vector<std::vector<Kaskade::BDDC::LocalDof>> sharedDofs;
-    std::vector<std::vector<int>> dofSubdomains;
-    std::vector<std::vector<size_t>> dofCells;
-    std::vector<int> subdomainSizes;
+    std::vector<int> tags;  // Material tag identifying each subdomain.
+    std::vector<std::vector<size_t>> localDofs;  // Global DOF indices, in local order, per subdomain.
+    std::vector<std::vector<Kaskade::BDDC::LocalDof>> sharedDofs;  // Local copies of each shared global DOF.
+    std::vector<std::vector<int>> dofSubdomains;  // Inverse map: global DOF to owning subdomains.
+    std::vector<std::vector<size_t>> dofCells;  // Inverse map: global DOF to incident leaf-cell indices.
+    std::vector<int> subdomainSizes;  // Number of local DOFs per subdomain.
+    // Combined local LHS for non-SDC BDDC; SDC+BDDC instead restricts mass and stiffness separately.
     std::vector<Matrix> localMatrices;
+    // Weights for global-to-local residuals and local-to-global corrections; copies of a DOF sum to one.
     std::vector<Vector> weights;
   };
 
+  // Build partition metadata and overlap weights independently of the operator matrix.
   template <class Grid, class Space, class Material, class Matrix, class Vector>
   BddcData<Matrix,Vector> buildBddcData(Grid const& grid,
                                         Space const& space,
@@ -48,6 +51,7 @@ namespace EmiBddc
   {
     using Kaskade::BDDC::LocalDof;
 
+    // Cells with one material tag form a subdomain; interface DOFs consequently have multiple local copies.
     std::map<int,std::set<size_t>> dofsByTag;
     Dune::FieldVector<double,Grid::dimension> zero(0.0);
 
@@ -146,6 +150,7 @@ namespace EmiBddc
     {
       localMatrices[subdomain] = Matrix(data.localDofs[subdomain],globalMatrix);
     };
+    // Each subdomain writes to a separate output slot; the source operator is read-only.
     if (taskLimit > 1)
       Kaskade::parallelFor(0,data.localDofs.size(),extractSubdomainMatrix,taskLimit);
     else
@@ -158,6 +163,7 @@ namespace EmiBddc
   std::vector<Vector> scatterToSubdomains(BddcData<Matrix,Vector> const& data,
                                           Vector const& global)
   {
+    // Copy global entries to local vectors, scaling shared DOFs so their local copies sum to the global value.
     std::vector<Vector> local(data.localDofs.size());
     for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
     {
@@ -177,6 +183,7 @@ namespace EmiBddc
                                 std::vector<Vector> const& local,
                                 size_t nDofs)
   {
+    // Weighted assembly is the reverse operation to scatterToSubdomains.
     Vector global(nDofs);
     global = 0.0;
     for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
@@ -206,6 +213,7 @@ namespace EmiBddc
   template <class Matrix>
   std::vector<std::vector<size_t>> buildMatrixNeighborhood(Matrix const& mass, Matrix const& stiffness)
   {
+    // Algebraic adaptivity must retain couplings from either operator, not just the mass graph.
     std::vector<std::vector<size_t>> dofNeighborhood(mass.N());
     addMatrixNeighborhood(mass,dofNeighborhood);
     addMatrixNeighborhood(stiffness,dofNeighborhood);
@@ -263,6 +271,7 @@ namespace EmiBddc
     if (!options.algebraicAdaptivity || options.algebraicAdaptivityTolerance <= 0.0)
       return allSubdomains(data.localDofs.size());
 
+    // Apply the correction-based AA estimate, then expand touched DOFs to complete owner subdomains.
     std::set<int> nextActiveIds;
     for (int subdomain : activeIds)
     {
@@ -290,6 +299,7 @@ namespace EmiBddc
     return std::vector<int>(nextActiveIds.begin(),nextActiveIds.end());
   }
 
+// Evaluate node residuals in local subdomain ordering. Under AA, assemble cells incident to active DOFs.
 template <class Functional, class State, class StateU, class TimeGrid, class Assembler, class Matrix, class Vector, class Options, class IndexSet>
 void computeBddcSdcResiduals(Functional& F,
                                Kaskade::SemiImplicitEulerStep<Functional>& equation,
@@ -321,6 +331,7 @@ void computeBddcSdcResiduals(Functional& F,
     if (!allSubdomainsActive)
     {
       activeCells.assign(indexSet.size(0),0);
+      // Include every cell touching an active local DOF so its assembled residual row is complete.
       for (int subdomain : activeIds)
         for (size_t globalDof : data.localDofs[subdomain])
           for (size_t cell : data.dofCells[globalDof])
@@ -330,6 +341,7 @@ void computeBddcSdcResiduals(Functional& F,
     auto const& points = grid.points();
     for (int i = 0; i < points.N(); ++i)
     {
+      // This autonomous EMI model has identical first-sweep guesses at every node, so the residual can be reused.
       if (sweep == 0 && i > 0)
       {
         residuals[i] = residuals[i-1];
@@ -359,6 +371,7 @@ void computeBddcSdcResiduals(Functional& F,
 
       auto rhs = assembler.rhs();
       rhs.write(fullResidual.begin());
+      // Remove the SemiImplicitEuler dt factor so the SDC residual has the unscaled spatial-operator convention.
       fullResidual *= (1.0/dt);
       residuals[i] = scatterToSubdomains(data,fullResidual);
     }
@@ -370,6 +383,7 @@ void computeBddcSdcResiduals(Functional& F,
                                   std::vector<StateU> const& collocationStates,
                                   std::vector<std::vector<Vector>>& massDifferences)
   {
+    // Compute the local restriction of M (u_i - u_{i+1}) for each collocation interval.
     int const intervals = static_cast<int>(collocationStates.size())-1;
 
     for (int i = 0; i < intervals; ++i)
@@ -391,6 +405,7 @@ void computeBddcSdcResiduals(Functional& F,
         }
   }
 
+  // Form the SDC collocation LHS J = M - collocationWeight * A for one subdomain.
   template <class Matrix>
   void combineSdcMatrix(Matrix& J,
                         Matrix const& mass,
@@ -453,6 +468,7 @@ void computeBddcSdcResiduals(Functional& F,
 
     for (int i = 1; i <= intervals; ++i)
     {
+      // The diagonal SDC coefficient varies by interval; restricted operators are reused across intervals.
       std::vector<Matrix> localJ;
       localJ.reserve(data.localDofs.size());
       for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
@@ -466,6 +482,7 @@ void computeBddcSdcResiduals(Functional& F,
 
       std::vector<Vector> rhs(data.localDofs.size());
       std::vector<Vector> tmp(data.localDofs.size());
+      // Build the interval RHS from the mass jump, residual quadrature, and earlier sweep corrections.
       for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
       {
         rhs[subdomain] = massDifferences[i-1][subdomain];
@@ -496,6 +513,7 @@ void computeBddcSdcResiduals(Functional& F,
                                                       verbose);
       solver.setRhs(rhs);
 
+      // Solve the collocation interval system to the requested BDDC residual tolerance.
       double residual = std::numeric_limits<double>::infinity();
       int iteration = 0;
       for (; iteration < options.bddcIterations; ++iteration)
@@ -537,6 +555,7 @@ State runBddcSdc(Functional& F,
     using Assembler = Kaskade::VariationalFunctionalAssembler<SemiLinearization>;
     using StateU = typename boost::fusion::result_of::value_at_c<typename State::Sequence,0>::type;
 
+    // The operators are fixed for this model, so extract their local blocks once and reuse them.
     auto const localMassMatrices = extractLocalMatrices(data,mass,options.assemblyThreads);
     auto const localStiffnessMatrices = extractLocalMatrices(data,stiffness,options.assemblyThreads);
     auto const dofNeighborhood = buildMatrixNeighborhood(mass,stiffness);
@@ -555,6 +574,7 @@ State runBddcSdc(Functional& F,
       std::vector<StateU> collocationStates(grid.points().N(),Kaskade::component<0>(state));
       double sdcContraction = options.sdcInitialContraction;
       std::vector<double> sweepNorms;
+      // BDDC updates complete subdomains; AA may reduce this set after the first sweep.
       std::vector<int> activeIds = allSubdomains(data.localDofs.size());
       int sweep = 0;
 
