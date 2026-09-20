@@ -865,13 +865,6 @@ int main(int argc, char* argv[])
   duState *= 0.0;
   stepState *= 0.0;
 
-  // assemble(f, flags, nThreads): the second argument is a bit mask, not the
-  // thread count. Request MATRIX explicitly, otherwise nThreads=1 assembles
-  // only Assembler::VALUE and leaves a structurally nonempty but zero matrix.
-  assembler.assemble(SemiLinearization(equation,u,u,duState),Assembler::MATRIX|Assembler::RHS,options.assemblyThreads);
-  Matrix lhs = assembler.template get<Matrix>(false);
-  printMatrixDiagnostics(lhs,"lhs");
-
   int const requestedNumberOfTimeSteps = static_cast<int>(std::ceil(options.finalTime/options.dt));
   // maximumNumberOfTimeSteps is optional. If it is positive, use it as a
   // debugging safety cap; otherwise run all steps requested by finalTime/dt.
@@ -902,7 +895,7 @@ int main(int argc, char* argv[])
     printMatrixDiagnostics(stiffness,"sdc stiffness");
 
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
-      gridManager.grid(),uSpace,material,lhs,nDofs,options.assemblyThreads);
+      gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads);
     if (options.bddcCompression)
     {
       using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint16_t,std::uint8_t>;
@@ -929,11 +922,21 @@ int main(int argc, char* argv[])
     return 0;
   }
 
+  // Assemble the combined implicit-Euler matrix only for solver paths that
+  // use it directly. SDC assembles its mass and spatial operators separately.
+  // The second assemble argument is a flag mask, not a thread count.
+  assembler.assemble(SemiLinearization(equation,u,u,duState),
+                     Assembler::MATRIX|Assembler::RHS,
+                     options.assemblyThreads);
+  Matrix lhs = assembler.template get<Matrix>(false);
+  printMatrixDiagnostics(lhs,"lhs");
+
   if (options.bddc)
   {
     std::cout << "time integrator: semi-implicit Euler with BDDC\n";
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
-      gridManager.grid(),uSpace,material,lhs,nDofs,options.assemblyThreads);
+      gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads);
+    bddcData.localMatrices = EmiBddc::extractLocalMatrices(bddcData,lhs,options.assemblyThreads);
     if (options.bddcCompression)
     {
       using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint16_t,std::uint8_t>;
