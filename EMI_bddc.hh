@@ -43,6 +43,7 @@ namespace EmiBddc
     double adaptivity = 0.0;
     double localOperatorExtraction = 0.0;
     size_t bddcSystems = 0;
+    size_t bddcSubdomainConstructions = 0;
     size_t bddcSolveCalls = 0;
 
     static double seconds(Clock::time_point start)
@@ -61,6 +62,7 @@ namespace EmiBddc
                 << "  transfer configuration: " << transferSetup << "\n"
                 << "  BDDC solver/coarse setup: " << solverConstruction << "\n"
                 << "  BDDC RHS setup: " << rhsSetup << "\n"
+                << "  BDDC subdomain constructions: " << bddcSubdomainConstructions << "\n"
                 << "  BDDC solve calls: " << bddcSolveCalls
                 << " across " << bddcSystems << " interval systems (wall seconds: "
                 << bddcSolve << ", average calls/system: "
@@ -557,6 +559,13 @@ void computeBddcSdcResiduals(Functional& F,
       auto const subdomainStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
       std::vector<BddcSubdomain> subdomains;
       subdomains.reserve(data.localDofs.size());
+      if (profile)
+        profile->bddcSubdomainConstructions += data.localDofs.size();
+
+      // Each construction factors the interval matrix. Reusing these objects across
+      // SDC systems is not yet safe: Subdomain also retains mutable solution and
+      // transfer state, and setRhs() does not reset all of that state. Factor reuse
+      // needs an explicit reset contract in the BDDC layer before it can be cached here.
       for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
         subdomains.emplace_back(static_cast<int>(subdomain),localJ[subdomain],interfaceAverages);
       if (profile)
