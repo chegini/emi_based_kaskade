@@ -1,3 +1,4 @@
+
 TARGET := emiModel
 
 COMMON_ARGS := \
@@ -7,9 +8,9 @@ COMMON_ARGS := \
   --excited ../input_emi_mesh/10Cells3d_10extra_early_excited.txt
 
 TIME_ARGS := \
-  --finalTime 0.02 \
+  --finalTime 1 \
   --dt 0.01 \
-  --maximumNumberOfTimeSteps 2
+  --maximumNumberOfTimeSteps 100
 
 SDC_ARGS := \
   --minimumSdcSweeps 2 \
@@ -21,7 +22,7 @@ BDDC_ARGS := \
 
 AA_ARGS := \
   --algebraicAdaptivity 1 \
-  --algebraicAdaptivityTolerance 1e-6
+  --algebraicAdaptivityTolerance 1e-4
 
 .PHONY: help build clean \
   run-emi run-sdc run-sdc-aa run-bddc run-bddc-compression \
