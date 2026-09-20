@@ -9,6 +9,7 @@
 #include <numeric>
 #include <set>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <dune/common/fvector.hh>
@@ -21,6 +22,7 @@
 #include "mg/bddc.hpp"
 #include "timestepping/semieuler.hh"
 #include "timestepping/sdc.hh"
+#include "utilities/threading.hh"
 
 namespace EmiBddc
 {
@@ -42,7 +44,8 @@ namespace EmiBddc
                                         Space const& space,
                                         Material const& material,
                                         Matrix const& globalMatrix,
-                                        size_t nDofs)
+                                        size_t nDofs,
+                                        int nTasks)
   {
     using Kaskade::BDDC::LocalDof;
 
@@ -106,11 +109,13 @@ namespace EmiBddc
     if (data.sharedDofs.empty() && data.tags.size() > 1)
       throw std::runtime_error("BDDC setup found multiple subdomains but no shared dofs.");
 
-    data.localMatrices.reserve(data.localDofs.size());
-    data.weights.reserve(data.localDofs.size());
-    for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
+    data.localMatrices.resize(data.localDofs.size());
+    data.weights.resize(data.localDofs.size());
+    size_t const taskLimit = nTasks > 0 ? static_cast<size_t>(nTasks)
+                                        : std::numeric_limits<size_t>::max();
+    auto buildSubdomainData = [&](size_t subdomain)
     {
-      data.localMatrices.emplace_back(data.localDofs[subdomain],globalMatrix);
+      data.localMatrices[subdomain] = Matrix(data.localDofs[subdomain],globalMatrix);
 
       Vector weight(data.localDofs[subdomain].size());
       weight = 1.0;
@@ -120,8 +125,13 @@ namespace EmiBddc
         size_t const ownerCount = std::max<size_t>(1,dofOccurrences[global].size());
         weight[local][0] = 1.0/static_cast<double>(ownerCount);
       }
-      data.weights.push_back(weight);
-    }
+      data.weights[subdomain] = std::move(weight);
+    };
+    if (taskLimit > 1)
+      Kaskade::parallelFor(0,data.localDofs.size(),buildSubdomainData,taskLimit);
+    else
+      for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
+        buildSubdomainData(subdomain);
 
     std::cout << "BDDC subdomains: " << data.tags.size()
               << ", shared dofs: " << data.sharedDofs.size() << "\n";
@@ -130,12 +140,21 @@ namespace EmiBddc
 
   template <class Matrix, class Vector>
   std::vector<Matrix> extractLocalMatrices(BddcData<Matrix,Vector> const& data,
-                                           Matrix const& globalMatrix)
+                                           Matrix const& globalMatrix,
+                                           int nTasks)
   {
-    std::vector<Matrix> localMatrices;
-    localMatrices.reserve(data.localDofs.size());
-    for (auto const& localDofs : data.localDofs)
-      localMatrices.emplace_back(localDofs,globalMatrix);
+    std::vector<Matrix> localMatrices(data.localDofs.size());
+    size_t const taskLimit = nTasks > 0 ? static_cast<size_t>(nTasks)
+                                        : std::numeric_limits<size_t>::max();
+    auto extractSubdomainMatrix = [&](size_t subdomain)
+    {
+      localMatrices[subdomain] = Matrix(data.localDofs[subdomain],globalMatrix);
+    };
+    if (taskLimit > 1)
+      Kaskade::parallelFor(0,data.localDofs.size(),extractSubdomainMatrix,taskLimit);
+    else
+      for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
+        extractSubdomainMatrix(subdomain);
     return localMatrices;
   }
 
@@ -522,8 +541,8 @@ State runBddcSdc(Functional& F,
     using Assembler = Kaskade::VariationalFunctionalAssembler<SemiLinearization>;
     using StateU = typename boost::fusion::result_of::value_at_c<typename State::Sequence,0>::type;
 
-    auto const localMassMatrices = extractLocalMatrices(data,mass);
-    auto const localStiffnessMatrices = extractLocalMatrices(data,stiffness);
+    auto const localMassMatrices = extractLocalMatrices(data,mass,options.assemblyThreads);
+    auto const localStiffnessMatrices = extractLocalMatrices(data,stiffness,options.assemblyThreads);
     auto const dofNeighborhood = buildMatrixNeighborhood(mass,stiffness);
 
     Assembler assembler(spaces);
