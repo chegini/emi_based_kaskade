@@ -135,9 +135,10 @@ make -f steps_to_run.mk run-sdc-bddc-aa \
   TIME_ARGS="--finalTime 1 --dt 0.01 --maximumNumberOfTimeSteps 100"
 ```
 
-The report separates local operator extraction, residual assembly, BDDC setup,
-BDDC iterations, SDC updates, and AA selection. `PROFILE_ARGS` and `VTK` are
-also available on the other SDC+BDDC targets. Profiling is off by default and
+The report separates local operator extraction, residual assembly, local
+collocation matrix/RHS construction, BDDC object setup, BDDC solve calls and
+time, SDC updates, and AA selection. `PROFILE_ARGS` and `VTK` are also
+available on the other SDC+BDDC targets. Profiling is off by default and
 currently instruments the SDC+BDDC path.
 
 ## Compression controls
