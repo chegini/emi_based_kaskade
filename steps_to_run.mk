@@ -2,6 +2,8 @@
 TARGET := emiModel
 NTHREADS ?= 2
 THREAD_ARGS := --nThreads $(NTHREADS)
+PROFILE_ARGS ?=
+VTK ?= 1
 
 COMMON_ARGS := \
   --input ../input_emi_mesh/10Cells3d_10extra_mesh.vtu \
@@ -72,25 +74,25 @@ run-bddc-compression: build
 
 run-sdc-bddc: build
 	./$(TARGET) --sdc 1 --bddc 1 --bddcCompression 0 \
-	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) \
-	  --dir output/sdc_bddc --vtk 1
+	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) $(PROFILE_ARGS) \
+	  --dir output/sdc_bddc --vtk $(VTK)
 
 run-sdc-bddc-aa: build
 	./$(TARGET) --sdc 1 --bddc 1 --bddcCompression 0 $(AA_ARGS) \
-	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) \
-	  --dir output/sdc_bddc_aa --vtk 1
+	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) $(PROFILE_ARGS) \
+	  --dir output/sdc_bddc_aa --vtk $(VTK)
 
 run-sdc-bddc-compression: build
 	mkdir -p output/compression/sdc_bddc
 	./$(TARGET) --sdc 1 --bddc 1 --bddcCompression 1 --bddcCompressionBits 16 \
-	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) \
-	  --dir output/compression/sdc_bddc --vtk 1
+	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) $(PROFILE_ARGS) \
+	  --dir output/compression/sdc_bddc --vtk $(VTK)
 
 run-sdc-bddc-aa-compression: build
 	mkdir -p output/compression/sdc_bddc_aa
 	./$(TARGET) --sdc 1 --bddc 1 --bddcCompression 1 --bddcCompressionBits 16 $(AA_ARGS) \
-	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) \
-	  --dir output/compression/sdc_bddc_aa --vtk 1
+	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) $(PROFILE_ARGS) \
+	  --dir output/compression/sdc_bddc_aa --vtk $(VTK)
 
 run-all: run-emi run-sdc run-sdc-aa run-bddc run-bddc-compression \
          run-sdc-bddc run-sdc-bddc-aa run-sdc-bddc-compression \

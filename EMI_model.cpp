@@ -64,6 +64,7 @@ struct EmiOptions
   int maxCGIter = 10000;
   int writeVTK = 1;
   int diagnostics = 0;
+  int profile = 0;
   int sdc = 0;
   int sdcCollocationPoints = 3;
   int sdcStartCollocationPoints = 3;
@@ -724,6 +725,7 @@ int main(int argc, char* argv[])
     ("CG_shift", options.cgShift, options.cgShift, "apply constant shift correction after PCG")
     ("vtk", options.writeVTK, options.writeVTK, "write VTK output: 0=no, 1=yes")
     ("diagnostics", options.diagnostics, options.diagnostics, "print per-step vector diagnostics: 0=no, 1=yes")
+    ("profile", options.profile, options.profile, "print cumulative SDC+BDDC phase wall times: 0=no, 1=yes")
     ("sdc", options.sdc, options.sdc, "use SDC time integrator: 0=no, 1=yes")
     ("sdcCollocationPoints", options.sdcCollocationPoints, options.sdcCollocationPoints, "target number of SDC collocation points")
     ("sdcStartCollocationPoints", options.sdcStartCollocationPoints, options.sdcStartCollocationPoints, "initial number of SDC collocation points")
