@@ -33,7 +33,11 @@ namespace EmiBddc
 
     double residualAssembly = 0.0;
     double localCollocationSystem = 0.0;
-    double bddcObjectSetup = 0.0;
+    double interfaceSetup = 0.0;
+    double subdomainConstruction = 0.0;
+    double transferSetup = 0.0;
+    double solverConstruction = 0.0;
+    double rhsSetup = 0.0;
     double bddcSolve = 0.0;
     double sdcUpdate = 0.0;
     double adaptivity = 0.0;
@@ -52,7 +56,11 @@ namespace EmiBddc
                 << "  local operator extraction: " << localOperatorExtraction << "\n"
                 << "  residual assembly: " << residualAssembly << "\n"
                 << "  local collocation matrix/RHS: " << localCollocationSystem << "\n"
-                << "  BDDC object setup: " << bddcObjectSetup << "\n"
+                << "  interface constraint setup: " << interfaceSetup << "\n"
+                << "  subdomain construction/factorization: " << subdomainConstruction << "\n"
+                << "  transfer configuration: " << transferSetup << "\n"
+                << "  BDDC solver/coarse setup: " << solverConstruction << "\n"
+                << "  BDDC RHS setup: " << rhsSetup << "\n"
                 << "  BDDC solve calls: " << bddcSolveCalls
                 << " across " << bddcSystems << " interval systems (wall seconds: "
                 << bddcSolve << ", average calls/system: "
@@ -501,7 +509,7 @@ void computeBddcSdcResiduals(Functional& F,
                                                               data.subdomainSizes,
                                                               options.bddcInterfaceTypes);
     if (profile)
-      profile->bddcObjectSetup += ProfileTimes::seconds(interfaceSetupStart);
+      profile->interfaceSetup += ProfileTimes::seconds(interfaceSetupStart);
 
     std::vector<int> solverActiveIds(activeIds);
     bool useCgSolver = options.bddcUseCg != 0;
@@ -546,23 +554,33 @@ void computeBddcSdcResiduals(Functional& F,
         profile->localCollocationSystem += ProfileTimes::seconds(systemStart);
       }
 
-      auto const objectSetupStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
+      auto const subdomainStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
       std::vector<BddcSubdomain> subdomains;
       subdomains.reserve(data.localDofs.size());
       for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
         subdomains.emplace_back(static_cast<int>(subdomain),localJ[subdomain],interfaceAverages);
+      if (profile)
+        profile->subdomainConstruction += ProfileTimes::seconds(subdomainStart);
 
+      auto const transferStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
       for (auto& subdomain : subdomains)
         configureTransfer(subdomain.transfer(),options);
+      if (profile)
+        profile->transferSetup += ProfileTimes::seconds(transferStart);
 
+      auto const solverStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
       Kaskade::BDDC::BDDCSolver<BddcSubdomain> solver(subdomains,
                                                       interfaceAverages.coarseConstraints(),
                                                       solverActiveIds,
                                                       useCgSolver,
                                                       verbose);
+      if (profile)
+        profile->solverConstruction += ProfileTimes::seconds(solverStart);
+
+      auto const rhsSetupStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
       solver.setRhs(rhs);
       if (profile)
-        profile->bddcObjectSetup += ProfileTimes::seconds(objectSetupStart);
+        profile->rhsSetup += ProfileTimes::seconds(rhsSetupStart);
 
       // Solve the collocation interval system to the requested BDDC residual tolerance.
       auto const solveStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
