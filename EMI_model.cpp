@@ -60,7 +60,7 @@ struct EmiOptions
   int refinements = 0;
   int order = 1;
   int maximumNumberOfTimeSteps = 0;
-  int assemblyThreads = 1;
+  int assemblyThreads = 2;
   int maxCGIter = 10000;
   int writeVTK = 1;
   int diagnostics = 0;
@@ -728,7 +728,7 @@ int main(int argc, char* argv[])
     ("bddcInterfaceTypes", options.bddcInterfaceTypes, options.bddcInterfaceTypes, "BDDC interface flags: 1=corner, 2=edge, 4=face, 7=all")
     ("bddcVerbose", options.bddcVerbose, options.bddcVerbose, "print BDDC iteration residuals: 0=no, 1=yes")
     ("bddcUseCg", options.bddcUseCg, options.bddcUseCg, "use CG in BDDC coarse solve path: 0=no, 1=yes")
-    ("nThreads", options.assemblyThreads, options.assemblyThreads, "assembler threads")
+    ("nThreads", options.assemblyThreads, options.assemblyThreads, "number of assembler and BDDC setup threads")
     ("penalty", options.penalty, options.penalty, "boundary penalty")
     ("sigma_i", options.sigmaI, options.sigmaI, "intracellular conductivity")
     ("sigma_e", options.sigmaE, options.sigmaE, "extracellular conductivity")
@@ -902,7 +902,7 @@ int main(int argc, char* argv[])
     printMatrixDiagnostics(stiffness,"sdc stiffness");
 
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
-      gridManager.grid(),uSpace,material,lhs,nDofs);
+      gridManager.grid(),uSpace,material,lhs,nDofs,options.assemblyThreads);
     if (options.bddcCompression)
     {
       using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint16_t,std::uint8_t>;
@@ -933,7 +933,7 @@ int main(int argc, char* argv[])
   {
     std::cout << "time integrator: semi-implicit Euler with BDDC\n";
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
-      gridManager.grid(),uSpace,material,lhs,nDofs);
+      gridManager.grid(),uSpace,material,lhs,nDofs,options.assemblyThreads);
     if (options.bddcCompression)
     {
       using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint16_t,std::uint8_t>;
