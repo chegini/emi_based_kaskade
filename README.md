@@ -81,6 +81,16 @@ The commands use the 10-cell test mesh:
 The input directory is outside the scratch project so it can be shared by all
 solver configurations.
 
+The VTU file must contain cell data named `domain`, whose integer-valued tags
+identify the material region. Each text tag file starts with the number of
+tags, followed by that many integer tags. Keep extracellular and intracellular
+tag lists disjoint; excited tags should identify the intracellular regions to
+stimulate. The initial potential is `0.5` on excited tags and `0` elsewhere.
+
+The mapper uses one shared potential component for extracellular tags and a
+separate disconnected component for each intracellular tag. Thus material
+labels affect both the physical interface terms and the global DOF numbering.
+
 ## Solver configurations
 
 Each scenario has a target in `steps_to_run.mk`:
@@ -102,6 +112,14 @@ For example:
 ```bash
 make -f steps_to_run.mk run-sdc-bddc-aa-compression
 ```
+
+The helper defaults to two threads and one time step for quick checks. Override
+the thread count with `NTHREADS`, for example `make -f steps_to_run.mk
+run-sdc-bddc NTHREADS=4`. The one-step limit is a test setting in
+`steps_to_run.mk`; increase `TIME_ARGS` there for longer runs. For direct
+executable runs, `--nThreads` has the same two-thread default and
+`--maximumNumberOfTimeSteps 0` means use all steps implied by `finalTime` and
+`dt`.
 
 To run all nine configurations sequentially:
 
@@ -181,7 +199,21 @@ are not enabled by default yet.
 
 ## AA behavior
 
-AA selects active subdomains for later SDC sweeps. If one active degree of
-freedom belongs to a subdomain, the implementation activates the complete
-local subdomain and neighboring owners required by the matrix neighborhood.
-This preserves the subdomain-wise BDDC solve structure.
+In ordinary SDC, AA selects active DOFs for later sweeps and expands that set
+through the mass/stiffness matrix neighborhood. In SDC+BDDC, the selection is
+converted to complete owner subdomains, since BDDC solves subdomain-local
+problems. The residual assembly then visits cells incident to the active DOFs
+or subdomains, preserving contributions to their residual rows. With AA off,
+all DOFs or all subdomains remain active on every sweep.
+
+## Numerical method and inputs
+
+See [docs/emi-numerics.md](docs/emi-numerics.md) for the implemented weak-form
+terms, SDC collocation equations and stopping rules, AA selection estimate,
+BDDC partitioning, assumptions, output names, and validation recommendations.
+
+The implementation uses the Aliev-Panfilov membrane model. MPI communication
+is not implemented by this EMI driver; extending communication in Kaskade's
+original `mg/bddc.hpp` is a separate planned task. The compression option
+currently configures compressed transfer; extended compression logs and
+exchange-file output are not enabled by default.
