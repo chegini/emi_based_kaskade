@@ -113,9 +113,10 @@ For example:
 make -f steps_to_run.mk run-sdc-bddc-aa-compression
 ```
 
-The helper defaults to two threads and one time step for quick checks. Override
-the thread count with `NTHREADS`, for example `make -f steps_to_run.mk
-run-sdc-bddc NTHREADS=4`. The one-step limit is a test setting in
+The helper defaults to two threads and one time step for quick checks. `--nThreads`
+limits parallel assembly and BDDC subdomain construction. Override the thread
+count with `NTHREADS`, for example `make -f steps_to_run.mk run-sdc-bddc
+NTHREADS=4`. The one-step limit is a test setting in
 `steps_to_run.mk`; increase `TIME_ARGS` there for longer runs. For direct
 executable runs, `--nThreads` has the same two-thread default and
 `--maximumNumberOfTimeSteps 0` means use all steps implied by `finalTime` and
@@ -144,7 +145,9 @@ default and currently instruments the SDC+BDDC path. It also reports the number
 of subdomain constructions. Although interval operators repeat between time
 steps, caching their factorizations is deferred: BDDC subdomains retain mutable
 solution and transfer state, so reuse first needs a well-defined reset operation
-in the BDDC layer.
+in the BDDC layer. Subdomain construction is parallelized across independent
+subdomains, with results restored to subdomain-ID order before creating the
+BDDC solver.
 
 ## Compression controls
 
