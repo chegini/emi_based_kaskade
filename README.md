@@ -136,10 +136,11 @@ make -f steps_to_run.mk run-sdc-bddc-aa \
 ```
 
 The report separates local operator extraction, residual assembly, local
-collocation matrix/RHS construction, BDDC object setup, BDDC solve calls and
-time, SDC updates, and AA selection. `PROFILE_ARGS` and `VTK` are also
-available on the other SDC+BDDC targets. Profiling is off by default and
-currently instruments the SDC+BDDC path.
+collocation matrix/RHS construction, interface setup, subdomain construction
+and factorization, transfer configuration, BDDC solver/coarse setup, RHS setup,
+BDDC solve calls and time, SDC updates, and AA selection. `PROFILE_ARGS` and
+`VTK` are also available on the other SDC+BDDC targets. Profiling is off by
+default and currently instruments the SDC+BDDC path.
 
 ## Compression controls
 
