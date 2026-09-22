@@ -4,6 +4,20 @@ NTHREADS ?= 2
 THREAD_ARGS := --nThreads $(NTHREADS)
 PROFILE_ARGS ?=
 VTK ?= 1
+BLAS_ENV := OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+COMPRESSION_BITS ?= 16
+
+# Compression scenarios. The report separates logical raw traffic from the
+# transmitted payload and reports the shared codebook estimate separately.
+BDDCC_REPORT_ARGS := --bddcCompressionReport 1
+BDDCC_QUANTIZATION_ARGS := --bddcCompression 1 --bddcCompressionBits $(COMPRESSION_BITS) \
+  --bddcGraphLifting 0 --bddcHuffman 0 --bddcBitlength 0 $(BDDCC_REPORT_ARGS)
+BDDCC_HUFFMAN_ARGS := --bddcCompression 1 --bddcCompressionBits $(COMPRESSION_BITS) \
+  --bddcGraphLifting 0 --bddcHuffman 1 --bddcBitlength 0 $(BDDCC_REPORT_ARGS)
+BDDCC_FULL_ARGS := --bddcCompression 1 --bddcCompressionBits $(COMPRESSION_BITS) \
+  --bddcGraphLifting 0 --bddcHuffman 1 --bddcBitlength 1 $(BDDCC_REPORT_ARGS)
+BDDCC_GRAPH_ARGS := --bddcCompression 1 --bddcCompressionBits $(COMPRESSION_BITS) \
+  --bddcGraphLifting 1 --bddcHuffman 1 --bddcBitlength 1 $(BDDCC_REPORT_ARGS)
 
 COMMON_ARGS := \
   --input ../input_emi_mesh/10Cells3d_10extra_mesh.vtu \
@@ -21,9 +35,9 @@ SDC_ARGS := \
   --maximumSdcSweeps 4
 
 VTK_TEST_TIME_ARGS := \
-  --finalTime 0.01 \
+  --finalTime 0.02 \
   --dt 0.01 \
-  --maximumNumberOfTimeSteps 1
+  --maximumNumberOfTimeSteps 2
 
 BDDC_ARGS := \
   --bddcIterations 100 \
@@ -34,7 +48,8 @@ AA_ARGS := \
   --algebraicAdaptivityTolerance 1e-4
 
 .PHONY: help build clean \
-  run-emi run-sdc run-sdc-aa run-bddc run-bddc-compression \
+  run-emi run-sdc run-sdc-aa run-bddc run-bddc-quantization \
+  run-bddc-huffman run-bddc-full run-bddc-graph run-bddc-compression \
   run-sdc-bddc run-sdc-bddc-aa run-sdc-bddc-compression \
   run-sdc-bddc-aa-compression run-sdc-bddc-aa-vtk-off-test run-all
 
@@ -47,6 +62,10 @@ help:
 	@echo "  make -f steps_to_run.mk run-sdc"
 	@echo "  make -f steps_to_run.mk run-sdc-aa"
 	@echo "  make -f steps_to_run.mk run-bddc"
+	@echo "  make -f steps_to_run.mk run-bddc-quantization"
+	@echo "  make -f steps_to_run.mk run-bddc-huffman"
+	@echo "  make -f steps_to_run.mk run-bddc-full"
+	@echo "  make -f steps_to_run.mk run-bddc-graph"
 	@echo "  make -f steps_to_run.mk run-bddc-compression"
 	@echo "  make -f steps_to_run.mk run-sdc-bddc"
 	@echo "  make -f steps_to_run.mk run-sdc-bddc-aa"
@@ -62,41 +81,60 @@ clean:
 	$(MAKE) -f Makefile clean
 
 run-emi: build
-	./$(TARGET) $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) --dir output/emi --vtk 1
+	$(BLAS_ENV) ./$(TARGET) $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) --dir output/emi --vtk 1
 
 run-sdc: build
-	./$(TARGET) --sdc 1 $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) --dir output/sdc --vtk 1
+	$(BLAS_ENV) ./$(TARGET) --sdc 1 $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) --dir output/sdc --vtk 1
 
 run-sdc-aa: build
-	./$(TARGET) --sdc 1 $(THREAD_ARGS) $(AA_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) --dir output/sdc_aa --vtk 1
+	$(BLAS_ENV) ./$(TARGET) --sdc 1 $(THREAD_ARGS) $(AA_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) --dir output/sdc_aa --vtk 1
 
 run-bddc: build
-	./$(TARGET) --bddc 1 --bddcCompression 0 $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(BDDC_ARGS) --dir output/bddc --vtk 1
+	$(BLAS_ENV) ./$(TARGET) --bddc 1 --bddcCompression 0 --bddcCompressionReport 1 \
+	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(BDDC_ARGS) --dir output/bddc --vtk 1
+
+run-bddc-quantization: build
+	mkdir -p output/compression/bddc_quantization
+	$(BLAS_ENV) ./$(TARGET) $(BDDCC_QUANTIZATION_ARGS) $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(BDDC_ARGS) \
+	  --dir output/compression/bddc_quantization --vtk $(VTK)
+
+run-bddc-huffman: build
+	mkdir -p output/compression/bddc_huffman
+	$(BLAS_ENV) ./$(TARGET) $(BDDCC_HUFFMAN_ARGS) $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(BDDC_ARGS) \
+	  --dir output/compression/bddc_huffman --vtk $(VTK)
+
+run-bddc-full: build
+	mkdir -p output/compression/bddc_full
+	$(BLAS_ENV) ./$(TARGET) $(BDDCC_FULL_ARGS) $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(BDDC_ARGS) \
+	  --dir output/compression/bddc_full --vtk $(VTK)
+
+run-bddc-graph: build
+	mkdir -p output/compression/bddc_graph
+	$(BLAS_ENV) ./$(TARGET) $(BDDCC_GRAPH_ARGS) $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(BDDC_ARGS) \
+	  --dir output/compression/bddc_graph --vtk $(VTK)
 
 run-bddc-compression: build
-	mkdir -p output/compression/bddc
-	./$(TARGET) --bddc 1 --bddcCompression 1 --bddcCompressionBits 16 \
-	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(BDDC_ARGS) --dir output/compression/bddc --vtk 1
+	$(MAKE) -f steps_to_run.mk run-bddc-graph VTK=1
 
 run-sdc-bddc: build
-	./$(TARGET) --sdc 1 --bddc 1 --bddcCompression 0 \
+	$(BLAS_ENV) ./$(TARGET) --sdc 1 --bddc 1 --bddcCompression 0 --bddcCompressionReport 1 \
 	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) $(PROFILE_ARGS) \
 	  --dir output/sdc_bddc --vtk $(VTK)
 
 run-sdc-bddc-aa: build
-	./$(TARGET) --sdc 1 --bddc 1 --bddcCompression 0 $(AA_ARGS) \
+	$(BLAS_ENV) ./$(TARGET) --sdc 1 --bddc 1 --bddcCompression 0 --bddcCompressionReport 1 $(AA_ARGS) \
 	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) $(PROFILE_ARGS) \
 	  --dir output/sdc_bddc_aa --vtk $(VTK)
 
 run-sdc-bddc-compression: build
 	mkdir -p output/compression/sdc_bddc
-	./$(TARGET) --sdc 1 --bddc 1 --bddcCompression 1 --bddcCompressionBits 16 \
+	$(BLAS_ENV) ./$(TARGET) --sdc 1 --bddc 1 $(BDDCC_GRAPH_ARGS) \
 	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) $(PROFILE_ARGS) \
 	  --dir output/compression/sdc_bddc --vtk $(VTK)
 
 run-sdc-bddc-aa-compression: build
 	mkdir -p output/compression/sdc_bddc_aa
-	./$(TARGET) --sdc 1 --bddc 1 --bddcCompression 1 --bddcCompressionBits 16 $(AA_ARGS) \
+	$(BLAS_ENV) ./$(TARGET) --sdc 1 --bddc 1 $(BDDCC_GRAPH_ARGS) $(AA_ARGS) \
 	  $(THREAD_ARGS) $(COMMON_ARGS) $(TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) $(PROFILE_ARGS) \
 	  --dir output/compression/sdc_bddc_aa --vtk $(VTK)
 
@@ -105,6 +143,7 @@ run-sdc-bddc-aa-vtk-off-test: build
 	  $(THREAD_ARGS) $(COMMON_ARGS) $(VTK_TEST_TIME_ARGS) $(SDC_ARGS) $(BDDC_ARGS) \
 	  --dir output/vtk_disabled_after_rebuild --vtk 0
 
-run-all: run-emi run-sdc run-sdc-aa run-bddc run-bddc-compression \
+run-all: run-emi run-sdc run-sdc-aa run-bddc run-bddc-quantization \
+         run-bddc-huffman run-bddc-full run-bddc-graph \
          run-sdc-bddc run-sdc-bddc-aa run-sdc-bddc-compression \
          run-sdc-bddc-aa-compression
