@@ -934,7 +934,7 @@ int main(int argc, char* argv[])
                                         ? "/emiSDCBDDCLastCompression"
                                         : "/emiSDCBDDCLast"));
     std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
-    std::cout << "End EMI-only model\n";
+    std::cout << "EMI model completed\n";
     return 0;
   }
 
@@ -945,7 +945,7 @@ int main(int argc, char* argv[])
     if (options.writeVTK)
       writeState(u,uAll,options.order,options.outputDir + "/emiSDCLast");
     std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
-    std::cout << "End EMI-only model\n";
+    std::cout << "EMI model completed\n";
     return 0;
   }
 
@@ -977,7 +977,7 @@ int main(int argc, char* argv[])
                                         ? "/emiBDDCLastCompression"
                                         : "/emiBDDCLast"));
     std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
-    std::cout << "End EMI-only model\n";
+    std::cout << "EMI model completed\n";
     return 0;
   }
 
@@ -1012,5 +1012,5 @@ int main(int argc, char* argv[])
     writeState(u,uAll,options.order,options.outputDir + "/emiLast");
 
   std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
-  std::cout << "End EMI-only model\n";
+  std::cout << "EMI model completed\n";
 }
