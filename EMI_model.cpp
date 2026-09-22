@@ -75,6 +75,7 @@ struct EmiOptions
   int bddc = 0;
   int bddcCompression = 0;
   int bddcCompressionBits = 16;
+  int bddcGraphLifting = 1;
   int bddcIterations = 3000;
   int bddcInterfaceTypes = 7;
   int bddcVerbose = 0;
@@ -740,6 +741,7 @@ int main(int argc, char* argv[])
     ("bddc", options.bddc, options.bddc, "use BDDC solver for EMI: 0=no, 1=yes")
     ("bddcCompression", options.bddcCompression, options.bddcCompression, "use quantized BDDC transfer: 0=no, 1=yes")
     ("bddcCompressionBits", options.bddcCompressionBits, options.bddcCompressionBits, "quantization bits for compressed BDDC transfer")
+    ("bddcGraphLifting", options.bddcGraphLifting, options.bddcGraphLifting, "use graph-lifting transform in compressed BDDC transfer: 0=none, 1=graph lifting")
     ("bddcIterations", options.bddcIterations, options.bddcIterations, "maximum BDDC iterations per time step")
     ("bddcTolerance", options.bddcTolerance, options.bddcTolerance, "BDDC residual tolerance")
     ("bddcInterfaceTypes", options.bddcInterfaceTypes, options.bddcInterfaceTypes, "BDDC interface flags: 1=corner, 2=edge, 4=face, 7=all")

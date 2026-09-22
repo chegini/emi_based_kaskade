@@ -300,11 +300,13 @@ namespace EmiBddc
                   })
     {
       transfer.setQuantizationBits(options.bddcCompressionBits);
-      transfer.enableTransform(Kaskade::BDDC::TransformType::DCT);
+      transfer.enableTransform(options.bddcGraphLifting
+                                 ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
+                                 : Kaskade::BDDC::TransformType::NONE);
       transfer.setRestrictEncoding(true);
       transfer.setProlongateEncoding(true);
-      transfer.setRestrictTransform(true);
-      transfer.setProlongateTransform(true);
+      transfer.setRestrictTransform(options.bddcGraphLifting != 0);
+      transfer.setProlongateTransform(options.bddcGraphLifting != 0);
       transfer.setRestrictBitlengthEncoding(true);
       transfer.setProlongateBitlengthEncoding(true);
     }
@@ -325,6 +327,10 @@ namespace EmiBddc
       try
       {
         slots[subdomain].emplace(static_cast<int>(subdomain),localOperators[subdomain],interfaces);
+        if constexpr (requires(Subdomain& subdomainObject, Matrix const& matrix) {
+                        subdomainObject.transfer().setGraphLiftingFromMatrix(matrix);
+                      })
+          slots[subdomain]->transfer().setGraphLiftingFromMatrix(localOperators[subdomain]);
       }
       catch (...)
       {
@@ -893,11 +899,13 @@ State runBddcSdc(Functional& F,
         for (auto& subdomain : subdomains)
         {
           subdomain.transfer().setQuantizationBits(options.bddcCompressionBits);
-          subdomain.transfer().enableTransform(Kaskade::BDDC::TransformType::DCT);
+          subdomain.transfer().enableTransform(options.bddcGraphLifting
+                                                 ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
+                                                 : Kaskade::BDDC::TransformType::NONE);
           subdomain.transfer().setRestrictEncoding(true);
           subdomain.transfer().setProlongateEncoding(true);
-          subdomain.transfer().setRestrictTransform(true);
-          subdomain.transfer().setProlongateTransform(true);
+          subdomain.transfer().setRestrictTransform(options.bddcGraphLifting != 0);
+          subdomain.transfer().setProlongateTransform(options.bddcGraphLifting != 0);
           subdomain.transfer().setRestrictBitlengthEncoding(true);
           subdomain.transfer().setProlongateBitlengthEncoding(true);
         }
