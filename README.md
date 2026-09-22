@@ -173,9 +173,39 @@ kaskade7_new/mg/prefixcoder.hpp
 kaskade7_new/mg/alphabet.hh
 ```
 
-The compressed path configures DCT transform, quantization, bit-length coding,
-and Huffman coding for both restriction and prolongation. If compression is
-disabled, the standard `SpaceTransfer` implementation is used.
+The compressed path configures quantization, bit-length coding, and Huffman
+coding for both restriction and prolongation. The transform is selected with:
+
+```bash
+--bddcGraphLifting 0   # no transform
+--bddcGraphLifting 1   # connectivity-based graph lifting
+```
+
+Graph lifting is initialized from the local BDDC matrix sparsity, so it uses
+finite-element connectivity rather than the arbitrary ordering of an
+unstructured interface vector. If compression is disabled, the standard
+`SpaceTransfer` implementation is used.
+
+The compressed transfer pipeline is:
+
+```text
+values -> optional graph lifting -> quantization -> zigzag/bit-length coding
+       -> Huffman encoding -> compressed payload
+```
+
+Decoding applies the exact inverse order:
+
+```text
+compressed payload -> Huffman decoding -> bit-length/zigzag reconstruction
+                    -> dequantization -> inverse graph lifting -> values
+```
+
+The restriction and prolongation codebooks are built from the first transfer
+data encountered by a process and then reused by later BDDC iterations and
+time steps. Later transfers rebuild only when the transfer layout changes; the
+normal per-iteration work is encoding/decoding the payload with the existing
+codebook. The shared codebook is process-local, so this policy does not yet
+describe MPI-rank sharing.
 
 ## Output files
 
