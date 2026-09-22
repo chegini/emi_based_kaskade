@@ -181,6 +181,22 @@ coding for both restriction and prolongation. The transform is selected with:
 --bddcGraphLifting 1   # connectivity-based graph lifting
 ```
 
+The compressed stages can be isolated for volume studies:
+
+```bash
+--bddcCompression 1 --bddcHuffman 0 --bddcBitlength 0  # quantization only
+--bddcCompression 1 --bddcHuffman 1 --bddcBitlength 0  # quantization + Huffman
+--bddcCompression 1 --bddcHuffman 1 --bddcBitlength 1  # full coded pipeline
+```
+
+`--bddcCompressionReport 1` prints aggregate logical and transmitted byte
+counts, bits saved, savings percentage, compression ratio, and the estimated
+shared codebook size.
+For SDC+BDDC+AA the report covers all collocation intervals, sweeps, and time
+steps. The transmitted count includes the packed per-message metadata and
+payload; the shared process-local Huffman codebook is not repeated per
+message. Use `--bddcCompressionReport 0` to suppress the report.
+
 Graph lifting is initialized from the local BDDC matrix sparsity, so it uses
 finite-element connectivity rather than the arbitrary ordering of an
 unstructured interface vector. If compression is disabled, the standard

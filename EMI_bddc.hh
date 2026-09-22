@@ -2,8 +2,10 @@
 #define EMI_BDDC_HH
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <exception>
 #include <iostream>
 #include <limits>
@@ -30,6 +32,61 @@
 
 namespace EmiBddc
 {
+  struct CompressionReport
+  {
+    std::uint64_t originalSentBytes = 0;
+    std::uint64_t originalReceivedBytes = 0;
+    std::uint64_t sentBytes = 0;
+    std::uint64_t receivedBytes = 0;
+    double encodeTimeMs = 0.0;
+    double decodeTimeMs = 0.0;
+    std::uint64_t encodeCount = 0;
+    std::uint64_t decodeCount = 0;
+    std::uint64_t codebookBits = 0;
+
+    template <class Traffic>
+    void add(Traffic const& traffic)
+    {
+      originalSentBytes += traffic.originalSentBytes;
+      originalReceivedBytes += traffic.originalReceivedBytes;
+      sentBytes += traffic.sentBytes;
+      receivedBytes += traffic.receivedBytes;
+      encodeTimeMs += traffic.encodeTimeMs;
+      decodeTimeMs += traffic.decodeTimeMs;
+      encodeCount += traffic.encodeCount;
+      decodeCount += traffic.decodeCount;
+      codebookBits = std::max(codebookBits, traffic.codebookBits);
+    }
+
+    void addUncompressed(std::array<int,6> const& traffic)
+    {
+      std::uint64_t const bytes = static_cast<std::uint64_t>(traffic[3] + traffic[4]);
+      originalSentBytes += bytes;
+      originalReceivedBytes += bytes;
+      sentBytes += bytes;
+      receivedBytes += bytes;
+    }
+
+    void print(std::string const& label) const
+    {
+      std::uint64_t const raw = originalSentBytes;
+      std::uint64_t const wire = sentBytes;
+      std::int64_t const saved = static_cast<std::int64_t>(raw)
+                               - static_cast<std::int64_t>(wire);
+      double const ratio = wire > 0 ? static_cast<double>(raw)/wire : 1.0;
+      double const percent = raw > 0 ? 100.0*static_cast<double>(saved)/raw : 0.0;
+      std::cout << "Compression report (" << label << "):\n"
+                << "  raw sent bytes: " << raw << "\n"
+                << "  transmitted sent bytes: " << wire << "\n"
+                << "  bits saved: " << saved*8 << "\n"
+                << "  savings: " << percent << "%\n"
+                << "  ratio: " << ratio << ":1\n"
+                << "  shared codebook estimate: " << codebookBits << " bits\n"
+                << "  raw received bytes: " << originalReceivedBytes << "\n"
+                << "  received bytes: " << receivedBytes << "\n";
+    }
+  };
+
   struct ProfileTimes
   {
     using Clock = std::chrono::steady_clock;
@@ -303,12 +360,12 @@ namespace EmiBddc
       transfer.enableTransform(options.bddcGraphLifting
                                  ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
                                  : Kaskade::BDDC::TransformType::NONE);
-      transfer.setRestrictEncoding(true);
-      transfer.setProlongateEncoding(true);
+      transfer.setRestrictEncoding(options.bddcHuffman != 0);
+      transfer.setProlongateEncoding(options.bddcHuffman != 0);
       transfer.setRestrictTransform(options.bddcGraphLifting != 0);
       transfer.setProlongateTransform(options.bddcGraphLifting != 0);
-      transfer.setRestrictBitlengthEncoding(true);
-      transfer.setProlongateBitlengthEncoding(true);
+      transfer.setRestrictBitlengthEncoding(options.bddcBitlength != 0);
+      transfer.setProlongateBitlengthEncoding(options.bddcBitlength != 0);
     }
   }
 
@@ -549,7 +606,8 @@ void computeBddcSdcResiduals(Functional& F,
                                                    std::vector<std::vector<Vector>>& corrections,
                                                    std::vector<int> const& activeIds,
                                                    Options const& options,
-                                                   ProfileTimes* profile = nullptr)
+                                                   ProfileTimes* profile = nullptr,
+                                                   CompressionReport* compressionReport = nullptr)
   {
     using BddcSubdomain = Kaskade::BDDC::Subdomain<1,double,double,Transfer>;
 
@@ -654,6 +712,13 @@ void computeBddcSdcResiduals(Functional& F,
         if (residual < options.bddcTolerance)
           break;
       }
+      if (compressionReport)
+      {
+        if (options.bddcCompression)
+          compressionReport->add(solver.compressionTraffic());
+        else
+          compressionReport->addUncompressed(solver.traffic());
+      }
       if (profile)
         profile->bddcSolve += ProfileTimes::seconds(solveStart);
 
@@ -700,6 +765,7 @@ State runBddcSdc(Functional& F,
 
     Assembler assembler(spaces);
     Kaskade::SemiImplicitEulerStep<Functional> equation(&F,options.dt);
+    CompressionReport compressionReport;
 
     for (int step = 0; step < steps; ++step)
     {
@@ -755,7 +821,8 @@ State runBddcSdc(Functional& F,
 
         sweepNorms.push_back(sdcIterationStepBddc<Transfer>(grid,Shat,data,localMassMatrices,localStiffnessMatrices,
                                                             residuals,massDifferences,corrections,activeIds,options,
-                                                            options.profile ? &profile : nullptr));
+                                                            options.profile ? &profile : nullptr,
+                                                            options.bddcCompressionReport ? &compressionReport : nullptr));
 
         auto const correctionUpdateStart = options.profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
         for (int i = 1; i < grid.points().N(); ++i)
@@ -824,6 +891,8 @@ State runBddcSdc(Functional& F,
 
     if (options.profile)
       profile.print("SDC + BDDC");
+    if (options.bddcCompressionReport)
+      compressionReport.print("SDC + BDDC");
     return state;
   }
 
@@ -853,6 +922,7 @@ State runBddcSdc(Functional& F,
     Assembler assembler(spaces);
     auto zeroState(state);
     auto stepState(state);
+    CompressionReport compressionReport;
     zeroState *= 0.0;
     stepState *= 0.0;
 
@@ -902,12 +972,12 @@ State runBddcSdc(Functional& F,
           subdomain.transfer().enableTransform(options.bddcGraphLifting
                                                  ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
                                                  : Kaskade::BDDC::TransformType::NONE);
-          subdomain.transfer().setRestrictEncoding(true);
-          subdomain.transfer().setProlongateEncoding(true);
+          subdomain.transfer().setRestrictEncoding(options.bddcHuffman != 0);
+          subdomain.transfer().setProlongateEncoding(options.bddcHuffman != 0);
           subdomain.transfer().setRestrictTransform(options.bddcGraphLifting != 0);
           subdomain.transfer().setProlongateTransform(options.bddcGraphLifting != 0);
-          subdomain.transfer().setRestrictBitlengthEncoding(true);
-          subdomain.transfer().setProlongateBitlengthEncoding(true);
+          subdomain.transfer().setRestrictBitlengthEncoding(options.bddcBitlength != 0);
+          subdomain.transfer().setProlongateBitlengthEncoding(options.bddcBitlength != 0);
         }
       }
 
@@ -933,6 +1003,13 @@ State runBddcSdc(Functional& F,
         if (residual < options.bddcTolerance)
           break;
       }
+      if (options.bddcCompressionReport)
+      {
+        if (options.bddcCompression)
+          compressionReport.add(solver.compressionTraffic());
+        else
+          compressionReport.addUncompressed(solver.traffic());
+      }
 
       Vector stepVector(nDofs);
       stepVector = 0.0;
@@ -956,6 +1033,8 @@ State runBddcSdc(Functional& F,
                   << ", residual=" << residual << "\n";
     }
 
+    if (options.bddcCompressionReport)
+      compressionReport.print("BDDC");
     return state;
   }
 }
