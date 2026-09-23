@@ -12,11 +12,14 @@
 #include <map>
 #include <mutex>
 #include <numeric>
-#include <optional>
 #include <set>
 #include <stdexcept>
 #include <utility>
 #include <vector>
+
+#ifdef KASKADE_HAVE_MPI
+#include <mpi.h>
+#endif
 
 #include <dune/common/fvector.hh>
 #include <dune/grid/common/rangegenerators.hh>
@@ -369,58 +372,9 @@ namespace EmiBddc
     }
   }
 
-  // Construct independent BDDC subdomains concurrently, then move them into the
-  // ordered vector required by BDDCSolver. Each worker writes to a distinct slot.
-  template <class Subdomain, class Matrix, class Interfaces>
-  std::vector<Subdomain> constructSubdomains(std::vector<Matrix> const& localOperators,
-                                             Interfaces const& interfaces,
-                                             int nThreads)
-  {
-    std::vector<std::optional<Subdomain>> slots(localOperators.size());
-    std::exception_ptr constructionError;
-    std::mutex constructionErrorMutex;
-    auto construct = [&](size_t subdomain)
-    {
-      try
-      {
-        slots[subdomain].emplace(static_cast<int>(subdomain),localOperators[subdomain],interfaces);
-        if constexpr (requires(Subdomain& subdomainObject, Matrix const& matrix) {
-                        subdomainObject.transfer().setGraphLiftingFromMatrix(matrix);
-                      })
-          slots[subdomain]->transfer().setGraphLiftingFromMatrix(localOperators[subdomain]);
-      }
-      catch (...)
-      {
-        std::lock_guard<std::mutex> lock(constructionErrorMutex);
-        if (!constructionError)
-          constructionError = std::current_exception();
-      }
-    };
-
-    size_t const taskLimit = nThreads > 0 ? static_cast<size_t>(nThreads)
-                                         : std::numeric_limits<size_t>::max();
-    if (taskLimit > 1)
-      Kaskade::parallelFor(0,localOperators.size(),construct,taskLimit);
-    else
-      for (size_t subdomain = 0; subdomain < localOperators.size(); ++subdomain)
-        construct(subdomain);
-
-    if (constructionError)
-      std::rethrow_exception(constructionError);
-
-    std::vector<Subdomain> subdomains;
-    subdomains.reserve(localOperators.size());
-    for (auto& slot : slots)
-    {
-      if (!slot)
-        throw std::runtime_error("BDDC subdomain construction did not populate every slot.");
-      subdomains.emplace_back(std::move(*slot));
-    }
-    return subdomains;
-  }
-
-  // Construct only the subdomains owned by this rank. The global slot number
-  // is preserved so interface and coarse-space indices remain deterministic.
+  // Construct only the subdomains owned by this rank. In serial mode the
+  // ownership layout contains every subdomain, so the same path also covers
+  // non-MPI BDDC without maintaining a replicated MPI implementation.
   template <class Subdomain, class Matrix, class Interfaces>
   Kaskade::BDDC::OwnedSubdomainStorage<Subdomain>
   constructOwnedSubdomains(std::vector<Matrix> const& localOperators,
@@ -723,23 +677,27 @@ void computeBddcSdcResiduals(Functional& F,
 
       // Each construction factors one interval matrix; these independent factorizations
       // are parallelized, but the resulting mutable subdomains are not reused across systems.
-      auto subdomains = constructSubdomains<BddcSubdomain>(localJ,interfaceAverages,
-                                                            options.assemblyThreads);
+      bool const mpiEnabled = options.mpi != 0;
+      auto subdomains = constructOwnedSubdomains<BddcSubdomain>(localJ,interfaceAverages,
+                                                                 options.assemblyThreads,
+                                                                 mpiEnabled);
       if (profile)
         profile->subdomainConstruction += ProfileTimes::seconds(subdomainStart);
 
       auto const transferStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
-      for (auto& subdomain : subdomains)
-        configureTransfer(subdomain.transfer(),options);
+      for (size_t id = 0; id < subdomains.size(); ++id)
+        if (subdomains.has(id))
+          configureTransfer(subdomains[id].transfer(),options);
       if (profile)
         profile->transferSetup += ProfileTimes::seconds(transferStart);
 
       auto const solverStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
-      Kaskade::BDDC::BDDCSolver<BddcSubdomain> solver(subdomains,
-                                                      interfaceAverages.coarseConstraints(),
-                                                      solverActiveIds,
-                                                      useCgSolver,
-                                                      verbose);
+      Kaskade::BDDC::BDDCSolver<BddcSubdomain,decltype(subdomains)> solver(subdomains,
+                                                                            interfaceAverages.coarseConstraints(),
+                                                                            solverActiveIds,
+                                                                            useCgSolver,
+                                                                            verbose,
+                                                                            mpiEnabled);
       if (profile)
         profile->solverConstruction += ProfileTimes::seconds(solverStart);
 
@@ -771,7 +729,8 @@ void computeBddcSdcResiduals(Functional& F,
         profile->bddcSolve += ProfileTimes::seconds(solveStart);
 
       for (int subdomain : activeIds)
-        corrections[i][subdomain] = subdomains[subdomain].getSolution();
+        if (subdomains.has(subdomain))
+          corrections[i][subdomain] = subdomains[subdomain].getSolution();
 
       if (verbose)
         std::cout << "    BDDC SDC interval " << i << "/" << intervals
@@ -782,7 +741,12 @@ void computeBddcSdcResiduals(Functional& F,
         norm += (points[i]-points[i-1]) * (corrections[i][subdomain] * rhs[subdomain]);
     }
 
-    return std::sqrt(std::max<typename Matrix::field_type>(0.0,norm/(points[intervals]-points[0])));
+    double globalNorm = norm;
+#ifdef KASKADE_HAVE_MPI
+    if (options.mpi != 0)
+      MPI_Allreduce(&norm,&globalNorm,1,MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+#endif
+    return std::sqrt(std::max<typename Matrix::field_type>(0.0,globalNorm/(points[intervals]-points[0])));
   }
 
 template <class Transfer, class Functional, class Spaces, class State, class Element, class Matrix, class Vector, class Options, class IndexSet>
@@ -876,6 +840,15 @@ State runBddcSdc(Functional& F,
         for (int i = 1; i < grid.points().N(); ++i)
         {
           Vector globalCorrection = combineSubdomainVector(data,corrections[i],nDofs);
+#ifdef KASKADE_HAVE_MPI
+          if (options.mpi != 0)
+          {
+            Vector reducedCorrection(nDofs);
+            MPI_Allreduce(globalCorrection.data(),reducedCorrection.data(),
+                          static_cast<int>(nDofs),MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+            globalCorrection = std::move(reducedCorrection);
+          }
+#endif
           for (size_t j = 0; j < nDofs; ++j)
             collocationStates[i].coefficients()[j] += globalCorrection[j];
         }
@@ -1004,7 +977,7 @@ State runBddcSdc(Functional& F,
       auto subdomains = constructOwnedSubdomains<BddcSubdomain>(data.localMatrices,
                                                                  interfaceAverages,
                                                                  options.assemblyThreads,
-                                                                 options.bddcMPI != 0);
+                                                                 options.mpi != 0);
 
       if constexpr (requires(Transfer& transfer) {
                       transfer.setQuantizationBits(0);
@@ -1044,8 +1017,7 @@ State runBddcSdc(Functional& F,
                                                       activeIds,
                                                       useCgSolver,
                                                       verbose,
-                                                      options.bddcMPI != 0);
-      solver.setMpiEnabled(options.bddcMPI != 0);
+                                                      options.mpi != 0);
       solver.setRhs(subdomainRhs);
 
       double residual = std::numeric_limits<double>::infinity();
@@ -1083,7 +1055,7 @@ State runBddcSdc(Functional& F,
 
       std::vector<double> globalStep(localStep.size(), 0.0);
 #ifdef KASKADE_HAVE_MPI
-      if (options.bddcMPI)
+      if (options.mpi != 0)
         MPI_Allreduce(localStep.data(), globalStep.data(), static_cast<int>(nDofs),
                       MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
       else
