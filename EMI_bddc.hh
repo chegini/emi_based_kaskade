@@ -344,6 +344,37 @@ namespace EmiBddc
     return activeIds;
   }
 
+  // AA decisions are made from rank-local corrections. In owner-only MPI mode,
+  // combine them before the next sweep so every rank enters the same solver
+  // collectives with the same global active-subdomain set.
+  inline std::vector<int> synchronizeActiveSubdomains(std::vector<int> activeIds,
+                                                       size_t nSubdomains,
+                                                       bool mpiEnabled)
+  {
+#ifdef KASKADE_HAVE_MPI
+    if (mpiEnabled)
+    {
+      std::vector<int> localMask(nSubdomains,0);
+      std::vector<int> globalMask(nSubdomains,0);
+      for (int id : activeIds)
+        if (id >= 0 && static_cast<size_t>(id) < nSubdomains)
+          localMask[static_cast<size_t>(id)] = 1;
+
+      MPI_Allreduce(localMask.data(),globalMask.data(),static_cast<int>(nSubdomains),
+                    MPI_INT,MPI_MAX,MPI_COMM_WORLD);
+
+      activeIds.clear();
+      for (size_t id = 0; id < nSubdomains; ++id)
+        if (globalMask[id] != 0)
+          activeIds.push_back(static_cast<int>(id));
+    }
+#else
+    (void)nSubdomains;
+    (void)mpiEnabled;
+#endif
+    return activeIds;
+  }
+
   // Configure compression only for transfer types that provide the optional
   // compression API. The ordinary SpaceTransfer remains unchanged.
   template <class Transfer, class Options>
@@ -877,6 +908,9 @@ State runBddcSdc(Functional& F,
         auto const adaptivityStart = options.profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
         std::vector<int> nextActiveIds = selectActiveSubdomains(data,corrections,activeIds,
                                                                 dofNeighborhood,sdcContraction,options);
+        nextActiveIds = synchronizeActiveSubdomains(std::move(nextActiveIds),
+                                                    data.localDofs.size(),
+                                                    options.mpi != 0);
         if (options.profile)
           profile.adaptivity += ProfileTimes::seconds(adaptivityStart);
         if (options.algebraicAdaptivity && options.algebraicAdaptivityTolerance > 0.0)
