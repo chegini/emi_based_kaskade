@@ -138,12 +138,13 @@ Each scenario has a target in `steps_to_run.mk`:
 | EMI + BDDC + compression | `run-bddc-compression` | `--bddc 1 --bddcCompression 1` |
 | EMI + SDC + BDDC | `run-sdc-bddc` | `--sdc 1 --bddc 1 --bddcCompression 0` |
 
-MPI-BDDC is introduced incrementally. The first stage is enabled with
-`--mpi 1 --bddcMPI 1`; it validates MPI initialization, requires the number
-of ranks not to exceed the number of BDDC subdomains, and reports deterministic
-round-robin ownership. The numerical BDDC path remains unchanged in this
-stage. Batched restriction/prolongation exchange and the distributed coarse
-solve are added only after this ownership check is validated.
+MPI-BDDC is introduced incrementally. `--mpi 1 --bddcMPI 1` validates MPI
+initialization, requires the number of ranks not to exceed the number of BDDC
+subdomains, reports deterministic round-robin ownership, and exchanges remote
+decoded interface payloads with one collective for restriction and one for
+prolongation. The solver is still replicated in this stage; compressed byte
+payloads, distributed subdomain storage, and the distributed coarse solve are
+separate follow-up stages.
 | EMI + SDC + BDDC + AA | `run-sdc-bddc-aa` | adds AA to SDC+BDDC |
 | EMI + SDC + BDDC + compression | `run-sdc-bddc-compression` | compressed BDDC transfer |
 | EMI + SDC + BDDC + AA + compression | `run-sdc-bddc-aa-compression` | compressed transfer plus AA |
