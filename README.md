@@ -142,8 +142,9 @@ MPI-BDDC is introduced incrementally. `--mpi 1 --bddcMPI 1` validates MPI
 initialization, requires the number of ranks not to exceed the number of BDDC
 subdomains, reports deterministic round-robin ownership, and exchanges remote
 decoded interface payloads with one collective for restriction and one for
-prolongation. The solver is still replicated in this stage; compressed byte
-payloads, distributed subdomain storage, and the distributed coarse solve are
+prolongation. Fine-grid BDDC work is owner-only and coarse contributions are
+globally reduced, while subdomain objects are still constructed redundantly on
+each rank. Compressed byte payloads and memory-distributed construction remain
 separate follow-up stages.
 | EMI + SDC + BDDC + AA | `run-sdc-bddc-aa` | adds AA to SDC+BDDC |
 | EMI + SDC + BDDC + compression | `run-sdc-bddc-compression` | compressed BDDC transfer |
