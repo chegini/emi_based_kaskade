@@ -6,6 +6,18 @@ SOURCES := EMI_model.cpp
 OBJECTS := $(SOURCES:.cpp=.o)
 DEPS := $(SOURCES:.cpp=.d)
 
+# MPI is opt-in for this executable. The MPI compiler wrapper supplies the
+# MPI headers and libraries; KASKADE_HAVE_MPI guards MPI-only source code.
+MPI ?= 0
+MPICXX ?= mpicxx
+ifeq ($(MPI),1)
+  CXX := $(MPICXX)
+  MPI_FLAGS := -DKASKADE_HAVE_MPI
+else
+  MPI_FLAGS :=
+endif
+FLAGS += $(MPI_FLAGS)
+
 .PHONY: all kaskade clean help
 
 all: $(TARGET)
@@ -36,6 +48,7 @@ help:
 	@echo "  make          Build $(TARGET) from $(SOURCES)"
 	@echo "  make kaskade  Build the Kaskade library in /kaskade7"
 	@echo "  make clean    Remove scratch build/output files"
+	@echo "  make MPI=1 MPICXX=mpicxx  Build the MPI-enabled smoke-test executable"
 	@echo ""
 	@echo "Run inside Podman with:"
 	@echo "  podman run -it --rm -v /data/numerik/people/fchegini/kaskade7_new:/kaskade7 -v /data/numerik/people/fchegini/project/fatemeh/MicroCard/current_papers/BDDC_petsc_SDC_2023/gatevariables/20Nov2023/BDDC:/BDDC -w /BDDC/emiModelBddcSdc_new_scratch localhost/kaskade7-build-environment:latest"

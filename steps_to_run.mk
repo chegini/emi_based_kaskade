@@ -1,6 +1,8 @@
 
 TARGET := emiModel
 NTHREADS ?= 2
+MPI_RANKS ?= 2
+MPICXX ?= mpicxx
 THREAD_ARGS := --nThreads $(NTHREADS)
 PROFILE_ARGS ?=
 VTK ?= 1
@@ -47,7 +49,7 @@ AA_ARGS := \
   --algebraicAdaptivity 1 \
   --algebraicAdaptivityTolerance 1e-4
 
-.PHONY: help build clean \
+.PHONY: help build build-mpi clean run-mpi-smoke \
   run-emi run-sdc run-sdc-aa run-bddc run-bddc-quantization \
   run-bddc-huffman run-bddc-full run-bddc-graph run-bddc-compression \
   run-sdc-bddc run-sdc-bddc-aa run-sdc-bddc-compression \
@@ -56,6 +58,8 @@ AA_ARGS := \
 help:
 	@echo "Build:"
 	@echo "  make -f steps_to_run.mk build"
+	@echo "  make -f steps_to_run.mk build-mpi MPICXX=mpicxx"
+	@echo "  make -f steps_to_run.mk run-mpi-smoke MPI_RANKS=2"
 	@echo ""
 	@echo "Run scenarios:"
 	@echo "  make -f steps_to_run.mk run-emi"
@@ -76,6 +80,15 @@ help:
 
 build:
 	$(MAKE) -f Makefile
+
+build-mpi:
+	$(MAKE) -f Makefile MPI=1 MPICXX=$(MPICXX)
+
+run-mpi-smoke: build-mpi
+	$(BLAS_ENV) $(MPICXX) -show >/dev/null
+	$(BLAS_ENV) mpirun -np $(MPI_RANKS) ./$(TARGET) \
+	  --mpi 1 --bddc 0 --vtk 0 --finalTime 0.01 --dt 0.01 --maximumNumberOfTimeSteps 1 \
+	  $(THREAD_ARGS) $(COMMON_ARGS) --dir output/mpi_smoke
 
 clean:
 	$(MAKE) -f Makefile clean
