@@ -67,6 +67,37 @@ make -f steps_to_run.mk help
 make -f steps_to_run.mk build
 ```
 
+MPI is optional and is only enabled for the smoke test at this stage. The
+default build does not include `mpi.h` or link against MPI:
+
+```bash
+make -f steps_to_run.mk build
+```
+
+To build the MPI-enabled executable and verify MPI startup plus an
+`MPI_Allreduce`, run inside a container with `mpicxx` and `mpirun` available:
+
+```bash
+make -f steps_to_run.mk build-mpi MPICXX=mpicxx
+make -f steps_to_run.mk run-mpi-smoke MPI_RANKS=2 MPICXX=mpicxx
+```
+
+The smoke test runs the existing EMI model independently on every rank. It
+does not distribute BDDC subdomains or exchange BDDC data yet. A successful
+run prints one line per rank, for example:
+
+```text
+MPI smoke test: rank 0/2, allreduce sum=3
+MPI smoke test: rank 1/2, allreduce sum=3
+```
+
+After an MPI build, return to the normal non-MPI executable with:
+
+```bash
+make clean
+make -f steps_to_run.mk build
+```
+
 ## Input files
 
 The commands use the 10-cell test mesh:

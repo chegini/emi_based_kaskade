@@ -17,6 +17,10 @@
 #include <boost/timer/timer.hpp>
 #include <cstdint>
 
+#ifdef KASKADE_HAVE_MPI
+#include <mpi.h>
+#endif
+
 #include "dune/grid/config.h"
 #include "dune/grid/uggrid.hh"
 
@@ -83,6 +87,7 @@ struct EmiOptions
   int bddcInterfaceTypes = 7;
   int bddcVerbose = 0;
   int bddcUseCg = 1;
+  int mpi = 0;
 
   double finalTime = 0.01;
   double dt = 0.01;
@@ -101,6 +106,54 @@ struct EmiOptions
 
   bool direct = false;
   bool cgShift = true;
+};
+
+// This smoke test is deliberately independent of BDDC. It verifies that an
+// MPI-enabled executable can initialize and communicate while the normal
+// executable remains usable on systems without MPI.
+class OptionalMpiSession
+{
+public:
+  OptionalMpiSession(int& argc, char**& argv, bool enabled)
+  {
+#ifdef KASKADE_HAVE_MPI
+    if (!enabled)
+      return;
+
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (!initialized)
+    {
+      MPI_Init(&argc,&argv);
+      ownsSession = true;
+    }
+
+    MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+    MPI_Comm_size(MPI_COMM_WORLD,&size);
+    int localValue = rank + 1;
+    MPI_Allreduce(&localValue,&rankSum,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
+    std::cout << "MPI smoke test: rank " << rank << "/" << size
+              << ", allreduce sum=" << rankSum << "\n";
+#else
+    if (enabled)
+      throw std::runtime_error(
+          "--mpi 1 requested, but this executable was built without MPI support");
+#endif
+  }
+
+  ~OptionalMpiSession()
+  {
+#ifdef KASKADE_HAVE_MPI
+    if (ownsSession)
+      MPI_Finalize();
+#endif
+  }
+
+private:
+  bool ownsSession = false;
+  int rank = 0;
+  int size = 1;
+  int rankSum = 1;
 };
 
 void readTagList(std::string const& filename, std::vector<int>& tags)
@@ -753,6 +806,7 @@ int main(int argc, char* argv[])
     ("bddcInterfaceTypes", options.bddcInterfaceTypes, options.bddcInterfaceTypes, "BDDC interface flags: 1=corner, 2=edge, 4=face, 7=all")
     ("bddcVerbose", options.bddcVerbose, options.bddcVerbose, "print BDDC iteration residuals: 0=no, 1=yes")
     ("bddcUseCg", options.bddcUseCg, options.bddcUseCg, "use CG in BDDC coarse solve path: 0=no, 1=yes")
+    ("mpi", options.mpi, options.mpi, "initialize MPI and run a startup communication check: 0=no, 1=yes")
     ("nThreads", options.assemblyThreads, options.assemblyThreads, "number of assembler and BDDC setup threads")
     ("penalty", options.penalty, options.penalty, "boundary penalty")
     ("sigma_i", options.sigmaI, options.sigmaI, "intracellular conductivity")
@@ -776,6 +830,8 @@ int main(int argc, char* argv[])
     throw std::runtime_error("bddcIterations must be at least 1");
   if (options.bddcTolerance <= 0.0)
     throw std::runtime_error("bddcTolerance must be positive");
+
+  OptionalMpiSession mpiSession(argc,argv,options.mpi != 0);
 
   std::filesystem::create_directories(options.outputDir);
 
