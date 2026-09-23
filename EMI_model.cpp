@@ -209,6 +209,27 @@ void writeState(VariableSet const& u, Element& uAll, int order, std::string cons
            "u");
 }
 
+// MPI ranks share the output directory, so only rank zero writes shared VTK
+// filenames.  Without this guard concurrent rank writes can interleave and
+// produce malformed XML, especially when compressed and AA paths finish at
+// slightly different times.
+bool writeVtkOnThisRank(bool requested)
+{
+  if (!requested)
+    return false;
+#ifdef KASKADE_HAVE_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized)
+  {
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+    return rank == 0;
+  }
+#endif
+  return true;
+}
+
 template <class Matrix, class Vector>
 void applyConstantShift(Matrix const& A, Vector& du, Vector const& rhs)
 {
@@ -754,7 +775,7 @@ State runFullSdc(Functional& F,
     component<0>(state) = collocationStates.back();
     F.time(stepEnd);
 
-    if (options.writeVTK)
+    if (writeVtkOnThisRank(options.writeVTK))
       writeState(state,uAll,options.order,options.outputDir + "/emiSdcStep" + paddedString(step+1,3));
   }
 
@@ -936,7 +957,7 @@ int main(int argc, char* argv[])
   std::cout << "cells: " << gridManager.grid().size(0) << "\n";
   std::cout << "dofs: " << nDofs << "\n";
 
-  if (options.writeVTK)
+  if (writeVtkOnThisRank(options.writeVTK))
     writeState(u,uAll,options.order,options.outputDir + "/emiInitial");
 
   SemiImplicitEulerStep<Functional> equation(&F,options.dt);
@@ -986,7 +1007,7 @@ int main(int argc, char* argv[])
     }
     else
       u = EmiBddc::runBddcSdc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,mass,stiffness,nDofs,steps,options,uSpace.indexSet());
-    if (options.writeVTK)
+    if (writeVtkOnThisRank(options.writeVTK))
       writeState(u,uAll,options.order,
                  options.outputDir + (options.bddcCompression
                                         ? "/emiSDCBDDCLastCompression"
@@ -1000,7 +1021,7 @@ int main(int argc, char* argv[])
   {
     std::cout << "time integrator: SDC\n";
     u = runFullSdc(F,spaces,u,uAll,nDofs,dofCells,uSpace.indexSet(),steps,options);
-    if (options.writeVTK)
+    if (writeVtkOnThisRank(options.writeVTK))
       writeState(u,uAll,options.order,options.outputDir + "/emiSDCLast");
     std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
     std::cout << "EMI model completed\n";
@@ -1029,7 +1050,7 @@ int main(int argc, char* argv[])
     }
     else
       u = EmiBddc::runBddc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,nDofs,steps,options);
-    if (options.writeVTK)
+    if (writeVtkOnThisRank(options.writeVTK))
       writeState(u,uAll,options.order,
                  options.outputDir + (options.bddcCompression
                                         ? "/emiBDDCLastCompression"
@@ -1062,11 +1083,11 @@ int main(int argc, char* argv[])
 
     component<0>(u) += component<0>(stepState);
 
-    if (options.writeVTK)
+    if (writeVtkOnThisRank(options.writeVTK))
       writeState(u,uAll,options.order,options.outputDir + "/emiStep" + paddedString(step+1,3));
   }
 
-  if (options.writeVTK)
+  if (writeVtkOnThisRank(options.writeVTK))
     writeState(u,uAll,options.order,options.outputDir + "/emiLast");
 
   std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
