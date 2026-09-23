@@ -138,14 +138,12 @@ Each scenario has a target in `steps_to_run.mk`:
 | EMI + BDDC + compression | `run-bddc-compression` | `--bddc 1 --bddcCompression 1` |
 | EMI + SDC + BDDC | `run-sdc-bddc` | `--sdc 1 --bddc 1 --bddcCompression 0` |
 
-MPI-BDDC is introduced incrementally. `--mpi 1 --bddcMPI 1` validates MPI
-initialization, requires the number of ranks not to exceed the number of BDDC
-subdomains, reports deterministic round-robin ownership, and exchanges remote
-decoded interface payloads with one collective for restriction and one for
-prolongation. Fine-grid BDDC work is owner-only and coarse contributions are
-globally reduced, while subdomain objects are still constructed redundantly on
-each rank. Compressed byte payloads and memory-distributed construction remain
-separate follow-up stages.
+MPI-BDDC uses owner-only subdomain storage. With `--mpi 1 --bddc 1`, each rank
+constructs and solves only its deterministic round-robin subdomains, exchanges
+remote interface payloads with one collective for restriction and one for
+prolongation, and contributes coarse and global corrections through MPI
+reductions. The old replicated MPI path is removed. `--bddcMPI 1` remains as a
+compatibility option; `--bddcMPI 0` is rejected for MPI BDDC.
 | EMI + SDC + BDDC + AA | `run-sdc-bddc-aa` | adds AA to SDC+BDDC |
 | EMI + SDC + BDDC + compression | `run-sdc-bddc-compression` | compressed BDDC transfer |
 | EMI + SDC + BDDC + AA + compression | `run-sdc-bddc-aa-compression` | compressed transfer plus AA |
