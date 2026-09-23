@@ -1039,7 +1039,7 @@ State runBddcSdc(Functional& F,
       bool useCgSolver = options.bddcUseCg != 0;
       bool verbose = options.bddcVerbose != 0;
 
-      Kaskade::BDDC::BDDCSolver<BddcSubdomain> solver(subdomains,
+      Kaskade::BDDC::BDDCSolver<BddcSubdomain,decltype(subdomains)> solver(subdomains,
                                                       interfaceAverages.coarseConstraints(),
                                                       activeIds,
                                                       useCgSolver,
