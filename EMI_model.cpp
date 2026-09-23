@@ -229,6 +229,44 @@ bool writeVtkOnThisRank(bool requested)
   return true;
 }
 
+// Report one MPI-wide timing summary. Wall time is the slowest rank, while
+// user and system CPU times represent the total CPU work of all ranks.
+void printTotalCpuTime(boost::timer::cpu_timer const& timer, bool mpiEnabled)
+{
+  boost::timer::cpu_times times = timer.elapsed();
+#ifdef KASKADE_HAVE_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (mpiEnabled && initialized)
+  {
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+
+    long long local[3] = {static_cast<long long>(times.wall),
+                          static_cast<long long>(times.user),
+                          static_cast<long long>(times.system)};
+    long long global[3] = {0,0,0};
+    MPI_Allreduce(&local[0],&global[0],1,MPI_LONG_LONG,MPI_MAX,MPI_COMM_WORLD);
+    MPI_Allreduce(&local[1],&global[1],2,MPI_LONG_LONG,MPI_SUM,MPI_COMM_WORLD);
+
+    if (rank != 0)
+      return;
+
+    boost::timer::cpu_times aggregate;
+    aggregate.wall = global[0];
+    aggregate.user = global[1];
+    aggregate.system = global[2];
+    std::cout << "total cpu-time: " << boost::timer::format(aggregate) << "\n";
+    std::cout << "EMI model completed\n";
+    return;
+  }
+#else
+  (void)mpiEnabled;
+#endif
+  std::cout << "total cpu-time: " << boost::timer::format(times) << "\n";
+  std::cout << "EMI model completed\n";
+}
+
 template <class Matrix, class Vector>
 void applyConstantShift(Matrix const& A, Vector& du, Vector const& rhs)
 {
@@ -1010,8 +1048,7 @@ int main(int argc, char* argv[])
                  options.outputDir + (options.bddcCompression
                                         ? "/emiSDCBDDCLastCompression"
                                         : "/emiSDCBDDCLast"));
-    std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
-    std::cout << "EMI model completed\n";
+    printTotalCpuTime(totalTimer,options.mpi != 0);
     return 0;
   }
 
@@ -1021,8 +1058,7 @@ int main(int argc, char* argv[])
     u = runFullSdc(F,spaces,u,uAll,nDofs,dofCells,uSpace.indexSet(),steps,options);
     if (writeVtkOnThisRank(options.writeVTK))
       writeState(u,uAll,options.order,options.outputDir + "/emiSDCLast");
-    std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
-    std::cout << "EMI model completed\n";
+    printTotalCpuTime(totalTimer,options.mpi != 0);
     return 0;
   }
 
@@ -1053,8 +1089,7 @@ int main(int argc, char* argv[])
                  options.outputDir + (options.bddcCompression
                                         ? "/emiBDDCLastCompression"
                                         : "/emiBDDCLast"));
-    std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
-    std::cout << "EMI model completed\n";
+    printTotalCpuTime(totalTimer,options.mpi != 0);
     return 0;
   }
 
@@ -1088,6 +1123,5 @@ int main(int argc, char* argv[])
   if (writeVtkOnThisRank(options.writeVTK))
     writeState(u,uAll,options.order,options.outputDir + "/emiLast");
 
-  std::cout << "total cpu-time: " << boost::timer::format(totalTimer.elapsed()) << "\n";
-  std::cout << "EMI model completed\n";
+  printTotalCpuTime(totalTimer,options.mpi != 0);
 }
