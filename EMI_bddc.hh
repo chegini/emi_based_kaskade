@@ -990,7 +990,8 @@ State runBddcSdc(Functional& F,
                                                       interfaceAverages.coarseConstraints(),
                                                       activeIds,
                                                       useCgSolver,
-                                                      verbose);
+                                                      verbose,
+                                                      options.bddcMPI != 0);
       solver.setMpiEnabled(options.bddcMPI != 0);
       solver.setRhs(subdomainRhs);
 
