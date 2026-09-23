@@ -1073,7 +1073,7 @@ State runBddcSdc(Functional& F,
       }
 
       // Owned subdomains contribute locally; reduce the assembled global
-      // correction so every rank advances the replicated EMI state equally.
+      // correction so every rank advances the same EMI state.
       std::vector<double> localStep(nDofs, 0.0);
       for (size_t subdomain = 0; subdomain < subdomains.size(); ++subdomain)
       {
