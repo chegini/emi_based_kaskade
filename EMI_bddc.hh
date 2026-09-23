@@ -419,6 +419,54 @@ namespace EmiBddc
     return subdomains;
   }
 
+  // Construct only the subdomains owned by this rank. The global slot number
+  // is preserved so interface and coarse-space indices remain deterministic.
+  template <class Subdomain, class Matrix, class Interfaces>
+  Kaskade::BDDC::OwnedSubdomainStorage<Subdomain>
+  constructOwnedSubdomains(std::vector<Matrix> const& localOperators,
+                           Interfaces const& interfaces,
+                           int nThreads,
+                           bool mpiEnabled)
+  {
+    Kaskade::BDDC::MpiDomainLayout layout;
+    layout.configure(mpiEnabled, localOperators.size());
+    Kaskade::BDDC::OwnedSubdomainStorage<Subdomain> subdomains(localOperators.size());
+    std::exception_ptr constructionError;
+    std::mutex constructionErrorMutex;
+    auto construct = [&](size_t subdomain)
+    {
+      if (!layout.owns(static_cast<int>(subdomain)))
+        return;
+      try
+      {
+        subdomains.emplace(subdomain, static_cast<int>(subdomain),
+                           localOperators[subdomain], interfaces);
+        if constexpr (requires(Subdomain& subdomainObject, Matrix const& matrix) {
+                        subdomainObject.transfer().setGraphLiftingFromMatrix(matrix);
+                      })
+          subdomains[subdomain].transfer().setGraphLiftingFromMatrix(localOperators[subdomain]);
+      }
+      catch (...)
+      {
+        std::lock_guard<std::mutex> lock(constructionErrorMutex);
+        if (!constructionError)
+          constructionError = std::current_exception();
+      }
+    };
+
+    size_t const taskLimit = nThreads > 0 ? static_cast<size_t>(nThreads)
+                                         : std::numeric_limits<size_t>::max();
+    if (taskLimit > 1)
+      Kaskade::parallelFor(0,localOperators.size(),construct,taskLimit);
+    else
+      for (size_t subdomain = 0; subdomain < localOperators.size(); ++subdomain)
+        construct(subdomain);
+
+    if (constructionError)
+      std::rethrow_exception(constructionError);
+    return subdomains;
+  }
+
   template <class Matrix, class Vector, class Options>
   std::vector<int> selectActiveSubdomains(BddcData<Matrix,Vector> const& data,
                                           std::vector<std::vector<Vector>> const& corrections,
@@ -953,8 +1001,10 @@ State runBddcSdc(Functional& F,
         }
       }
 
-      auto subdomains = constructSubdomains<BddcSubdomain>(data.localMatrices,interfaceAverages,
-                                                            options.assemblyThreads);
+      auto subdomains = constructOwnedSubdomains<BddcSubdomain>(data.localMatrices,
+                                                                 interfaceAverages,
+                                                                 options.assemblyThreads,
+                                                                 options.bddcMPI != 0);
 
       if constexpr (requires(Transfer& transfer) {
                       transfer.setQuantizationBits(0);
@@ -966,8 +1016,11 @@ State runBddcSdc(Functional& F,
                       transfer.setProlongateBitlengthEncoding(true);
                     })
       {
-        for (auto& subdomain : subdomains)
+        for (size_t id = 0; id < subdomains.size(); ++id)
         {
+          if (!subdomains.has(id))
+            continue;
+          auto& subdomain = subdomains[id];
           subdomain.transfer().setQuantizationBits(options.bddcCompressionBits);
           subdomain.transfer().enableTransform(options.bddcGraphLifting
                                                  ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
@@ -1013,17 +1066,33 @@ State runBddcSdc(Functional& F,
           compressionReport.addUncompressed(solver.traffic());
       }
 
-      Vector stepVector(nDofs);
-      stepVector = 0.0;
+      // Owned subdomains contribute locally; reduce the assembled global
+      // correction so every rank advances the replicated EMI state equally.
+      std::vector<double> localStep(nDofs, 0.0);
       for (size_t subdomain = 0; subdomain < subdomains.size(); ++subdomain)
       {
+        if (!subdomains.has(subdomain))
+          continue;
         auto localSolution = subdomains[subdomain].getSolution();
         for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
         {
           size_t const global = data.localDofs[subdomain][local];
-          stepVector[global] += data.weights[subdomain][local][0] * localSolution[local];
+          localStep[global] += data.weights[subdomain][local][0] * localSolution[local];
         }
       }
+
+      std::vector<double> globalStep(localStep.size(), 0.0);
+#ifdef KASKADE_HAVE_MPI
+      if (options.bddcMPI)
+        MPI_Allreduce(localStep.data(), globalStep.data(), static_cast<int>(nDofs),
+                      MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      else
+#endif
+        globalStep = localStep;
+
+      Vector stepVector(nDofs);
+      for (size_t i = 0; i < nDofs; ++i)
+        stepVector[i] = globalStep[i];
 
       for (size_t i = 0; i < nDofs; ++i)
         boost::fusion::at_c<0>(stepState.data).coefficients()[i] = stepVector[i];
