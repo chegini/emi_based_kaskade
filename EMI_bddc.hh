@@ -991,6 +991,7 @@ State runBddcSdc(Functional& F,
                                                       activeIds,
                                                       useCgSolver,
                                                       verbose);
+      solver.setMpiEnabled(options.bddcMPI != 0);
       solver.setRhs(subdomainRhs);
 
       double residual = std::numeric_limits<double>::infinity();
