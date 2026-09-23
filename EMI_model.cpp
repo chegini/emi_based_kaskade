@@ -87,7 +87,6 @@ struct EmiOptions
   int bddcInterfaceTypes = 7;
   int bddcVerbose = 0;
   int bddcUseCg = 1;
-  int bddcMPI = 1;
   int mpi = 0;
 
   double finalTime = 0.01;
@@ -828,7 +827,6 @@ int main(int argc, char* argv[])
     ("bddcInterfaceTypes", options.bddcInterfaceTypes, options.bddcInterfaceTypes, "BDDC interface flags: 1=corner, 2=edge, 4=face, 7=all")
     ("bddcVerbose", options.bddcVerbose, options.bddcVerbose, "print BDDC iteration residuals: 0=no, 1=yes")
     ("bddcUseCg", options.bddcUseCg, options.bddcUseCg, "use CG in BDDC coarse solve path: 0=no, 1=yes")
-    ("bddcMPI", options.bddcMPI, options.bddcMPI, "compatibility option for owner-only MPI BDDC; use 1 (0 is rejected with MPI BDDC)")
     ("mpi", options.mpi, options.mpi, "initialize MPI and run a startup communication check: 0=no, 1=yes")
     ("nThreads", options.assemblyThreads, options.assemblyThreads, "number of assembler and BDDC setup threads")
     ("penalty", options.penalty, options.penalty, "boundary penalty")
@@ -855,9 +853,6 @@ int main(int argc, char* argv[])
     throw std::runtime_error("bddcTolerance must be positive");
 
   OptionalMpiSession mpiSession(argc,argv,options.mpi != 0);
-
-  if (options.mpi != 0 && options.bddc != 0 && options.bddcMPI == 0)
-    throw std::runtime_error("--bddcMPI 0 is no longer supported; MPI BDDC uses owner-only storage");
 
   std::filesystem::create_directories(options.outputDir);
 

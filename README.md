@@ -142,8 +142,8 @@ MPI-BDDC uses owner-only subdomain storage. With `--mpi 1 --bddc 1`, each rank
 constructs and solves only its deterministic round-robin subdomains, exchanges
 remote interface payloads with one collective for restriction and one for
 prolongation, and contributes coarse and global corrections through MPI
-reductions. The old replicated MPI path is removed. `--bddcMPI 1` remains as a
-compatibility option; `--bddcMPI 0` is rejected for MPI BDDC.
+reductions. The old replicated MPI path is removed. Owner-only storage is
+automatic whenever MPI-BDDC is enabled.
 | EMI + SDC + BDDC + AA | `run-sdc-bddc-aa` | adds AA to SDC+BDDC |
 | EMI + SDC + BDDC + compression | `run-sdc-bddc-compression` | compressed BDDC transfer |
 | EMI + SDC + BDDC + AA + compression | `run-sdc-bddc-aa-compression` | compressed transfer plus AA |
