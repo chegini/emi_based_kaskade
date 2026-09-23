@@ -15,6 +15,9 @@ The old `kaskade7_compression` tree must not be modified by this project.
 
 ## Podman environment
 
+For a first-time setup, including creation of an MPI-enabled image, see
+[`docs/mpi-container-setup.md`](docs/mpi-container-setup.md).
+
 Set these two host paths first:
 
 ```bash

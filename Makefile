@@ -12,11 +12,14 @@ MPI ?= 0
 MPICXX ?= mpicxx
 ifeq ($(MPI),1)
   CXX := $(MPICXX)
-  MPI_FLAGS := -DKASKADE_HAVE_MPI
+  # MUMPS ships a compatibility mpi.h in /usr/include/mumps.  Put the
+  # selected MPI implementation first so <mpi.h> resolves to OpenMPI.
+  MPI_INCLUDE_FLAGS ?= -I/usr/lib64/mpi/gcc/openmpi4/include
+  MPI_FLAGS := $(MPI_INCLUDE_FLAGS) -DKASKADE_HAVE_MPI
+  FLAGS := $(MPI_FLAGS) $(FLAGS)
 else
   MPI_FLAGS :=
 endif
-FLAGS += $(MPI_FLAGS)
 
 .PHONY: all kaskade clean help
 
