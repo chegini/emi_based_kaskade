@@ -88,6 +88,62 @@ namespace EmiBddc
                 << "  raw received bytes: " << originalReceivedBytes << "\n"
                 << "  received bytes: " << receivedBytes << "\n";
     }
+
+    // Reduce communication counters across MPI ranks before printing. The
+    // shared codebook is common metadata, so report its maximum size once.
+    void printGlobal(std::string const& label, bool mpiEnabled) const
+    {
+#ifdef KASKADE_HAVE_MPI
+      int initialized = 0;
+      MPI_Initialized(&initialized);
+      if (mpiEnabled && initialized)
+      {
+        int rank = 0;
+        MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+
+        unsigned long long localBytes[4] = {
+          static_cast<unsigned long long>(originalSentBytes),
+          static_cast<unsigned long long>(originalReceivedBytes),
+          static_cast<unsigned long long>(sentBytes),
+          static_cast<unsigned long long>(receivedBytes)};
+        unsigned long long globalBytes[4] = {0,0,0,0};
+        MPI_Allreduce(localBytes,globalBytes,4,MPI_UNSIGNED_LONG_LONG,MPI_SUM,MPI_COMM_WORLD);
+
+        double localTimes[2] = {encodeTimeMs,decodeTimeMs};
+        double globalTimes[2] = {0.0,0.0};
+        MPI_Allreduce(localTimes,globalTimes,2,MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+
+        unsigned long long localCounts[2] = {
+          static_cast<unsigned long long>(encodeCount),
+          static_cast<unsigned long long>(decodeCount)};
+        unsigned long long globalCounts[2] = {0,0};
+        MPI_Allreduce(localCounts,globalCounts,2,MPI_UNSIGNED_LONG_LONG,MPI_SUM,MPI_COMM_WORLD);
+
+        unsigned long long localCodebook = static_cast<unsigned long long>(codebookBits);
+        unsigned long long globalCodebook = 0;
+        MPI_Allreduce(&localCodebook,&globalCodebook,1,MPI_UNSIGNED_LONG_LONG,MPI_MAX,MPI_COMM_WORLD);
+
+        if (rank != 0)
+          return;
+
+        CompressionReport global;
+        global.originalSentBytes = globalBytes[0];
+        global.originalReceivedBytes = globalBytes[1];
+        global.sentBytes = globalBytes[2];
+        global.receivedBytes = globalBytes[3];
+        global.encodeTimeMs = globalTimes[0];
+        global.decodeTimeMs = globalTimes[1];
+        global.encodeCount = globalCounts[0];
+        global.decodeCount = globalCounts[1];
+        global.codebookBits = globalCodebook;
+        global.print(label);
+        return;
+      }
+#else
+      (void)mpiEnabled;
+#endif
+      print(label);
+    }
   };
 
   struct ProfileTimes
@@ -947,7 +1003,7 @@ State runBddcSdc(Functional& F,
     if (options.profile)
       profile.print("SDC + BDDC");
     if (options.bddcCompressionReport)
-      compressionReport.print("SDC + BDDC");
+      compressionReport.printGlobal("SDC + BDDC",options.mpi != 0);
     return state;
   }
 
@@ -1111,7 +1167,7 @@ State runBddcSdc(Functional& F,
     }
 
     if (options.bddcCompressionReport)
-      compressionReport.print("BDDC");
+      compressionReport.printGlobal("BDDC",options.mpi != 0);
     return state;
   }
 }
