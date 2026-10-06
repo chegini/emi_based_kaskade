@@ -154,6 +154,196 @@ For example:
 make -f steps_to_run.mk run-sdc-bddc-aa-compression
 ```
 
+## Command-line parameters
+
+The executable accepts all runtime options in the form
+`./emiModel --option value`. Use `./emiModel --help` for the generated option
+list. The defaults below are defined in `EMI_model.cpp`.
+
+### Input, output, and discretization
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `--input` | built-in 2-cell VTU | VTU mesh with domain cell data |
+| `--extra_set` | built-in 2-cell file | Extracellular material tags |
+| `--intra_set` | built-in 2-cell file | Intracellular material tags |
+| `--excited` | built-in 2-cell file | Initially excited material tags |
+| `--dir` | `output` | Output directory |
+| `--refine` | `0` | Number of uniform mesh refinements |
+| `--order` | `1` | Finite-element polynomial order |
+| `--nThreads` | `2` | Shared-memory assembly and BDDC setup threads |
+| `--vtk` | `1` | Write VTK output: `0` no, `1` yes |
+| `--diagnostics` | `0` | Print per-step vector diagnostics |
+| `--profile` | `0` | Print cumulative SDC/BDDC wall-time data |
+
+### Time integration
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `--finalTime` | `0.01` | Final simulation time |
+| `--dt` | `0.01` | Time-step size |
+| `--maximumNumberOfTimeSteps` | `0` | Maximum number of steps; `0` uses `finalTime/dt` |
+
+### PCG and direct linear solvers
+
+The default EMI linear solver is PCG. Set `--direct 1` to use the direct
+solver instead.
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `--direct` | `0` | `0` PCG, `1` direct solver |
+| `--cgTol` | `1e-8` | PCG stopping tolerance |
+| `--maxCGIter` | `10000` | Maximum PCG iterations |
+| `--CG_shift` | `1` | Apply constant-shift correction after PCG |
+
+Example:
+
+```bash
+./emiModel --direct 0 --cgTol 1e-8 --maxCGIter 10000
+```
+
+### Spectral deferred correction
+
+Enable SDC with `--sdc 1`.
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `--sdc` | `0` | Enable SDC: `0` no, `1` yes |
+| `--sdcCollocationPoints` | `3` | Target collocation-point count |
+| `--sdcStartCollocationPoints` | `3` | Initial collocation-point count |
+| `--minimumSdcSweeps` | `3` | Minimum SDC sweeps |
+| `--maximumSdcSweeps` | `5` | Maximum SDC sweeps |
+| `--sdcSweepType` | `1` | `0` Euler sweep, `1` LU sweep |
+| `--sdcTolerance` | `1e-6` | Correction-norm stopping tolerance |
+| `--sdcAbsoluteTolerance` | `1e-12` | Absolute SDC error-estimate tolerance |
+| `--sdcInitialContraction` | `0.2` | Initial contraction estimate |
+
+### Algebraic adaptivity
+
+In this implementation, `AA` means algebraic adaptivity. It selects active
+degrees of freedom or complete BDDC owner subdomains for later SDC sweeps.
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `--algebraicAdaptivity` | `0` | Enable AA: `0` no, `1` yes |
+| `--algebraicAdaptivityTolerance` | `0.0` | AA selection tolerance; `0` disables selection |
+
+Example:
+
+```bash
+./emiModel --sdc 1 --algebraicAdaptivity 1 \
+  --algebraicAdaptivityTolerance 1e-4
+```
+
+### BDDC
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `--bddc` | `0` | Enable BDDC |
+| `--bddcIterations` | `3000` | Maximum BDDC iterations per time step |
+| `--bddcTolerance` | `1e-8` | BDDC residual tolerance |
+| `--bddcInterfaceTypes` | `7` | Interface flags: `1` corner, `2` edge, `4` face, `7` all |
+| `--bddcVerbose` | `0` | Print BDDC iteration information |
+| `--bddcUseCg` | `1` | Use CG in the BDDC coarse-solve path |
+
+### BDDC compression
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `--bddcCompression` | `0` | Enable quantized BDDC transfer |
+| `--bddcCompressionBits` | `16` | Quantization precision in bits |
+| `--bddcGraphLifting` | `1` | Enable graph-lifting transform |
+| `--bddcHuffman` | `1` | Enable Huffman coding |
+| `--bddcBitlength` | `1` | Enable bit-length/tail encoding |
+| `--bddcCompressionReport` | `1` | Print aggregate transfer-volume statistics |
+
+The full compressed transfer pipeline is enabled with:
+
+```bash
+--bddcCompression 1 \
+--bddcCompressionBits 16 \
+--bddcGraphLifting 1 \
+--bddcHuffman 1 \
+--bddcBitlength 1 \
+--bddcCompressionReport 1
+```
+
+The compression stages are quantization, optional graph lifting, zigzag and
+bit-length coding, Huffman coding, and payload packing. The decoder applies
+the inverse operations in reverse order. Test the accuracy/communication
+trade-off by changing `--bddcCompressionBits`, for example to `8`, `12`, `16`,
+or `24`.
+
+### MPI
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `--mpi` | `0` | Initialize MPI and run the MPI communication check |
+
+Serial execution uses `--mpi 0` and does not require `mpirun`:
+
+```bash
+./emiModel --mpi 0
+```
+
+MPI execution requires the MPI-enabled build and an MPI launcher:
+
+```bash
+make -f steps_to_run.mk build-mpi MPICXX=mpicxx
+mpirun --allow-run-as-root -np 2 ./emiModel --mpi 1
+```
+
+In the current EMI scratch driver, the MPI target verifies MPI initialization
+and communication. It does not yet provide the fully distributed owner-only
+BDDC exchange validated by the Poisson BDDC executable. Therefore, EMI MPI
+runs should currently be reported as MPI-enabled diagnostic runs, rather than
+as distributed EMI-BDDC scaling experiments.
+
+### Physical parameters
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `--penalty` | `1e6` | Boundary penalty parameter |
+| `--sigma_i` | `3.0` | Intracellular conductivity |
+| `--sigma_e` | `20.0` | Extracellular conductivity |
+| `--C_m` | `1.0` | Membrane capacitance |
+| `--R` | `0.1` | Gap-junction conductance |
+| `--R_extra` | `1e-7` | Extracellular interface conductance |
+
+### Complete example
+
+```bash
+./emiModel \
+  --mpi 0 \
+  --sdc 1 \
+  --bddc 1 \
+  --bddcCompression 1 \
+  --bddcCompressionBits 16 \
+  --bddcGraphLifting 1 \
+  --bddcHuffman 1 \
+  --bddcBitlength 1 \
+  --bddcCompressionReport 1 \
+  --algebraicAdaptivity 1 \
+  --algebraicAdaptivityTolerance 1e-4 \
+  --direct 0 \
+  --cgTol 1e-8 \
+  --maxCGIter 10000 \
+  --minimumSdcSweeps 2 \
+  --maximumSdcSweeps 4 \
+  --bddcIterations 100 \
+  --bddcTolerance 1e-8 \
+  --nThreads 2 \
+  --finalTime 0.01 \
+  --dt 0.01 \
+  --maximumNumberOfTimeSteps 1 \
+  --input ../input_emi_mesh/10Cells3d_10extra_mesh.vtu \
+  --extra_set ../input_emi_mesh/10Cells3d_10extra_list_extracellular.txt \
+  --intra_set ../input_emi_mesh/10Cells3d_10extra_list_intracellular.txt \
+  --excited ../input_emi_mesh/10Cells3d_10extra_early_excited.txt \
+  --vtk 0 \
+  --profile 1 \
+  --dir output/emi_sdc_bddc_aa_compression
+
 The helper defaults to two threads and one time step for quick checks. `--nThreads`
 limits parallel assembly and BDDC subdomain construction. Override the thread
 count with `NTHREADS`, for example `make -f steps_to_run.mk run-sdc-bddc
