@@ -802,6 +802,13 @@ void computeBddcSdcResiduals(Functional& F,
         residual = solver.solve();
         if (profile)
           ++profile->bddcSolveCalls;
+        if (solver.stopped())
+        {
+          if (verbose)
+            std::cout << "    BDDC stopped before applying the current correction: "
+                      << (solver.stagnated() ? "stagnation" : "breakdown") << "\n";
+          break;
+        }
         if (residual < options.bddcTolerance)
           break;
       }
@@ -1117,6 +1124,13 @@ State runBddcSdc(Functional& F,
         residual = solver.solve();
         if (verbose)
           std::cout << "  BDDC iteration " << iteration+1 << ": residual=" << residual << "\n";
+        if (solver.stopped())
+        {
+          if (verbose)
+            std::cout << "  BDDC stopped before applying the current correction: "
+                      << (solver.stagnated() ? "stagnation" : "breakdown") << "\n";
+          break;
+        }
         if (residual < options.bddcTolerance)
           break;
       }
