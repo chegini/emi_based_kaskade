@@ -82,6 +82,7 @@ struct EmiOptions
   int bddcGraphLifting = 1;
   int bddcHuffman = 1;
   int bddcBitlength = 1;
+  int bddcHistogram = 0;
   int bddcCompressionReport = 1;
   int bddcIterations = 3000;
   int bddcInterfaceTypes = 7;
@@ -859,6 +860,7 @@ int main(int argc, char* argv[])
     ("bddcGraphLifting", options.bddcGraphLifting, options.bddcGraphLifting, "use graph-lifting transform in compressed BDDC transfer: 0=none, 1=graph lifting")
     ("bddcHuffman", options.bddcHuffman, options.bddcHuffman, "use Huffman coding in compressed BDDC transfer: 0=no, 1=yes")
     ("bddcBitlength", options.bddcBitlength, options.bddcBitlength, "use bit-length/tail split before Huffman coding: 0=no, 1=yes")
+    ("bddcHistogram", options.bddcHistogram, options.bddcHistogram, "write compressed BDDC symbol histograms below the output directory: 0=no, 1=yes")
     ("bddcCompressionReport", options.bddcCompressionReport, options.bddcCompressionReport, "print aggregate BDDC transfer volume report: 0=no, 1=yes")
     ("bddcIterations", options.bddcIterations, options.bddcIterations, "maximum BDDC iterations per time step")
     ("bddcTolerance", options.bddcTolerance, options.bddcTolerance, "BDDC residual tolerance")

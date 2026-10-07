@@ -785,6 +785,8 @@ void computeBddcSdcResiduals(Functional& F,
                                                                             useCgSolver,
                                                                             verbose,
                                                                             mpiEnabled);
+      if (options.bddcHistogram)
+        solver.setHistogramOutput(options.outputDir + "/histograms");
       if (profile)
         profile->solverConstruction += ProfileTimes::seconds(solverStart);
 
@@ -1115,6 +1117,8 @@ State runBddcSdc(Functional& F,
                                                       useCgSolver,
                                                       verbose,
                                                       options.mpi != 0);
+      if (options.bddcHistogram)
+        solver.setHistogramOutput(options.outputDir + "/histograms");
       solver.setRhs(subdomainRhs);
 
       double residual = std::numeric_limits<double>::infinity();
