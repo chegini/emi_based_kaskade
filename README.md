@@ -516,3 +516,19 @@ is not implemented by this EMI driver; extending communication in Kaskade's
 original `mg/bddc.hpp` is a separate planned task. The compression option
 currently configures compressed transfer; extended compression logs and
 exchange-file output are not enabled by default.
+Histogram output can be enabled for compressed BDDC transfers with
+`--bddcHistogram 1`. The CSV files are written below
+`<output-directory>/histograms` and contain the raw, zigzag, and bit-length
+symbol distributions for restriction and prolongation. For example:
+
+```bash
+./emiModel \
+  --bddc 1 \
+  --bddcCompression 1 \
+  --bddcCompressionBits 16 \
+  --bddcGraphLifting 1 \
+  --bddcHuffman 1 \
+  --bddcBitlength 1 \
+  --bddcHistogram 1 \
+  --dir output/emi-histogram
+```
