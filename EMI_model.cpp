@@ -33,7 +33,7 @@
 #include "fem/variables.hh"
 #include "io/vtk.hh"
 #include "io/vtkreader.hh"
-#include "linalg/apcg.hh"
+#include "linalg/cg.hh"
 #include "linalg/direct.hh"
 #include "linalg/dynamicMatrix.hh"
 #include "linalg/jacobiPreconditioner.hh"
@@ -307,7 +307,7 @@ void solveLinearSystem(Matrix const& A, Vector& du, Vector& rhs, EmiOptions cons
   Dune::MatrixAdapter<Matrix,Vector,Vector> op(A);
   JacobiPreconditioner<Dune::MatrixAdapter<Matrix,Vector,Vector>> preconditioner(op,1.0);
   PCGEnergyErrorTerminationCriterion<double> term(options.cgTol,options.maxCGIter);
-  Pcg<Vector,Vector> pcg(op,preconditioner,dp,term,0);
+  CG<Vector,Vector> pcg(op,preconditioner,dp,term,0);
   Dune::InverseOperatorResult result;
   pcg.apply(du,rhs,result);
 
