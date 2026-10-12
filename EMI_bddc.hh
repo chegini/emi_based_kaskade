@@ -1134,8 +1134,6 @@ State runBddcSdc(Functional& F,
       for (; iteration < options.bddcIterations; ++iteration)
       {
         residual = solver.solve();
-        if (verbose)
-          std::cout << "  BDDC iteration " << iteration+1 << ": residual=" << residual << "\n";
         if (solver.stopped())
         {
           if (verbose)
