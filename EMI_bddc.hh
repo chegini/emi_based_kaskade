@@ -444,6 +444,8 @@ namespace EmiBddc
                     candidate.setProlongateTransform(true);
                     candidate.setRestrictBitlengthEncoding(true);
                     candidate.setProlongateBitlengthEncoding(true);
+                    candidate.setRestrictZigzagEncoding(true);
+                    candidate.setProlongateZigzagEncoding(true);
                   })
     {
       transfer.setQuantizationBits(options.bddcCompressionBits);
@@ -456,6 +458,8 @@ namespace EmiBddc
       transfer.setProlongateTransform(options.bddcGraphLifting != 0);
       transfer.setRestrictBitlengthEncoding(options.bddcBitlength != 0);
       transfer.setProlongateBitlengthEncoding(options.bddcBitlength != 0);
+      transfer.setRestrictZigzagEncoding(options.bddcZigzag != 0);
+      transfer.setProlongateZigzagEncoding(options.bddcZigzag != 0);
     }
   }
 
@@ -1086,6 +1090,8 @@ State runBddcSdc(Functional& F,
                       transfer.setProlongateTransform(true);
                       transfer.setRestrictBitlengthEncoding(true);
                       transfer.setProlongateBitlengthEncoding(true);
+                      transfer.setRestrictZigzagEncoding(true);
+                      transfer.setProlongateZigzagEncoding(true);
                     })
       {
         for (size_t id = 0; id < subdomains.size(); ++id)
@@ -1103,6 +1109,8 @@ State runBddcSdc(Functional& F,
           subdomain.transfer().setProlongateTransform(options.bddcGraphLifting != 0);
           subdomain.transfer().setRestrictBitlengthEncoding(options.bddcBitlength != 0);
           subdomain.transfer().setProlongateBitlengthEncoding(options.bddcBitlength != 0);
+          subdomain.transfer().setRestrictZigzagEncoding(options.bddcZigzag != 0);
+          subdomain.transfer().setProlongateZigzagEncoding(options.bddcZigzag != 0);
         }
       }
 
