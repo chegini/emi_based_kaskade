@@ -942,13 +942,15 @@ int main(int argc, char* argv[])
   VTKReader vtk(options.input);
   GridManager<Grid> gridManager(vtk.createGrid<Grid>());
   gridManager.enforceConcurrentReads(true);
-  gridManager.globalRefine(options.refinements);
 
   using MaterialSpace = FEFunctionSpace<DiscontinuousLagrangeMapper<double,LeafView>>;
   using Material = MaterialSpace::Element<1>::type;
   MaterialSpace materialSpace(gridManager,gridManager.grid().leafGridView(),0);
   Material material(materialSpace);
   vtk.getCoefficients("domain",material);
+  // Read coarse-cell material tags before refinement. GridManager transfers
+  // registered P0 fields to all refined child cells.
+  gridManager.globalRefine(options.refinements);
 
   Dune::FieldVector<double,dim> zero(0);
   std::map<int,Dune::FieldVector<double,1>> domainMap;
