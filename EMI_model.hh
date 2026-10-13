@@ -220,7 +220,9 @@ public:
 
       if (twoExtra)
         std::tie(current,dcurrentCell,dcurrentNeighbour) = std::make_tuple(0.0,0.0,0.0);
-      else if (cellDomain > neighbourDomain)
+      // Orient membrane voltage from intracellular to extracellular. Domain
+      // tags are arbitrary labels and must not determine the sign.
+      else if (!cellExtra && neighbourExtra)
         std::tie(current,dcurrentCell,dcurrentNeighbour) = ionCurrent(v);
       else
       {
