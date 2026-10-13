@@ -35,6 +35,23 @@
 
 namespace EmiBddc
 {
+  inline bool mpiRankZero(bool mpiEnabled)
+  {
+#ifdef KASKADE_HAVE_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (mpiEnabled && initialized)
+    {
+      int rank = 0;
+      MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+      return rank == 0;
+    }
+#else
+    (void)mpiEnabled;
+#endif
+    return true;
+  }
+
   struct CompressionReport
   {
     std::uint64_t originalSentBytes = 0;
@@ -213,7 +230,8 @@ namespace EmiBddc
                                         Space const& space,
                                         Material const& material,
                                         size_t nDofs,
-                                        int nTasks)
+                                        int nTasks,
+                                        bool mpiEnabled)
   {
     using Kaskade::BDDC::LocalDof;
 
@@ -299,8 +317,9 @@ namespace EmiBddc
       for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
         buildSubdomainData(subdomain);
 
-    std::cout << "BDDC subdomains: " << data.tags.size()
-              << ", shared dofs: " << data.sharedDofs.size() << "\n";
+    if (mpiRankZero(mpiEnabled))
+      std::cout << "BDDC subdomains: " << data.tags.size()
+                << ", shared dofs: " << data.sharedDofs.size() << "\n";
     return data;
   }
 
@@ -1039,9 +1058,10 @@ State runBddcSdc(Functional& F,
                                                               data.subdomainSizes,
                                                               options.bddcInterfaceTypes);
     auto const interfaceCount = interfaceAverages.interfaceCount();
-    std::cout << "BDDC coarse interfaces: corners=" << interfaceCount[0]
-              << ", edges=" << interfaceCount[1]
-              << ", faces=" << interfaceCount[2] << "\n";
+    if (mpiRankZero(options.mpi != 0))
+      std::cout << "BDDC coarse interfaces: corners=" << interfaceCount[0]
+                << ", edges=" << interfaceCount[1]
+                << ", faces=" << interfaceCount[2] << "\n";
 
     Assembler assembler(spaces);
     auto zeroState(state);
@@ -1184,7 +1204,7 @@ State runBddcSdc(Functional& F,
         boost::fusion::at_c<0>(stepState.data).coefficients()[i] = stepVector[i];
 
       Kaskade::component<0>(state) += Kaskade::component<0>(stepState);
-      if (verbose)
+      if (verbose && mpiRankZero(options.mpi != 0))
         std::cout << "BDDC step " << step+1 << "/" << steps
                   << ": iterations=" << std::min(iteration+1,options.bddcIterations)
                   << ", residual=" << residual << "\n";
