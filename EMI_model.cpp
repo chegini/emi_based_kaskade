@@ -1062,7 +1062,7 @@ int main(int argc, char* argv[])
       gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads,options.mpi != 0);
     if (options.bddcCompression)
     {
-      using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint16_t,std::uint8_t>;
+      using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint32_t,std::uint8_t>;
       u = EmiBddc::runBddcSdc<CompressedTransfer>(F,spaces,u,uAll,bddcData,mass,stiffness,nDofs,steps,options,uSpace.indexSet());
     }
     else
@@ -1106,7 +1106,7 @@ int main(int argc, char* argv[])
     bddcData.localMatrices = EmiBddc::extractLocalMatrices(bddcData,lhs,options.assemblyThreads);
     if (options.bddcCompression)
     {
-      using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint16_t,std::uint8_t>;
+      using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint32_t,std::uint8_t>;
       u = EmiBddc::runBddc<CompressedTransfer>(F,spaces,u,uAll,bddcData,nDofs,steps,options);
     }
     else
