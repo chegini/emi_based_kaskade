@@ -318,6 +318,9 @@ void solveLinearSystem(Matrix const& A, Vector& du, Vector& rhs, EmiOptions cons
 template <class Matrix>
 void printMatrixDiagnostics(Matrix const& A, std::string const& name)
 {
+  if (!EmiBddc::mpiRankZero(true))
+    return;
+
   size_t nanEntries = 0;
   size_t infEntries = 0;
   size_t numericalNonzeros = 0;
@@ -375,6 +378,9 @@ void printMatrixDiagnostics(Matrix const& A, std::string const& name)
 template <class Vector>
 void printVectorDiagnostics(Vector const& v, std::string const& name)
 {
+  if (!EmiBddc::mpiRankZero(true))
+    return;
+
   size_t nanEntries = 0;
   size_t infEntries = 0;
   double minValue = std::numeric_limits<double>::infinity();
@@ -895,19 +901,23 @@ int main(int argc, char* argv[])
     throw std::runtime_error("bddcTolerance must be positive");
 
   OptionalMpiSession mpiSession(argc,argv,options.mpi != 0);
+  bool const outputRankZero = EmiBddc::mpiRankZero(options.mpi != 0);
 
   std::filesystem::create_directories(options.outputDir);
 
-  std::cout << "Start EMI-only model\n";
-  std::cout << "mesh: " << options.input << "\n";
-  std::cout << "dt: " << options.dt
-            << ", finalTime: " << options.finalTime
-            << ", maximumNumberOfTimeSteps: ";
-  if (options.maximumNumberOfTimeSteps > 0)
-    std::cout << options.maximumNumberOfTimeSteps;
-  else
-    std::cout << "automatic";
-  std::cout << "\n";
+  if (outputRankZero)
+  {
+    std::cout << "Start EMI-only model\n";
+    std::cout << "mesh: " << options.input << "\n";
+    std::cout << "dt: " << options.dt
+              << ", finalTime: " << options.finalTime
+              << ", maximumNumberOfTimeSteps: ";
+    if (options.maximumNumberOfTimeSteps > 0)
+      std::cout << options.maximumNumberOfTimeSteps;
+    else
+      std::cout << "automatic";
+    std::cout << "\n";
+  }
 
   std::vector<int> extraTags;
   std::vector<int> intraTags;
@@ -916,9 +926,12 @@ int main(int argc, char* argv[])
   readTagList(options.intraSet,intraTags);
   readTagList(options.excitedSet,excitedTags);
 
-  std::cout << "extracellular tags: " << extraTags.size() << "\n";
-  std::cout << "intracellular tags: " << intraTags.size() << "\n";
-  std::cout << "excited tags: " << excitedTags.size() << "\n";
+  if (outputRankZero)
+  {
+    std::cout << "extracellular tags: " << extraTags.size() << "\n";
+    std::cout << "intracellular tags: " << intraTags.size() << "\n";
+    std::cout << "excited tags: " << excitedTags.size() << "\n";
+  }
 
   constexpr int dim = SPACEDIM;
   using Grid = Dune::UGGrid<dim>;
@@ -994,8 +1007,11 @@ int main(int argc, char* argv[])
 
   size_t const nDofs = variableSetDesc.degreesOfFreedom(0,Functional::AnsatzVars::noOfVariables);
   auto const dofCells = buildDofCellMap(uSpace,nDofs);
-  std::cout << "cells: " << gridManager.grid().size(0) << "\n";
-  std::cout << "dofs: " << nDofs << "\n";
+  if (outputRankZero)
+  {
+    std::cout << "cells: " << gridManager.grid().size(0) << "\n";
+    std::cout << "dofs: " << nDofs << "\n";
+  }
 
   if (writeVtkOnThisRank(options.writeVTK))
     writeState(u,uAll,options.order,options.outputDir + "/emiInitial");
@@ -1015,11 +1031,13 @@ int main(int argc, char* argv[])
   int const steps = options.maximumNumberOfTimeSteps > 0
                   ? std::min(options.maximumNumberOfTimeSteps,requestedNumberOfTimeSteps)
                   : requestedNumberOfTimeSteps;
-  std::cout << "time steps: " << steps << "\n";
+  if (outputRankZero)
+    std::cout << "time steps: " << steps << "\n";
 
   if (options.sdc && options.bddc)
   {
-    std::cout << "time integrator: SDC with BDDC linear solves\n";
+    if (outputRankZero)
+      std::cout << "time integrator: SDC with BDDC linear solves\n";
 
     equation.setTau(0.0);
     F.Mass_stiff(1);
@@ -1039,7 +1057,7 @@ int main(int argc, char* argv[])
     printMatrixDiagnostics(stiffness,"sdc stiffness");
 
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
-      gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads);
+      gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads,options.mpi != 0);
     if (options.bddcCompression)
     {
       using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint16_t,std::uint8_t>;
@@ -1058,7 +1076,8 @@ int main(int argc, char* argv[])
 
   if (options.sdc)
   {
-    std::cout << "time integrator: SDC\n";
+    if (outputRankZero)
+      std::cout << "time integrator: SDC\n";
     u = runFullSdc(F,spaces,u,uAll,nDofs,dofCells,uSpace.indexSet(),steps,options);
     if (writeVtkOnThisRank(options.writeVTK))
       writeState(u,uAll,options.order,options.outputDir + "/emiSDCLast");
@@ -1073,13 +1092,15 @@ int main(int argc, char* argv[])
                      Assembler::MATRIX|Assembler::RHS,
                      options.assemblyThreads);
   Matrix lhs = assembler.template get<Matrix>(false);
-  printMatrixDiagnostics(lhs,"lhs");
+  if (outputRankZero)
+    printMatrixDiagnostics(lhs,"lhs");
 
   if (options.bddc)
   {
-    std::cout << "time integrator: semi-implicit Euler with BDDC\n";
+    if (outputRankZero)
+      std::cout << "time integrator: semi-implicit Euler with BDDC\n";
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
-      gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads);
+      gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads,options.mpi != 0);
     bddcData.localMatrices = EmiBddc::extractLocalMatrices(bddcData,lhs,options.assemblyThreads);
     if (options.bddcCompression)
     {
@@ -1097,7 +1118,8 @@ int main(int argc, char* argv[])
     return 0;
   }
 
-  std::cout << "time integrator: semi-implicit Euler\n";
+  if (outputRankZero)
+    std::cout << "time integrator: semi-implicit Euler\n";
   for (int step = 0; step < steps; ++step)
   {
     double const time = step*options.dt;
@@ -1109,10 +1131,11 @@ int main(int argc, char* argv[])
     Vector rhsVector(nDofs);
     Vector stepVector(nDofs);
     rhs.write(rhsVector.begin());
-    if (options.diagnostics)
+    if (options.diagnostics && outputRankZero)
       printVectorDiagnostics(rhsVector,"rhs");
 
-    std::cout << "EMI step " << step+1 << "/" << steps << "\n";
+    if (outputRankZero)
+      std::cout << "EMI step " << step+1 << "/" << steps << "\n";
     solveLinearSystem(lhs,stepVector,rhsVector,options);
 
     for (size_t i = 0; i < nDofs; ++i)
