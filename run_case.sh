@@ -2,31 +2,31 @@
 set -euo pipefail
 
 BITS=${BITS:-32}
-LIFTING_MODE=${LIFTING_MODE:-before_quantization}
+LIFTING_MODE=${LIFTING_MODE:-2}
 ZIGZAG=${ZIGZAG:-1}
 HUFFMAN=${HUFFMAN:-1}
 BITLENGTH=${BITLENGTH:-1}
 FINAL_TIME=${FINAL_TIME:-0.1}
 
 case "$LIFTING_MODE" in
-  none)
+  0)
     LIFTING=0
     AFTER_QUANTIZATION=0
     LIFTING_NAME="no-graph-lifting"
     ;;
-  before_quantization)
-    LIFTING=1
-    AFTER_QUANTIZATION=0
-    LIFTING_NAME="graph-lifting-before-quantization"
-    ;;
-  after_quantization)
+  1)
     LIFTING=0
     AFTER_QUANTIZATION=1
     LIFTING_NAME="graph-lifting-after-quantization"
     ;;
+  2)
+    LIFTING=1
+    AFTER_QUANTIZATION=0
+    LIFTING_NAME="graph-lifting-before-quantization"
+    ;;
   *)
     printf 'Invalid LIFTING_MODE=%s\n' "$LIFTING_MODE" >&2
-    printf 'Use: none, before_quantization, or after_quantization\n' >&2
+    printf 'Use: 0 (none), 1 (after quantization), or 2 (before quantization)\n' >&2
     exit 2
     ;;
 esac
