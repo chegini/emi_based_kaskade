@@ -1,4 +1,5 @@
-include /kaskade7/Makefile.Local
+KASKADE7 ?= /kaskade7
+include $(KASKADE7)/Makefile.Local
 include $(KASKADE7)/Makefile.Rules
 
 TARGET := emiModel
