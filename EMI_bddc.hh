@@ -468,13 +468,15 @@ namespace EmiBddc
                   })
     {
       transfer.setQuantizationBits(options.bddcCompressionBits);
-      transfer.enableTransform(options.bddcGraphLifting
+      transfer.enableTransform((options.bddcGraphLifting || options.bddcGraphLiftingAfterQuantization)
                                  ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
                                  : Kaskade::BDDC::TransformType::NONE);
       transfer.setRestrictEncoding(options.bddcHuffman != 0);
       transfer.setProlongateEncoding(options.bddcHuffman != 0);
       transfer.setRestrictTransform(options.bddcGraphLifting != 0);
       transfer.setProlongateTransform(options.bddcGraphLifting != 0);
+      transfer.setRestrictTransformAfterQuantization(options.bddcGraphLiftingAfterQuantization != 0);
+      transfer.setProlongateTransformAfterQuantization(options.bddcGraphLiftingAfterQuantization != 0);
       transfer.setRestrictBitlengthEncoding(options.bddcBitlength != 0);
       transfer.setProlongateBitlengthEncoding(options.bddcBitlength != 0);
       transfer.setRestrictZigzagEncoding(options.bddcZigzag != 0);
@@ -1120,13 +1122,15 @@ State runBddcSdc(Functional& F,
             continue;
           auto& subdomain = subdomains[id];
           subdomain.transfer().setQuantizationBits(options.bddcCompressionBits);
-          subdomain.transfer().enableTransform(options.bddcGraphLifting
+          subdomain.transfer().enableTransform((options.bddcGraphLifting || options.bddcGraphLiftingAfterQuantization)
                                                  ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
                                                  : Kaskade::BDDC::TransformType::NONE);
           subdomain.transfer().setRestrictEncoding(options.bddcHuffman != 0);
           subdomain.transfer().setProlongateEncoding(options.bddcHuffman != 0);
           subdomain.transfer().setRestrictTransform(options.bddcGraphLifting != 0);
           subdomain.transfer().setProlongateTransform(options.bddcGraphLifting != 0);
+          subdomain.transfer().setRestrictTransformAfterQuantization(options.bddcGraphLiftingAfterQuantization != 0);
+          subdomain.transfer().setProlongateTransformAfterQuantization(options.bddcGraphLiftingAfterQuantization != 0);
           subdomain.transfer().setRestrictBitlengthEncoding(options.bddcBitlength != 0);
           subdomain.transfer().setProlongateBitlengthEncoding(options.bddcBitlength != 0);
           subdomain.transfer().setRestrictZigzagEncoding(options.bddcZigzag != 0);
