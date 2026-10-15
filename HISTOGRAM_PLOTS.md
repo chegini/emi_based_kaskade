@@ -41,3 +41,23 @@ This writes `output/figures/poisson-stage-raw.png`,
 `output/figures/poisson-stage-bitlength.png`.
 
 The script requires Python 3 and Matplotlib. It does not rerun the solver.
+
+## Python environment
+
+Create the environment once in the project directory:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install matplotlib
+```
+
+Activate it again whenever you open a new shell:
+
+```bash
+source .venv/bin/activate
+```
+
+The `.venv` directory is machine-specific and must not be committed. Only the
+plotting script and this instruction file belong in Git.
