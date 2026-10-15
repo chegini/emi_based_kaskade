@@ -139,10 +139,34 @@ original Kaskade BDDC communication path in `mg/bddc.hpp`.
 With `bddcCompression=0`, the standard `SpaceTransfer` is used. With
 `bddcCompression=1`, the compressed transfer path configures DCT transformation,
 quantization, bit-length encoding, and Huffman coding for restriction and
-prolongation. `bddcCompressionBits` controls quantization precision. This
-option concerns BDDC interface-transfer data; it does not compress the global
+prolongation. `bddcCompressionBits` controls quantization precision.
+
+Set `HISTOGRAM=1` when using `run_case.sh` or `run_case_mpi.sh` to export
+`restrict_raw.csv`, `restrict_zigzag.csv`, `restrict_bitlength.csv` and the
+corresponding prolongation files below the run directory. These are the
+empirical symbol distributions used by the coding pipeline. The option concerns
+BDDC interface-transfer data; it does not compress the global
 matrix or the VTK solution fields. The extended compression CSV/codebook/text
 exchange outputs are not enabled by default in this project.
+
+### Histogram interpretation
+
+The EMI histogram study uses the same full pipeline for every mode:
+quantization, optional graph lifting, zigzag representation, bit-length coding,
+and Huffman coding. The mirrored figure places restriction on the left and
+prolongation on the right. For graph lifting after quantization at 22 bits,
+restriction is strongly concentrated at symbol 0 (about 75.7 percent) and
+symbol 22 (about 18.3 percent), with entropy 1.115 bits/symbol. Prolongation
+is less concentrated; symbol 22 has probability about 38.7 percent, and the
+entropy is 3.397 bits/symbol.
+
+The restriction/prolongation asymmetry means that the two directions should
+be analyzed separately. The bit-length histogram describes the symbols given
+to Huffman coding; it does not directly show whether high-frequency graph
+coefficients have been attenuated. That question requires a second plot of
+the raw quantized-symbol CSV files. Histogram entropy must also be interpreted
+together with codebook/header overhead, all communication iterations, and the
+final transmitted-byte report.
 
 ## Outputs and validation
 

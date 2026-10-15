@@ -7,6 +7,8 @@ ZIGZAG=${ZIGZAG:-1}
 HUFFMAN=${HUFFMAN:-1}
 BITLENGTH=${BITLENGTH:-1}
 FINAL_TIME=${FINAL_TIME:-0.1}
+HISTOGRAM=${HISTOGRAM:-0}
+VTK=${VTK:-0}
 
 case "$LIFTING_MODE" in
   0)
@@ -37,6 +39,9 @@ INTRA=${INTRA:-../input_emi_mesh_blocks/SX_h16_original_list_intracellular.txt}
 EXCITED=${EXCITED:-../input_emi_mesh_blocks/SX_h16_original_early_excited.txt}
 
 CASE="${LIFTING_NAME}_bits-${BITS}_zigzag-${ZIGZAG}_huffman-${HUFFMAN}_bitlength-${BITLENGTH}"
+if [[ "$HISTOGRAM" == 1 ]]; then
+  CASE="${CASE}_histogram"
+fi
 RUN="output/session13/SX_h16/${CASE}"
 LOG="logs/session13/SX_h16-${CASE}.log"
 
@@ -57,10 +62,12 @@ mkdir -p "$RUN" "$(dirname "$LOG")"
   --bddcHuffman "$HUFFMAN" \
   --bddcBitlength "$BITLENGTH" \
   --bddcCompressionReport 1 \
+  --bddcHistogram "$HISTOGRAM" \
   --bddcTolerance 1e-7 \
   --bddcIterations 20 \
   --bddcVerbose 1 \
   --dt 0.01 \
   --finalTime "$FINAL_TIME" \
+  --vtk "$VTK" \
   --dir "$RUN" \
   2>&1 | tee "$LOG"
