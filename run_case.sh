@@ -7,6 +7,7 @@ ZIGZAG=${ZIGZAG:-1}
 HUFFMAN=${HUFFMAN:-1}
 BITLENGTH=${BITLENGTH:-1}
 FINAL_TIME=${FINAL_TIME:-0.1}
+THREADS=${THREADS:-2}
 HISTOGRAM=${HISTOGRAM:-0}
 VTK=${VTK:-0}
 EXCLUDE_CORNERS=${EXCLUDE_CORNERS:-0}
@@ -73,6 +74,7 @@ mkdir -p "$RUN" "$(dirname "$LOG")"
   --bddcTolerance 1e-7 \
   --bddcIterations 20 \
   --bddcVerbose 1 \
+  --nThreads "$THREADS" \
   --dt 0.01 \
   --finalTime "$FINAL_TIME" \
   --vtk "$VTK" \

@@ -8,10 +8,17 @@ HUFFMAN=${HUFFMAN:-1}
 BITLENGTH=${BITLENGTH:-1}
 MPI_RANKS=${MPI_RANKS:-1}
 FINAL_TIME=${FINAL_TIME:-0.1}
+THREADS=${THREADS:-1}
 HISTOGRAM=${HISTOGRAM:-0}
 VTK=${VTK:-0}
 EXCLUDE_CORNERS=${EXCLUDE_CORNERS:-0}
-MPI_LAUNCHER=${MPI_LAUNCHER:-mpirun}
+MPI_LAUNCHER=${MPI_LAUNCHER:-/usr/lib64/mpi/gcc/openmpi4/bin/mpirun}
+MPI_ALLOW_ROOT=${MPI_ALLOW_ROOT:-0}
+
+MPI_ARGS=(-np "$MPI_RANKS")
+if [[ "$MPI_ALLOW_ROOT" == 1 ]]; then
+  MPI_ARGS+=(--allow-run-as-root)
+fi
 
 case "$EXCLUDE_CORNERS" in
   0|1) ;;
@@ -55,7 +62,7 @@ LOG="logs/session13/SX_h16-${CASE}.log"
 
 mkdir -p "$RUN" "$(dirname "$LOG")"
 
-"$MPI_LAUNCHER" --allow-run-as-root -np "$MPI_RANKS" ./emiModel \
+"$MPI_LAUNCHER" "${MPI_ARGS[@]}" ./emiModel \
   --mpi 1 \
   --input "$MESH" \
   --extra_set "$EXTRA" \
@@ -75,6 +82,7 @@ mkdir -p "$RUN" "$(dirname "$LOG")"
   --bddcTolerance 1e-7 \
   --bddcIterations 20 \
   --bddcVerbose 1 \
+  --nThreads "$THREADS" \
   --dt 0.01 \
   --finalTime "$FINAL_TIME" \
   --vtk "$VTK" \
