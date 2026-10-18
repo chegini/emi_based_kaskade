@@ -63,6 +63,31 @@ To clean the executable, dependency files, and generated output:
 make clean
 ```
 
+### Cluster workflow
+
+The Slurm build script compiles the MPI-enabled executable inside the
+container:
+
+```bash
+sbatch build_emi.sbatch
+```
+
+The build is needed after changing the EMI source, changing Kaskade headers,
+or when `emiModel` is missing. Reconnecting to the cluster or running on a
+different login or compute node does not by itself require a rebuild because
+the project is stored on the shared filesystem.
+
+After a successful build, submit the two benchmark runs independently:
+
+```bash
+sbatch run_emi_serial_8threads.sbatch
+sbatch run_emi_mpi_8ranks.sbatch
+```
+
+The first job runs one MPI process with eight assembly/BDDC threads. The
+second runs eight MPI ranks with one thread per rank. Logs are written to
+`logs/emi-serial8-<jobid>.out` and `logs/emi-mpi8-<jobid>.out`.
+
 The scenario helper is available through `steps_to_run.mk`:
 
 ```bash
