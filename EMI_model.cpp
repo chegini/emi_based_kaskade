@@ -81,6 +81,7 @@ struct EmiOptions
   int bddcCompressionBits = 16;
   int bddcGraphLifting = 1;
   int bddcGraphLiftingAfterQuantization = 0;
+  int bddcExcludeCornersFromCompression = 0;
   int bddcZigzag = 1;
   int bddcHuffman = 1;
   int bddcBitlength = 1;
@@ -867,6 +868,7 @@ int main(int argc, char* argv[])
     ("bddcCompressionBits", options.bddcCompressionBits, options.bddcCompressionBits, "quantization bits for compressed BDDC transfer")
     ("bddcGraphLifting", options.bddcGraphLifting, options.bddcGraphLifting, "use graph-lifting transform in compressed BDDC transfer: 0=none, 1=graph lifting")
     ("bddcGraphLiftingAfterQuantization", options.bddcGraphLiftingAfterQuantization, options.bddcGraphLiftingAfterQuantization, "apply reversible integer graph lifting after quantization: 0=no, 1=yes")
+    ("bddcExcludeCornersFromCompression", options.bddcExcludeCornersFromCompression, options.bddcExcludeCornersFromCompression, "exclude BDDC corner DOFs from compressed transfer payloads: 0=no, 1=yes")
     ("bddcZigzag", options.bddcZigzag, options.bddcZigzag, "use zigzag signed-symbol mapping in compressed BDDC transfer: 0=no, 1=yes")
     ("bddcHuffman", options.bddcHuffman, options.bddcHuffman, "use Huffman coding in compressed BDDC transfer: 0=no, 1=yes")
     ("bddcBitlength", options.bddcBitlength, options.bddcBitlength, "use bit-length/tail split before Huffman coding: 0=no, 1=yes")

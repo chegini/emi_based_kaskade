@@ -10,7 +10,13 @@ MPI_RANKS=${MPI_RANKS:-1}
 FINAL_TIME=${FINAL_TIME:-0.1}
 HISTOGRAM=${HISTOGRAM:-0}
 VTK=${VTK:-0}
+EXCLUDE_CORNERS=${EXCLUDE_CORNERS:-0}
 MPI_LAUNCHER=${MPI_LAUNCHER:-mpirun}
+
+case "$EXCLUDE_CORNERS" in
+  0|1) ;;
+  *) printf 'Invalid EXCLUDE_CORNERS=%s; use 0 or 1\n' "$EXCLUDE_CORNERS" >&2; exit 2 ;;
+esac
 
 MESH=${MESH:-../input_emi_mesh_blocks/SX_h16_original_mesh.vtu}
 EXTRA=${EXTRA:-../input_emi_mesh_blocks/SX_h16_original_list_extracellular.txt}
@@ -40,7 +46,7 @@ case "$LIFTING_MODE" in
     ;;
 esac
 
-CASE="mpi-ranks-${MPI_RANKS}_${LIFTING_NAME}_bits-${BITS}_zigzag-${ZIGZAG}_huffman-${HUFFMAN}_bitlength-${BITLENGTH}"
+CASE="mpi-ranks-${MPI_RANKS}_${LIFTING_NAME}_bits-${BITS}_corners-${EXCLUDE_CORNERS}_zigzag-${ZIGZAG}_huffman-${HUFFMAN}_bitlength-${BITLENGTH}"
 if [[ "$HISTOGRAM" == 1 ]]; then
   CASE="${CASE}_histogram"
 fi
@@ -63,6 +69,7 @@ mkdir -p "$RUN" "$(dirname "$LOG")"
   --bddcZigzag "$ZIGZAG" \
   --bddcHuffman "$HUFFMAN" \
   --bddcBitlength "$BITLENGTH" \
+  --bddcExcludeCornersFromCompression "$EXCLUDE_CORNERS" \
   --bddcCompressionReport 1 \
   --bddcHistogram "$HISTOGRAM" \
   --bddcTolerance 1e-7 \
