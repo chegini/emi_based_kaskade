@@ -799,7 +799,17 @@ void computeBddcSdcResiduals(Functional& F,
       auto const transferStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
       for (size_t id = 0; id < subdomains.size(); ++id)
         if (subdomains.has(id))
+        {
           configureTransfer(subdomains[id].transfer(),options);
+          // Corner DOFs are coarse-space representatives.  When requested,
+          // keep them out of the compressed payload while retaining the
+          // normal BDDC transfer and coarse-space construction.
+          if (options.bddcExcludeCornersFromCompression != 0)
+            if constexpr (requires(Transfer& t, std::vector<int> const& d) {
+                            t.setExcludedLocalDofs(d);
+                          })
+              subdomains[id].transfer().setExcludedLocalDofs(interfaceAverages.cornerDofs(id));
+        }
       if (profile)
         profile->transferSetup += ProfileTimes::seconds(transferStart);
 
@@ -1135,6 +1145,14 @@ State runBddcSdc(Functional& F,
           subdomain.transfer().setProlongateBitlengthEncoding(options.bddcBitlength != 0);
           subdomain.transfer().setRestrictZigzagEncoding(options.bddcZigzag != 0);
           subdomain.transfer().setProlongateZigzagEncoding(options.bddcZigzag != 0);
+          // Apply the same corner policy in the non-SDC BDDC path.  The
+          // transfer object performs the filtering consistently for both
+          // restriction and prolongation.
+          if (options.bddcExcludeCornersFromCompression != 0)
+            if constexpr (requires(Transfer& t, std::vector<int> const& d) {
+                            t.setExcludedLocalDofs(d);
+                          })
+              subdomain.transfer().setExcludedLocalDofs(interfaceAverages.cornerDofs(id));
         }
       }
 
