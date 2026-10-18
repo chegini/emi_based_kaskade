@@ -13,9 +13,9 @@ MPI ?= 0
 MPICXX ?= mpicxx
 ifeq ($(MPI),1)
   CXX := $(MPICXX)
-  # MUMPS ships a compatibility mpi.h in /usr/include/mumps.  Put the
-  # selected MPI implementation first so <mpi.h> resolves to OpenMPI.
-  MPI_INCLUDE_FLAGS ?= -I/usr/lib64/mpi/gcc/openmpi4/include
+  # The selected MPI wrapper owns the include and link flags.  Do not inject
+  # a second MPI implementation here: that creates mixed Open MPI/MPICH builds.
+  MPI_INCLUDE_FLAGS ?= -I/home/htc/fchegini/opencarp_dependencies/petsc_install/include
   MPI_FLAGS := $(MPI_INCLUDE_FLAGS) -DKASKADE_HAVE_MPI
   FLAGS := $(MPI_FLAGS) $(FLAGS)
 else
