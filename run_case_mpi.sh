@@ -12,7 +12,7 @@ THREADS=${THREADS:-1}
 HISTOGRAM=${HISTOGRAM:-0}
 VTK=${VTK:-0}
 EXCLUDE_CORNERS=${EXCLUDE_CORNERS:-0}
-MPI_LAUNCHER=${MPI_LAUNCHER:-/usr/lib64/mpi/gcc/openmpi4/bin/mpirun}
+MPI_LAUNCHER=${MPI_LAUNCHER:-/home/htc/fchegini/opencarp_dependencies/petsc_install/bin/mpirun}
 MPI_ALLOW_ROOT=${MPI_ALLOW_ROOT:-0}
 
 MPI_ARGS=(-np "$MPI_RANKS")
@@ -62,7 +62,7 @@ LOG="logs/session13/SX_h16-${CASE}.log"
 
 mkdir -p "$RUN" "$(dirname "$LOG")"
 
-"$MPI_LAUNCHER" "${MPI_ARGS[@]}" ./emiModel \
+"$MPI_LAUNCHER" -bootstrap fork "${MPI_ARGS[@]}" ./emiModel \
   --mpi 1 \
   --input "$MESH" \
   --extra_set "$EXTRA" \

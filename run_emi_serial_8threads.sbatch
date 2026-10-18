@@ -13,6 +13,7 @@ set -euo pipefail
 BASE=/data/numerik/people/fchegini/project/fatemeh/MicroCard/current_papers/BDDC_petsc_SDC_2023/gatevariables/20Nov2023/BDDC
 IMAGE=localhost/kaskade7-mpi-build-environment:latest
 ARCHIVE=/data/numerik/people/fchegini/kaskade7-mpi-build-environment.tar
+HOST_MPI=/home/htc/fchegini/opencarp_dependencies/petsc_install
 
 cd "$BASE/emiModelBddcSdc_new_scratch"
 mkdir -p logs
@@ -23,7 +24,9 @@ fi
 
 podman run --rm --pull=never \
   -e PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  -e LD_LIBRARY_PATH=/kaskade7/libs:$HOST_MPI/lib:$HOST_MPI/lib64:/usr/lib64:/usr/lib:/usr/local/lib64:/usr/local/lib \
   -e OMP_NUM_THREADS=8 \
+  -v "$HOST_MPI:$HOST_MPI:ro" \
   -v /data/numerik/people/fchegini/kaskade7_new:/kaskade7 \
   -v "$BASE:/BDDC" \
   -w /BDDC/emiModelBddcSdc_new_scratch \
