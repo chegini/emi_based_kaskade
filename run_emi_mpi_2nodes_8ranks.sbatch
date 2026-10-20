@@ -21,8 +21,18 @@ IMAGE=localhost/kaskade7-mpi-build-environment:latest
 ARCHIVE=/data/numerik/people/fchegini/kaskade7-mpi-build-environment.tar
 MPI_IMPL=${MPI_IMPL:-pmi2}
 HOST_MPI=/home/htc/fchegini/opencarp_dependencies/petsc_install
-RUN="output/multi-node/sbatch-${SLURM_JOB_ID}"
-export BASE KASKADE7 IMAGE ARCHIVE HOST_MPI RUN
+MPI_RANKS=${MPI_RANKS:-${SLURM_NTASKS}}
+THREADS=${THREADS:-1}
+CPUS_PER_RANK=${CPUS_PER_RANK:-1}
+BITS=${BITS:-22}
+EXCLUDE_CORNERS=${EXCLUDE_CORNERS:-1}
+MESH=${MESH:-../input_emi_mesh_blocks/SX_h16_original_mesh.vtu}
+EXTRA=${EXTRA:-../input_emi_mesh_blocks/SX_h16_original_list_extracellular.txt}
+INTRA=${INTRA:-../input_emi_mesh_blocks/SX_h16_original_list_intracellular.txt}
+EXCITED=${EXCITED:-../input_emi_mesh_blocks/SX_h16_original_early_excited.txt}
+RUN_NAME=${RUN_NAME:-multi-node-ranks-${MPI_RANKS}-bits-${BITS}-job-${SLURM_JOB_ID}}
+RUN="output/multi-node/${RUN_NAME}"
+export BASE KASKADE7 IMAGE ARCHIVE HOST_MPI RUN BITS EXCLUDE_CORNERS THREADS CPUS_PER_RANK MESH EXTRA INTRA EXCITED
 
 cd "$BASE/emiModelBddcSdc_new_scratch"
 mkdir -p logs "$RUN"
@@ -31,6 +41,11 @@ echo "Job ID: $SLURM_JOB_ID"
 echo "Nodes: $(scontrol show hostnames "$SLURM_JOB_NODELIST" | tr "\n" " ")"
 echo "Tasks: $SLURM_NTASKS"
 echo "MPI mode: $MPI_IMPL"
+echo "Ranks per node: ${SLURM_NTASKS_PER_NODE:-unknown}"
+echo "Bits: $BITS"
+echo "Mesh: $MESH"
+echo "CPU binding: cores"
+echo "CPUs per rank: $CPUS_PER_RANK"
 
 # Each node must have the image in its local rootless Podman store.
 srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 bash -lc '
@@ -40,10 +55,13 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 bash -lc '
   podman image exists '"$IMAGE"'
 '
 
-srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" --ntasks-per-node=4 \
+srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" \
+  --ntasks-per-node="$SLURM_NTASKS_PER_NODE" \
+  --cpus-per-task="$CPUS_PER_RANK" \
+  --cpu-bind=cores --hint=nomultithread --distribution=block:block \
   --kill-on-bad-exit=1 \
-  --output="logs/emi-2nodes-8ranks-%j-rank%t.out" \
-  --error="logs/emi-2nodes-8ranks-%j-rank%t.err" \
+  --output="logs/emi-multi-%j-rank%t.out" \
+  --error="logs/emi-multi-%j-rank%t.err" \
   bash -lc '
     set -euo pipefail
     : "${PMI_FD:?PMI_FD was not provided by Slurm}"
@@ -58,34 +76,40 @@ srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" --ntasks-per-node=4 \
       -v "$HOST_MPI:$HOST_MPI:ro" \
       -e PATH=$HOST_MPI/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
       -e LD_LIBRARY_PATH=/kaskade7/libs:$HOST_MPI/lib:$HOST_MPI/lib64:/usr/local/lib64:/usr/local/lib \
-      -e OMP_NUM_THREADS=1 \
+      -e OMP_NUM_THREADS="$THREADS" \
+      -e OMP_PROC_BIND=close \
+      -e OMP_PLACES=cores \
       -v "$KASKADE7:/kaskade7" \
       -v "$BASE:/BDDC" \
       -w /BDDC/emiModelBddcSdc_new_scratch \
       "$IMAGE" \
       ./emiModel \
         --mpi 1 \
-        --input ../input_emi_mesh_blocks/SX_h16_original_mesh.vtu \
-        --extra_set ../input_emi_mesh_blocks/SX_h16_original_list_extracellular.txt \
-        --intra_set ../input_emi_mesh_blocks/SX_h16_original_list_intracellular.txt \
-        --excited ../input_emi_mesh_blocks/SX_h16_original_early_excited.txt \
+        --input "$MESH" \
+        --extra_set "$EXTRA" \
+        --intra_set "$INTRA" \
+        --excited "$EXCITED" \
         --bddc 1 \
         --bddcCompression 1 \
-        --bddcCompressionBits 22 \
+        --bddcCompressionBits "$BITS" \
         --bddcGraphLifting 0 \
         --bddcGraphLiftingAfterQuantization 1 \
         --bddcZigzag 1 \
         --bddcHuffman 1 \
         --bddcBitlength 1 \
-        --bddcExcludeCornersFromCompression 1 \
+        --bddcExcludeCornersFromCompression "$EXCLUDE_CORNERS" \
         --bddcCompressionReport 1 \
         --bddcHistogram 0 \
         --bddcTolerance 1e-7 \
         --bddcIterations 20 \
         --bddcVerbose 1 \
-        --nThreads 1 \
+        --nThreads "$THREADS" \
         --dt 0.01 \
         --finalTime 0.1 \
         --vtk 0 \
         --dir "/BDDC/emiModelBddcSdc_new_scratch/$RUN"
   '
+
+if command -v sacct >/dev/null 2>&1; then
+  sacct -j "$SLURM_JOB_ID" --format=JobID,State,Elapsed,TotalCPU,AllocCPUS,MaxRSS
+fi

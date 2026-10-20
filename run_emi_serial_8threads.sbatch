@@ -14,6 +14,13 @@ BASE=/data/numerik/people/fchegini/project/fatemeh/MicroCard/current_papers/BDDC
 IMAGE=localhost/kaskade7-mpi-build-environment:latest
 ARCHIVE=/data/numerik/people/fchegini/kaskade7-mpi-build-environment.tar
 HOST_MPI=/home/htc/fchegini/opencarp_dependencies/petsc_install
+THREADS=${THREADS:-8}
+BITS=${BITS:-22}
+EXCLUDE_CORNERS=${EXCLUDE_CORNERS:-1}
+MESH=${MESH:-../input_emi_mesh_blocks/SX_h16_original_mesh.vtu}
+EXTRA=${EXTRA:-../input_emi_mesh_blocks/SX_h16_original_list_extracellular.txt}
+INTRA=${INTRA:-../input_emi_mesh_blocks/SX_h16_original_list_intracellular.txt}
+EXCITED=${EXCITED:-../input_emi_mesh_blocks/SX_h16_original_early_excited.txt}
 
 cd "$BASE/emiModelBddcSdc_new_scratch"
 mkdir -p logs
@@ -22,13 +29,23 @@ if ! podman image exists "$IMAGE"; then
   podman load -i "$ARCHIVE"
 fi
 
-podman run --rm --pull=never \
+srun --ntasks=1 --cpu-bind=cores --hint=nomultithread podman run --rm --pull=never \
   -e PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   -e LD_LIBRARY_PATH=/kaskade7/libs:$HOST_MPI/lib:$HOST_MPI/lib64:/usr/lib64:/usr/lib:/usr/local/lib64:/usr/local/lib \
-  -e OMP_NUM_THREADS=8 \
+  -e OMP_NUM_THREADS="$THREADS" \
+  -e OMP_PROC_BIND=close \
+  -e OMP_PLACES=cores \
+  -e MESH="$MESH" \
+  -e EXTRA="$EXTRA" \
+  -e INTRA="$INTRA" \
+  -e EXCITED="$EXCITED" \
   -v "$HOST_MPI:$HOST_MPI:ro" \
   -v /data/numerik/people/fchegini/kaskade7_new:/kaskade7 \
   -v "$BASE:/BDDC" \
   -w /BDDC/emiModelBddcSdc_new_scratch \
   "$IMAGE" \
-  bash -lc 'THREADS=8 BITS=22 LIFTING_MODE=1 EXCLUDE_CORNERS=1 VTK=0 ./run_case.sh'
+  bash -lc "THREADS=$THREADS BITS=$BITS LIFTING_MODE=1 EXCLUDE_CORNERS=$EXCLUDE_CORNERS VTK=0 ./run_case.sh"
+
+if command -v sacct >/dev/null 2>&1; then
+  sacct -j "$SLURM_JOB_ID" --format=JobID,State,Elapsed,TotalCPU,AllocCPUS,MaxRSS
+fi
