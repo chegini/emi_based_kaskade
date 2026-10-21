@@ -277,6 +277,8 @@ Example:
 | --- | ---: | --- |
 | `--bddcCompression` | `0` | Enable quantized BDDC transfer |
 | `--bddcCompressionBits` | `16` | Quantization precision in bits |
+| `--bddcCompressionMinInterfaceSize` | `0` | Minimum scalar interface size for thresholded fallback; `0` disables it |
+| `--bddcCompressionThresholdInterfaceTypes` | `2` | Interface type receiving the threshold: `2=edge`, `4=face`, `0=all` |
 | `--bddcGraphLifting` | `1` | Enable graph-lifting transform |
 | `--bddcHuffman` | `1` | Enable Huffman coding |
 | `--bddcBitlength` | `1` | Enable bit-length/tail encoding |

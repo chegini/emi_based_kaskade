@@ -80,6 +80,7 @@ struct EmiOptions
   int bddcCompression = 0;
   int bddcCompressionBits = 16;
   int bddcCompressionMinInterfaceSize = 0;
+  int bddcCompressionThresholdInterfaceTypes = Kaskade::BDDC::EDGE;
   int bddcGraphLifting = 1;
   int bddcGraphLiftingAfterQuantization = 0;
   int bddcExcludeCornersFromCompression = 0;
@@ -870,6 +871,9 @@ int main(int argc, char* argv[])
     ("bddcCompressionMinInterfaceSize", options.bddcCompressionMinInterfaceSize,
      options.bddcCompressionMinInterfaceSize,
      "minimum scalar interface size for compressed BDDC transfer; 0=all")
+    ("bddcCompressionThresholdInterfaceTypes", options.bddcCompressionThresholdInterfaceTypes,
+     options.bddcCompressionThresholdInterfaceTypes,
+     "interface type mask for the size threshold: 2=edge, 4=face, 0=all")
     ("bddcGraphLifting", options.bddcGraphLifting, options.bddcGraphLifting, "use graph-lifting transform in compressed BDDC transfer: 0=none, 1=graph lifting")
     ("bddcGraphLiftingAfterQuantization", options.bddcGraphLiftingAfterQuantization, options.bddcGraphLiftingAfterQuantization, "apply reversible integer graph lifting after quantization: 0=no, 1=yes")
     ("bddcExcludeCornersFromCompression", options.bddcExcludeCornersFromCompression, options.bddcExcludeCornersFromCompression, "exclude BDDC corner DOFs from compressed transfer payloads: 0=no, 1=yes")
