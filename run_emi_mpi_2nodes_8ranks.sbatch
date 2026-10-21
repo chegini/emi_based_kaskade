@@ -26,6 +26,11 @@ THREADS=${THREADS:-1}
 CPUS_PER_RANK=${CPUS_PER_RANK:-1}
 BITS=${BITS:-22}
 EXCLUDE_CORNERS=${EXCLUDE_CORNERS:-1}
+ZIGZAG=${ZIGZAG:-1}
+HUFFMAN=${HUFFMAN:-1}
+BITLENGTH=${BITLENGTH:-1}
+HISTOGRAM=${HISTOGRAM:-0}
+FINAL_TIME=${FINAL_TIME:-0.1}
 MESH=${MESH:-../input_emi_mesh_blocks/SX_h16_original_mesh.vtu}
 EXTRA=${EXTRA:-../input_emi_mesh_blocks/SX_h16_original_list_extracellular.txt}
 INTRA=${INTRA:-../input_emi_mesh_blocks/SX_h16_original_list_intracellular.txt}
@@ -33,6 +38,7 @@ EXCITED=${EXCITED:-../input_emi_mesh_blocks/SX_h16_original_early_excited.txt}
 RUN_NAME=${RUN_NAME:-multi-node-ranks-${MPI_RANKS}-bits-${BITS}-job-${SLURM_JOB_ID}}
 RUN="output/multi-node/${RUN_NAME}"
 export BASE KASKADE7 IMAGE ARCHIVE HOST_MPI RUN BITS EXCLUDE_CORNERS THREADS CPUS_PER_RANK MESH EXTRA INTRA EXCITED
+export ZIGZAG HUFFMAN BITLENGTH HISTOGRAM FINAL_TIME
 
 cd "$BASE/emiModelBddcSdc_new_scratch"
 mkdir -p logs "$RUN"
@@ -94,18 +100,18 @@ srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" \
         --bddcCompressionBits "$BITS" \
         --bddcGraphLifting 0 \
         --bddcGraphLiftingAfterQuantization 1 \
-        --bddcZigzag 1 \
-        --bddcHuffman 1 \
-        --bddcBitlength 1 \
+        --bddcZigzag "$ZIGZAG" \
+        --bddcHuffman "$HUFFMAN" \
+        --bddcBitlength "$BITLENGTH" \
         --bddcExcludeCornersFromCompression "$EXCLUDE_CORNERS" \
         --bddcCompressionReport 1 \
-        --bddcHistogram 0 \
+        --bddcHistogram "$HISTOGRAM" \
         --bddcTolerance 1e-7 \
         --bddcIterations 20 \
         --bddcVerbose 1 \
         --nThreads "$THREADS" \
         --dt 0.01 \
-        --finalTime 0.1 \
+        --finalTime "$FINAL_TIME" \
         --vtk 0 \
         --dir "/BDDC/emiModelBddcSdc_new_scratch/$RUN"
   '
