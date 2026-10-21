@@ -2,6 +2,8 @@
 set -euo pipefail
 
 BITS=${BITS:-32}
+MIN_INTERFACE_SIZE=${MIN_INTERFACE_SIZE:-0}
+THRESHOLD_INTERFACE_TYPES=${THRESHOLD_INTERFACE_TYPES:-2}
 LIFTING_MODE=${LIFTING_MODE:-2}
 ZIGZAG=${ZIGZAG:-1}
 HUFFMAN=${HUFFMAN:-1}
@@ -63,6 +65,8 @@ mkdir -p "$RUN" "$(dirname "$LOG")"
   --bddc 1 \
   --bddcCompression 1 \
   --bddcCompressionBits "$BITS" \
+  --bddcCompressionMinInterfaceSize "$MIN_INTERFACE_SIZE" \
+  --bddcCompressionThresholdInterfaceTypes "$THRESHOLD_INTERFACE_TYPES" \
   --bddcGraphLifting "$LIFTING" \
   --bddcGraphLiftingAfterQuantization "$AFTER_QUANTIZATION" \
   --bddcZigzag "$ZIGZAG" \
