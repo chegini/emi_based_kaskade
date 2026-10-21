@@ -49,6 +49,7 @@ echo "Tasks: $SLURM_NTASKS"
 echo "MPI mode: $MPI_IMPL"
 echo "Ranks per node: ${SLURM_NTASKS_PER_NODE:-unknown}"
 echo "Bits: $BITS"
+echo "Minimum interface size: ${MIN_INTERFACE_SIZE:-0}"
 echo "Mesh: $MESH"
 echo "CPU binding: cores"
 echo "CPUs per rank: $CPUS_PER_RANK"
@@ -83,6 +84,7 @@ srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" \
       -e PATH=$HOST_MPI/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
       -e LD_LIBRARY_PATH=/kaskade7/libs:$HOST_MPI/lib:$HOST_MPI/lib64:/usr/local/lib64:/usr/local/lib \
       -e OMP_NUM_THREADS="$THREADS" \
+      -e MIN_INTERFACE_SIZE="${MIN_INTERFACE_SIZE:-0}" \
       -e OMP_PROC_BIND=close \
       -e OMP_PLACES=cores \
       -v "$KASKADE7:/kaskade7" \
@@ -98,6 +100,7 @@ srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" \
         --bddc 1 \
         --bddcCompression 1 \
         --bddcCompressionBits "$BITS" \
+        --bddcCompressionMinInterfaceSize "${MIN_INTERFACE_SIZE:-0}" \
         --bddcGraphLifting 0 \
         --bddcGraphLiftingAfterQuantization 1 \
         --bddcZigzag "$ZIGZAG" \
