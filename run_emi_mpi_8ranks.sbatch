@@ -56,7 +56,7 @@ srun --ntasks=1 --cpus-per-task="$WRAPPER_CPUS" --cpu-bind=cores --hint=nomultit
   -e MPI_BIND_ARGS="-bind-to core" \
   -e OMP_PROC_BIND=close \
   -e OMP_PLACES=cores \
-  -e VTK=0 \
+  -e VTK="${VTK:-0}" \
   -v "$HOST_MPI:$HOST_MPI:ro" \
   -v /data/numerik/people/fchegini/kaskade7_new:/kaskade7 \
   -v "$BASE:/BDDC" \
