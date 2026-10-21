@@ -79,6 +79,7 @@ struct EmiOptions
   int bddc = 0;
   int bddcCompression = 0;
   int bddcCompressionBits = 16;
+  int bddcCompressionMinInterfaceSize = 0;
   int bddcGraphLifting = 1;
   int bddcGraphLiftingAfterQuantization = 0;
   int bddcExcludeCornersFromCompression = 0;
@@ -866,6 +867,9 @@ int main(int argc, char* argv[])
     ("bddc", options.bddc, options.bddc, "use BDDC solver for EMI: 0=no, 1=yes")
     ("bddcCompression", options.bddcCompression, options.bddcCompression, "use quantized BDDC transfer: 0=no, 1=yes")
     ("bddcCompressionBits", options.bddcCompressionBits, options.bddcCompressionBits, "quantization bits for compressed BDDC transfer")
+    ("bddcCompressionMinInterfaceSize", options.bddcCompressionMinInterfaceSize,
+     options.bddcCompressionMinInterfaceSize,
+     "minimum scalar interface size for compressed BDDC transfer; 0=all")
     ("bddcGraphLifting", options.bddcGraphLifting, options.bddcGraphLifting, "use graph-lifting transform in compressed BDDC transfer: 0=none, 1=graph lifting")
     ("bddcGraphLiftingAfterQuantization", options.bddcGraphLiftingAfterQuantization, options.bddcGraphLiftingAfterQuantization, "apply reversible integer graph lifting after quantization: 0=no, 1=yes")
     ("bddcExcludeCornersFromCompression", options.bddcExcludeCornersFromCompression, options.bddcExcludeCornersFromCompression, "exclude BDDC corner DOFs from compressed transfer payloads: 0=no, 1=yes")

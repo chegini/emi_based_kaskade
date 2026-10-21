@@ -484,6 +484,9 @@ namespace EmiBddc
                   })
     {
       transfer.setQuantizationBits(options.bddcCompressionBits);
+      if constexpr (requires(Transfer& candidate) { candidate.setCompressionMinInterfaceSize(0); }) {
+        transfer.setCompressionMinInterfaceSize(static_cast<std::size_t>(std::max(0, options.bddcCompressionMinInterfaceSize)));
+      }
       transfer.enableTransform((options.bddcGraphLifting || options.bddcGraphLiftingAfterQuantization)
                                  ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
                                  : Kaskade::BDDC::TransformType::NONE);
@@ -1148,6 +1151,9 @@ State runBddcSdc(Functional& F,
             continue;
           auto& subdomain = subdomains[id];
           subdomain.transfer().setQuantizationBits(options.bddcCompressionBits);
+          subdomain.transfer().setCompressionMinInterfaceSize(
+              static_cast<std::size_t>(
+                  std::max(0, options.bddcCompressionMinInterfaceSize)));
           subdomain.transfer().enableTransform((options.bddcGraphLifting || options.bddcGraphLiftingAfterQuantization)
                                                  ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
                                                  : Kaskade::BDDC::TransformType::NONE);

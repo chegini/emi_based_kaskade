@@ -73,6 +73,7 @@ mkdir -p "$RUN" "$(dirname "$LOG")"
   --bddc 1 \
   --bddcCompression 1 \
   --bddcCompressionBits "$BITS" \
+  --bddcCompressionMinInterfaceSize "${MIN_INTERFACE_SIZE:-0}" \
   --bddcGraphLifting "$LIFTING" \
   --bddcGraphLiftingAfterQuantization "$AFTER_QUANTIZATION" \
   --bddcZigzag "$ZIGZAG" \
