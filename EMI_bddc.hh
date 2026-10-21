@@ -58,6 +58,8 @@ namespace EmiBddc
     std::uint64_t originalReceivedBytes = 0;
     std::uint64_t sentBytes = 0;
     std::uint64_t receivedBytes = 0;
+    std::uint64_t streamBytes = 0;
+    std::uint64_t streamPaddingBytes = 0;
     double encodeTimeMs = 0.0;
     double decodeTimeMs = 0.0;
     std::uint64_t encodeCount = 0;
@@ -71,6 +73,14 @@ namespace EmiBddc
       originalReceivedBytes += traffic.originalReceivedBytes;
       sentBytes += traffic.sentBytes;
       receivedBytes += traffic.receivedBytes;
+      if constexpr (requires {
+                      traffic.streamBytes;
+                      traffic.streamPaddingBytes;
+                    })
+      {
+        streamBytes += traffic.streamBytes;
+        streamPaddingBytes += traffic.streamPaddingBytes;
+      }
       encodeTimeMs += traffic.encodeTimeMs;
       decodeTimeMs += traffic.decodeTimeMs;
       encodeCount += traffic.encodeCount;
@@ -102,6 +112,8 @@ namespace EmiBddc
                 << "  savings: " << percent << "%\n"
                 << "  ratio: " << ratio << ":1\n"
                 << "  shared codebook estimate: " << codebookBits << " bits\n"
+                << "  logical stream bytes: " << streamBytes << "\n"
+                << "  stream padding bytes: " << streamPaddingBytes << "\n"
                 << "  raw received bytes: " << originalReceivedBytes << "\n"
                 << "  received bytes: " << receivedBytes << "\n";
     }
@@ -118,13 +130,15 @@ namespace EmiBddc
         int rank = 0;
         MPI_Comm_rank(MPI_COMM_WORLD,&rank);
 
-        unsigned long long localBytes[4] = {
+        unsigned long long localBytes[6] = {
           static_cast<unsigned long long>(originalSentBytes),
           static_cast<unsigned long long>(originalReceivedBytes),
           static_cast<unsigned long long>(sentBytes),
-          static_cast<unsigned long long>(receivedBytes)};
-        unsigned long long globalBytes[4] = {0,0,0,0};
-        MPI_Allreduce(localBytes,globalBytes,4,MPI_UNSIGNED_LONG_LONG,MPI_SUM,MPI_COMM_WORLD);
+          static_cast<unsigned long long>(receivedBytes),
+          static_cast<unsigned long long>(streamBytes),
+          static_cast<unsigned long long>(streamPaddingBytes)};
+        unsigned long long globalBytes[6] = {0,0,0,0,0,0};
+        MPI_Allreduce(localBytes,globalBytes,6,MPI_UNSIGNED_LONG_LONG,MPI_SUM,MPI_COMM_WORLD);
 
         double localTimes[2] = {encodeTimeMs,decodeTimeMs};
         double globalTimes[2] = {0.0,0.0};
@@ -148,6 +162,8 @@ namespace EmiBddc
         global.originalReceivedBytes = globalBytes[1];
         global.sentBytes = globalBytes[2];
         global.receivedBytes = globalBytes[3];
+        global.streamBytes = globalBytes[4];
+        global.streamPaddingBytes = globalBytes[5];
         global.encodeTimeMs = globalTimes[0];
         global.decodeTimeMs = globalTimes[1];
         global.encodeCount = globalCounts[0];
