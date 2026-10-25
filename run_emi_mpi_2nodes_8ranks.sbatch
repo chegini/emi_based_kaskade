@@ -31,14 +31,24 @@ HUFFMAN=${HUFFMAN:-1}
 BITLENGTH=${BITLENGTH:-1}
 HISTOGRAM=${HISTOGRAM:-0}
 FINAL_TIME=${FINAL_TIME:-0.1}
+REFINE=${REFINE:-0}
+GRAPH_LIFTING=${GRAPH_LIFTING:-1}
+GRAPH_LIFTING_AFTER_QUANTIZATION=${GRAPH_LIFTING_AFTER_QUANTIZATION:-1}
+BDD_ITERATIONS=${BDD_ITERATIONS:-300}
+MIN_INTERFACE_SIZE=${MIN_INTERFACE_SIZE:-0}
+THRESHOLD_INTERFACE_TYPES=${THRESHOLD_INTERFACE_TYPES:-2}
+INTERFACE_TYPES=${INTERFACE_TYPES:-7}
 MESH=${MESH:-../input_emi_mesh_blocks/SX_h16_original_mesh.vtu}
 EXTRA=${EXTRA:-../input_emi_mesh_blocks/SX_h16_original_list_extracellular.txt}
 INTRA=${INTRA:-../input_emi_mesh_blocks/SX_h16_original_list_intracellular.txt}
 EXCITED=${EXCITED:-../input_emi_mesh_blocks/SX_h16_original_early_excited.txt}
 RUN_NAME=${RUN_NAME:-multi-node-ranks-${MPI_RANKS}-bits-${BITS}-job-${SLURM_JOB_ID}}
 RUN="output/multi-node/${RUN_NAME}"
-export BASE KASKADE7 IMAGE ARCHIVE HOST_MPI RUN BITS EXCLUDE_CORNERS THREADS CPUS_PER_RANK MESH EXTRA INTRA EXCITED
+export BASE KASKADE7 IMAGE ARCHIVE HOST_MPI RUN
+export MPI_IMPL BITS EXCLUDE_CORNERS THREADS CPUS_PER_RANK MESH EXTRA INTRA EXCITED
 export ZIGZAG HUFFMAN BITLENGTH HISTOGRAM FINAL_TIME
+export REFINE GRAPH_LIFTING GRAPH_LIFTING_AFTER_QUANTIZATION BDD_ITERATIONS
+export MIN_INTERFACE_SIZE THRESHOLD_INTERFACE_TYPES INTERFACE_TYPES
 
 cd "$BASE/emiModelBddcSdc_new_scratch"
 mkdir -p logs "$RUN"
@@ -55,29 +65,29 @@ echo "Mesh: $MESH"
 echo "CPU binding: cores"
 echo "CPUs per rank: $CPUS_PER_RANK"
 
-# Each node must have the image in its local rootless Podman store.
-srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 bash -lc '
-  if ! podman image exists '"$IMAGE"'; then
-    podman load -i '"$ARCHIVE"'
-  fi
-  podman image exists '"$IMAGE"'
-'
+# The image is already installed in the normal Podman store on the ZIB
+# system. Do not import the archive inside an sbatch job: the batch
+# environment terminates podman load while it is unpacking layers.
+if ! podman image exists "$IMAGE"; then
+  echo "ERROR: image $IMAGE is not available in the normal Podman store on $(hostname)" >&2
+  exit 2
+fi
 
 srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" \
   --ntasks-per-node="$SLURM_NTASKS_PER_NODE" \
   --cpus-per-task="$CPUS_PER_RANK" \
   --cpu-bind=cores --hint=nomultithread --distribution=block:block \
-  --kill-on-bad-exit=1 \
+  --kill-on-bad-exit=0 \
   --output="logs/emi-multi-%j-rank%t.out" \
   --error="logs/emi-multi-%j-rank%t.err" \
   bash -lc '
-    set -euo pipefail
+    set -euxo pipefail
+    echo "mpi-container rank=${SLURM_PROCID} node=$(hostname) image=$IMAGE"
     : "${PMI_FD:?PMI_FD was not provided by Slurm}"
     eval "exec 3<&${PMI_FD}"
-    exec podman run --rm --pull=never \
+    exec podman run --rm --cgroups=disabled --pull=never \
       --network=host \
       --ipc=host \
-      --pid=host \
       --preserve-fds=1 \
       --env-host \
       -e PMI_FD=3 \
@@ -99,13 +109,14 @@ srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" \
         --extra_set "$EXTRA" \
         --intra_set "$INTRA" \
         --excited "$EXCITED" \
+        --refine "${REFINE:-0}" \
         --bddc 1 \
         --bddcCompression 1 \
         --bddcCompressionBits "$BITS" \
-        --bddcCompressionMinInterfaceSize "${MIN_INTERFACE_SIZE:-0}" \
-        --bddcCompressionThresholdInterfaceTypes "${THRESHOLD_INTERFACE_TYPES:-2}" \
-        --bddcGraphLifting 0 \
-        --bddcGraphLiftingAfterQuantization 1 \
+        --bddcCompressionMinInterfaceSize "$MIN_INTERFACE_SIZE" \
+        --bddcCompressionThresholdInterfaceTypes "$THRESHOLD_INTERFACE_TYPES" \
+        --bddcGraphLifting "$GRAPH_LIFTING" \
+        --bddcGraphLiftingAfterQuantization "$GRAPH_LIFTING_AFTER_QUANTIZATION" \
         --bddcZigzag "$ZIGZAG" \
         --bddcHuffman "$HUFFMAN" \
         --bddcBitlength "$BITLENGTH" \
@@ -113,7 +124,7 @@ srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" \
         --bddcCompressionReport 1 \
         --bddcHistogram "$HISTOGRAM" \
         --bddcTolerance 1e-7 \
-        --bddcIterations 20 \
+        --bddcIterations "$BDD_ITERATIONS" \
         --bddcVerbose 1 \
         --nThreads "$THREADS" \
         --dt 0.01 \
