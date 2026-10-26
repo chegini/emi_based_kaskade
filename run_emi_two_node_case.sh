@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 1 ]; then
-  echo "Usage: RUN_NODE=nodeA,nodeB $0 weak|strong" >&2
+  echo "Usage: RUN_NODE=nodeA,nodeB $0 weak|strong|pepe|rizzo|robin|kermit|gonzo|animal" >&2
   exit 2
 fi
 
@@ -12,6 +12,9 @@ nodes=2
 tasks_per_node=32
 refine="${REFINE:-0}"
 histogram="${HISTOGRAM:-0}"
+bits="${BITS:-12}"
+compression="${COMPRESSION:-1}"
+vtk="${VTK:-0}"
 
 RUN_NODE_LIST="${RUN_NODE:-}"
 if [[ "$RUN_NODE_LIST" != *,* ]]; then
@@ -33,16 +36,30 @@ case "$mode" in
     intra="../input_emi_mesh_blocks/weak_strong_scaling/strong_h16_kaskade_list_intracellular.txt"
     excited="../input_emi_mesh_blocks/weak_strong_scaling/strong_h16_kaskade_early_excited.txt"
     ;;
+  pepe|rizzo|robin)
+    mesh="../input_emi_mesh/${mode}_combi_domi.vtu"
+    extra="../input_emi_mesh/${mode}_combi_domi_extracellular.txt"
+    intra="../input_emi_mesh/${mode}_combi_domi_intracellular.txt"
+    excited="../input_emi_mesh/${mode}_combi_domi_excited.txt"
+    ;;
+  kermit|gonzo|animal)
+    mesh="../input_emi_mesh/${mode}_mesh.vtu"
+    extra="../input_emi_mesh/${mode}_extracellular.txt"
+    intra="../input_emi_mesh/${mode}_intracellular.txt"
+    excited="../input_emi_mesh/${mode}_early_excited.txt"
+    ;;
   *)
-    echo "Usage: RUN_NODE=nodeA,nodeB $0 weak|strong" >&2
+    echo "Usage: RUN_NODE=nodeA,nodeB $0 weak|strong|pepe|rizzo|robin|kermit|gonzo|animal" >&2
     exit 2
     ;;
 esac
 
 tag="$mode-$ranks-r$refine-h$histogram"
-export_spec="ALL,MPI_RANKS=$ranks,THREADS=1,CPUS_PER_RANK=1,BITS=12,COMPRESSION=1,REFINE=$refine,FINAL_TIME=0.1,MAXIMUM_NUMBER_OF_TIME_STEPS=10,GRAPH_LIFTING=1,GRAPH_LIFTING_AFTER_QUANTIZATION=1,HUFFMAN=1,BITLENGTH=1,ZIGZAG=1,HISTOGRAM=$histogram,MIN_INTERFACE_SIZE=0,THRESHOLD_INTERFACE_TYPES=4,INTERFACE_TYPES=7,EXCLUDE_CORNERS=1,BDD_ITERATIONS=300,MESH=$mesh,EXTRA=$extra,INTRA=$intra,EXCITED=$excited,CASE_TAG=$tag"
+run_name="${RUN_NAME:-$tag}"
+export_spec="ALL,MPI_RANKS=$ranks,THREADS=1,CPUS_PER_RANK=1,BITS=$bits,COMPRESSION=$compression,REFINE=$refine,FINAL_TIME=0.1,MAXIMUM_NUMBER_OF_TIME_STEPS=10,GRAPH_LIFTING=${GRAPH_LIFTING:-1},GRAPH_LIFTING_AFTER_QUANTIZATION=${GRAPH_LIFTING_AFTER_QUANTIZATION:-1},HUFFMAN=${HUFFMAN:-1},BITLENGTH=${BITLENGTH:-1},ZIGZAG=${ZIGZAG:-1},HISTOGRAM=$histogram,VTK=$vtk,RUN_NAME=$run_name,MIN_INTERFACE_SIZE=0,THRESHOLD_INTERFACE_TYPES=4,INTERFACE_TYPES=7,EXCLUDE_CORNERS=1,BDD_ITERATIONS=300,MESH=$mesh,EXTRA=$extra,INTRA=$intra,EXCITED=$excited,CASE_TAG=$tag"
 
 echo "===== submitting $tag on $RUN_NODE_LIST ====="
+echo "Bits: $bits, compression: $compression, refine: $refine, VTK: $vtk"
 
 set +e
 jid=$(sbatch --parsable --wait \
