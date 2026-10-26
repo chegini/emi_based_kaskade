@@ -61,10 +61,10 @@ esac
 
 tag="$mode-$ranks-r$refine-h$histogram"
 run_name="${RUN_NAME:-$tag}"
-export_spec="ALL,MPI_RANKS=$ranks,THREADS=1,CPUS_PER_RANK=1,BITS=$bits,COMPRESSION=$compression,REFINE=$refine,FINAL_TIME=0.1,MAXIMUM_NUMBER_OF_TIME_STEPS=10,GRAPH_LIFTING=${GRAPH_LIFTING:-1},GRAPH_LIFTING_AFTER_QUANTIZATION=${GRAPH_LIFTING_AFTER_QUANTIZATION:-1},HUFFMAN=${HUFFMAN:-1},BITLENGTH=${BITLENGTH:-1},ZIGZAG=${ZIGZAG:-1},HISTOGRAM=$histogram,VTK=$vtk,RUN_NAME=$run_name,MIN_INTERFACE_SIZE=0,THRESHOLD_INTERFACE_TYPES=4,INTERFACE_TYPES=7,EXCLUDE_CORNERS=1,BDD_ITERATIONS=300,MESH=$mesh,EXTRA=$extra,INTRA=$intra,EXCITED=$excited,CASE_TAG=$tag"
+export_spec="ALL,MPI_RANKS=$ranks,THREADS=1,CPUS_PER_RANK=1,BITS=$bits,COMPRESSION=$compression,REFINE=$refine,FINAL_TIME=0.1,MAXIMUM_NUMBER_OF_TIME_STEPS=10,MASTER_WORKER=${MASTER_WORKER:-0},GRAPH_LIFTING=${GRAPH_LIFTING:-1},GRAPH_LIFTING_AFTER_QUANTIZATION=${GRAPH_LIFTING_AFTER_QUANTIZATION:-1},HUFFMAN=${HUFFMAN:-1},BITLENGTH=${BITLENGTH:-1},ZIGZAG=${ZIGZAG:-1},HISTOGRAM=$histogram,VTK=$vtk,RUN_NAME=$run_name,MIN_INTERFACE_SIZE=0,THRESHOLD_INTERFACE_TYPES=4,INTERFACE_TYPES=7,EXCLUDE_CORNERS=1,BDD_ITERATIONS=300,MESH=$mesh,EXTRA=$extra,INTRA=$intra,EXCITED=$excited,CASE_TAG=$tag"
 
 echo "===== submitting $tag on $run_nodes ====="
-echo "Ranks: $ranks ($tasks_per_node per node), bits: $bits, compression: $compression, VTK: $vtk"
+echo "Ranks: $ranks ($tasks_per_node per node), bits: $bits, compression: $compression, VTK: $vtk, master-worker: ${MASTER_WORKER:-0}"
 
 set +e
 jid=$(sbatch --parsable --wait \

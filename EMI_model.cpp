@@ -93,6 +93,7 @@ struct EmiOptions
   int bddcInterfaceTypes = 7;
   int bddcVerbose = 0;
   int bddcUseCg = 1;
+  int masterWorker = 0;
   int mpi = 0;
 
   double finalTime = 0.01;
@@ -887,6 +888,7 @@ int main(int argc, char* argv[])
     ("bddcInterfaceTypes", options.bddcInterfaceTypes, options.bddcInterfaceTypes, "BDDC interface flags: 1=corner, 2=edge, 4=face, 7=all")
     ("bddcVerbose", options.bddcVerbose, options.bddcVerbose, "print BDDC iteration residuals: 0=no, 1=yes")
     ("bddcUseCg", options.bddcUseCg, options.bddcUseCg, "use CG in BDDC coarse solve path: 0=no, 1=yes")
+    ("masterWorker", options.masterWorker, options.masterWorker, "dedicated rank-0 coarse master: 0=existing path, 1=master-worker")
     ("mpi", options.mpi, options.mpi, "initialize MPI and run a startup communication check: 0=no, 1=yes")
     ("nThreads", options.assemblyThreads, options.assemblyThreads, "number of assembler and BDDC setup threads")
     ("penalty", options.penalty, options.penalty, "boundary penalty")
