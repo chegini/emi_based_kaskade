@@ -28,6 +28,8 @@ XDG_RUNTIME_DIR="$PODMAN_BASE/run"
 MPI_RANKS=${MPI_RANKS:-${SLURM_NTASKS}}
 THREADS=${THREADS:-1}
 CPUS_PER_RANK=${CPUS_PER_RANK:-1}
+COMPRESSION=${COMPRESSION:-1}
+VTK=${VTK:-0}
 BITS=${BITS:-22}
 EXCLUDE_CORNERS=${EXCLUDE_CORNERS:-1}
 ZIGZAG=${ZIGZAG:-1}
@@ -49,7 +51,7 @@ EXCITED=${EXCITED:-../input_emi_mesh_blocks/SX_h16_original_early_excited.txt}
 RUN_NAME=${RUN_NAME:-multi-node-ranks-${MPI_RANKS}-bits-${BITS}-job-${SLURM_JOB_ID}}
 RUN="output/multi-node/${RUN_NAME}"
 export BASE KASKADE7 IMAGE ARCHIVE HOST_MPI RUN PODMAN_RUNTIME PODMAN_BASE PODMAN_STORAGE_DRIVER XDG_RUNTIME_DIR
-export MPI_IMPL BITS EXCLUDE_CORNERS THREADS CPUS_PER_RANK MESH EXTRA INTRA EXCITED
+export MPI_IMPL BITS EXCLUDE_CORNERS THREADS CPUS_PER_RANK COMPRESSION VTK MESH EXTRA INTRA EXCITED
 export ZIGZAG HUFFMAN BITLENGTH HISTOGRAM FINAL_TIME
 export REFINE GRAPH_LIFTING GRAPH_LIFTING_AFTER_QUANTIZATION BDD_ITERATIONS
 export MIN_INTERFACE_SIZE THRESHOLD_INTERFACE_TYPES INTERFACE_TYPES
@@ -163,7 +165,7 @@ srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" \
         --excited "$EXCITED" \
         --refine "${REFINE:-0}" \
         --bddc 1 \
-        --bddcCompression 1 \
+        --bddcCompression "$COMPRESSION" \
         --bddcCompressionBits "$BITS" \
         --bddcCompressionMinInterfaceSize "$MIN_INTERFACE_SIZE" \
         --bddcCompressionThresholdInterfaceTypes "$THRESHOLD_INTERFACE_TYPES" \
@@ -181,7 +183,7 @@ srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" \
         --nThreads "$THREADS" \
         --dt 0.01 \
         --finalTime "$FINAL_TIME" \
-        --vtk 0 \
+        --vtk "$VTK" \
         --dir "/BDDC/emiModelBddcSdc_new_scratch/$RUN"
   '
 
