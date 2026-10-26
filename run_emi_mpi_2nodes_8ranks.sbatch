@@ -21,6 +21,10 @@ IMAGE=localhost/kaskade7-mpi-build-environment:latest
 ARCHIVE=/data/numerik/people/fchegini/kaskade7-mpi-build-environment.tar
 MPI_IMPL=${MPI_IMPL:-pmi2}
 HOST_MPI=/home/htc/fchegini/opencarp_dependencies/petsc_install
+PODMAN_RUNTIME=/usr/bin/crun
+PODMAN_BASE=/tmp/podman-${USER}-${SLURM_JOB_ID}-vfs
+PODMAN_STORAGE_DRIVER=vfs
+XDG_RUNTIME_DIR="$PODMAN_BASE/run"
 MPI_RANKS=${MPI_RANKS:-${SLURM_NTASKS}}
 THREADS=${THREADS:-1}
 CPUS_PER_RANK=${CPUS_PER_RANK:-1}
@@ -44,7 +48,7 @@ INTRA=${INTRA:-../input_emi_mesh_blocks/SX_h16_original_list_intracellular.txt}
 EXCITED=${EXCITED:-../input_emi_mesh_blocks/SX_h16_original_early_excited.txt}
 RUN_NAME=${RUN_NAME:-multi-node-ranks-${MPI_RANKS}-bits-${BITS}-job-${SLURM_JOB_ID}}
 RUN="output/multi-node/${RUN_NAME}"
-export BASE KASKADE7 IMAGE ARCHIVE HOST_MPI RUN
+export BASE KASKADE7 IMAGE ARCHIVE HOST_MPI RUN PODMAN_RUNTIME PODMAN_BASE PODMAN_STORAGE_DRIVER XDG_RUNTIME_DIR
 export MPI_IMPL BITS EXCLUDE_CORNERS THREADS CPUS_PER_RANK MESH EXTRA INTRA EXCITED
 export ZIGZAG HUFFMAN BITLENGTH HISTOGRAM FINAL_TIME
 export REFINE GRAPH_LIFTING GRAPH_LIFTING_AFTER_QUANTIZATION BDD_ITERATIONS
@@ -65,12 +69,51 @@ echo "Mesh: $MESH"
 echo "CPU binding: cores"
 echo "CPUs per rank: $CPUS_PER_RANK"
 
-# The image is already installed in the normal Podman store on the ZIB
-# system. Do not import the archive inside an sbatch job: the batch
-# environment terminates podman load while it is unpacking layers.
-if ! podman image exists "$IMAGE"; then
-  echo "ERROR: image $IMAGE is not available in the normal Podman store on $(hostname)" >&2
-  exit 2
+podman_cmd=(podman
+  --runtime="$PODMAN_RUNTIME"
+  --root="$PODMAN_BASE/root"
+  --runroot="$PODMAN_BASE/run"
+  --cgroup-manager=cgroupfs
+  --events-backend=file
+  --storage-driver="$PODMAN_STORAGE_DRIVER")
+
+prepare_image() {
+  local -a podman_cmd
+  podman_cmd=(podman
+    --runtime="$PODMAN_RUNTIME"
+    --root="$PODMAN_BASE/root"
+    --runroot="$PODMAN_BASE/run"
+    --cgroup-manager=cgroupfs
+    --events-backend=file
+    --storage-driver="$PODMAN_STORAGE_DRIVER")
+  mkdir -p "$PODMAN_BASE/root" "$PODMAN_BASE/run"
+  export XDG_RUNTIME_DIR="$PODMAN_BASE/run"
+  if ! "${podman_cmd[@]}" image exists "$IMAGE"; then
+    "${podman_cmd[@]}" load -i "$ARCHIVE"
+  fi
+  "${podman_cmd[@]}" image exists "$IMAGE"
+}
+
+# The image store is node-local. Prepare it independently on every allocated
+# node, using the exact same store and runtime later used by MPI ranks.
+export -f prepare_image
+prep_rc=1
+for prep_attempt in 1 2 3; do
+  set +e
+  srun --wait=60 --kill-on-bad-exit=1 \
+    --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
+    bash -lc 'prepare_image'
+  prep_rc=$?
+  set -e
+  if [ "$prep_rc" -eq 0 ]; then
+    break
+  fi
+  echo "Image preparation attempt $prep_attempt failed; retrying" >&2
+  sleep 5
+done
+if [ "$prep_rc" -ne 0 ]; then
+  echo "ERROR: image preparation failed on at least one allocated node" >&2
+  exit "$prep_rc"
 fi
 
 srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" \
@@ -83,9 +126,18 @@ srun --mpi="$MPI_IMPL" --ntasks="$SLURM_NTASKS" \
   bash -lc '
     set -euxo pipefail
     echo "mpi-container rank=${SLURM_PROCID} node=$(hostname) image=$IMAGE"
+    mkdir -p "$PODMAN_BASE/root" "$PODMAN_BASE/run"
+    export XDG_RUNTIME_DIR="$PODMAN_BASE/run"
     : "${PMI_FD:?PMI_FD was not provided by Slurm}"
     eval "exec 3<&${PMI_FD}"
-    exec podman run --rm --cgroups=disabled --pull=never \
+    exec podman \
+      --runtime="$PODMAN_RUNTIME" \
+      --root="$PODMAN_BASE/root" \
+      --runroot="$PODMAN_BASE/run" \
+      --cgroup-manager=cgroupfs \
+      --events-backend=file \
+      --storage-driver="$PODMAN_STORAGE_DRIVER" \
+      run --rm --cgroups=disabled --pull=never \
       --network=host \
       --ipc=host \
       --preserve-fds=1 \
