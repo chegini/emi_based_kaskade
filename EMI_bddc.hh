@@ -514,10 +514,11 @@ namespace EmiBddc
   constructOwnedSubdomains(std::vector<Matrix> const& localOperators,
                            Interfaces const& interfaces,
                            int nThreads,
-                           bool mpiEnabled)
+                           bool mpiEnabled,
+                           bool masterWorker=false)
   {
     Kaskade::BDDC::MpiDomainLayout layout;
-    layout.configure(mpiEnabled, localOperators.size());
+    layout.configure(mpiEnabled, localOperators.size(), masterWorker);
     Kaskade::BDDC::OwnedSubdomainStorage<Subdomain> subdomains(localOperators.size());
     std::exception_ptr constructionError;
     std::mutex constructionErrorMutex;
@@ -814,7 +815,8 @@ void computeBddcSdcResiduals(Functional& F,
       bool const mpiEnabled = options.mpi != 0;
       auto subdomains = constructOwnedSubdomains<BddcSubdomain>(localJ,interfaceAverages,
                                                                  options.assemblyThreads,
-                                                                 mpiEnabled);
+                                                                 mpiEnabled,
+                                                                 options.masterWorker != 0);
       if (profile)
         profile->subdomainConstruction += ProfileTimes::seconds(subdomainStart);
 
@@ -841,7 +843,8 @@ void computeBddcSdcResiduals(Functional& F,
                                                                             solverActiveIds,
                                                                             useCgSolver,
                                                                             verbose,
-                                                                            mpiEnabled);
+                                                                            mpiEnabled,
+                                                                            options.masterWorker != 0);
       if (options.bddcHistogram)
         solver.setHistogramOutput(options.outputDir + "/histograms");
       if (profile)
@@ -1134,7 +1137,8 @@ State runBddcSdc(Functional& F,
       auto subdomains = constructOwnedSubdomains<BddcSubdomain>(data.localMatrices,
                                                                  interfaceAverages,
                                                                  options.assemblyThreads,
-                                                                 options.mpi != 0);
+                                                                 options.mpi != 0,
+                                                                 options.masterWorker != 0);
 
       if constexpr (requires(Transfer& transfer) {
                       transfer.setQuantizationBits(0);
@@ -1193,7 +1197,8 @@ State runBddcSdc(Functional& F,
                                                       activeIds,
                                                       useCgSolver,
                                                       verbose,
-                                                      options.mpi != 0);
+                                                      options.mpi != 0,
+                                                      options.masterWorker != 0);
       if (options.bddcHistogram)
         solver.setHistogramOutput(options.outputDir + "/histograms");
       solver.setRhs(subdomainRhs);
