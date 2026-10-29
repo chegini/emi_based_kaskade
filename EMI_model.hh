@@ -219,7 +219,13 @@ public:
       membraneInterface = cellExtra != neighbourExtra;
 
       if (twoExtra)
-        std::tie(current,dcurrentCell,dcurrentNeighbour) = std::make_tuple(0.0,0.0,0.0);
+      {
+        // Different extracellular material tags share one continuous
+        // potential. Their ordinary conduction is assembled from sigma_e in
+        // the cell volume terms; there is no separate interface resistor.
+        std::tie(current,dcurrentCell,dcurrentNeighbour) =
+          std::make_tuple(0.0,0.0,0.0);
+      }
       // Orient membrane voltage from intracellular to extracellular. Domain
       // tags are arbitrary labels and must not determine the sign.
       else if (!cellExtra && neighbourExtra)
@@ -329,14 +335,12 @@ public:
            double sigmaI_ = 3.0,
            double sigmaE_ = 20.0,
            double C_m_ = 1.0,
-           double R_ = 0.1,
-           double RExtra_ = 1e-7)
+           double R_ = 0.1)
   : penalty(penalty_),
     sigmaI(sigmaI_),
     sigmaE(sigmaE_),
     C_m(C_m_),
     R(R_),
-    RExtra(RExtra_),
     material(material_),
     grid(grid_),
     spaces(spaces_)
@@ -425,7 +429,6 @@ private:
   double sigmaE;
   double C_m;
   double R;
-  double RExtra;
   double t = 0.0;
   Material const& material;
   Grid_ const& grid;
