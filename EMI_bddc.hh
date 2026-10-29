@@ -339,6 +339,216 @@ namespace EmiBddc
     return data;
   }
 
+  // Add one algebraic overlap layer to the material-tag subdomains. The
+  // original tag partition is useful as a starting point, but a local
+  // principal matrix must contain both endpoints of every nonzero coupling
+  // that it is expected to represent. This is essential for membrane and
+  // gap-junction entries, whose two DOFs can belong to different tags.
+  template <class Matrix, class Vector>
+  void expandSubdomainsToMatrixCouplings(BddcData<Matrix,Vector>& data,
+                                         Matrix const& globalMatrix,
+                                         int nTasks,
+                                         bool mpiEnabled)
+  {
+    using Kaskade::BDDC::LocalDof;
+
+    std::vector<std::set<size_t>> expanded(data.localDofs.size());
+    for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
+      expanded[subdomain].insert(data.localDofs[subdomain].begin(),
+                                 data.localDofs[subdomain].end());
+
+    for (auto row = globalMatrix.begin(); row != globalMatrix.end(); ++row)
+    {
+      size_t const rowIndex = row.index();
+      for (auto col = row.begin(); col != row.end(); ++col)
+      {
+        if ((*col)[0][0] == 0.0)
+          continue;
+        size_t const colIndex = col.index();
+        if (rowIndex >= data.dofSubdomains.size() ||
+            colIndex >= data.dofSubdomains.size())
+          continue;
+
+        for (int subdomain : data.dofSubdomains[rowIndex])
+          expanded[static_cast<size_t>(subdomain)].insert(colIndex);
+        for (int subdomain : data.dofSubdomains[colIndex])
+          expanded[static_cast<size_t>(subdomain)].insert(rowIndex);
+      }
+    }
+
+    data.sharedDofs.clear();
+    data.dofSubdomains.assign(data.dofCells.size(),{});
+    data.subdomainSizes.clear();
+    std::vector<std::vector<LocalDof>> occurrences(data.dofCells.size());
+
+    for (size_t subdomain = 0; subdomain < expanded.size(); ++subdomain)
+    {
+      data.localDofs[subdomain].assign(expanded[subdomain].begin(),
+                                       expanded[subdomain].end());
+      data.subdomainSizes.push_back(static_cast<int>(data.localDofs[subdomain].size()));
+      for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
+        occurrences[data.localDofs[subdomain][local]].push_back(
+          {static_cast<int>(subdomain),static_cast<int>(local)});
+    }
+
+    for (size_t global = 0; global < occurrences.size(); ++global)
+    {
+      if (occurrences[global].size() > 1)
+        data.sharedDofs.push_back(occurrences[global]);
+      for (auto const& occurrence : occurrences[global])
+        data.dofSubdomains[global].push_back(occurrence.s);
+    }
+
+    data.weights.resize(data.localDofs.size());
+    size_t const taskLimit = nTasks > 0 ? static_cast<size_t>(nTasks)
+                                        : std::numeric_limits<size_t>::max();
+    auto buildWeights = [&](size_t subdomain)
+    {
+      Vector weight(data.localDofs[subdomain].size());
+      weight = 1.0;
+      for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
+      {
+        size_t const global = data.localDofs[subdomain][local];
+        size_t const ownerCount = std::max<size_t>(1,occurrences[global].size());
+        weight[local][0] = 1.0/static_cast<double>(ownerCount);
+      }
+      data.weights[subdomain] = std::move(weight);
+    };
+    if (taskLimit > 1)
+      Kaskade::parallelFor(0,data.localDofs.size(),buildWeights,taskLimit);
+    else
+      for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
+        buildWeights(subdomain);
+
+    if (mpiRankZero(mpiEnabled))
+    {
+      size_t totalDofs = 0;
+      for (auto const& localDofs : data.localDofs)
+        totalDofs += localDofs.size();
+      std::cout << "BDDC algebraic overlap: total local dofs=" << totalDofs
+                << ", shared dofs=" << data.sharedDofs.size() << "\n";
+    }
+  }
+
+  // Reproduce the original EMI decomposition: add only the DOFs of the
+  // neighboring cell across a material interface. Do not expand by every
+  // nonzero matrix coupling; that creates unnecessarily large and incorrect
+  // local domains for the EMI membrane/gap terms.
+  template <class Grid, class Space, class Material, class Matrix, class Vector>
+  void expandSubdomainsToInterfaceNeighbors(BddcData<Matrix,Vector>& data,
+                                            Grid const& grid,
+                                            Space const& space,
+                                            Material const& material,
+                                            int nTasks,
+                                            bool mpiEnabled)
+  {
+    using LocalDof = Kaskade::BDDC::LocalDof;
+    Dune::FieldVector<double,Grid::dimension> zero(0.0);
+    std::map<int,size_t> tagToSubdomain;
+    for (size_t subdomain = 0; subdomain < data.tags.size(); ++subdomain)
+      tagToSubdomain[data.tags[subdomain]] = subdomain;
+
+    std::vector<std::set<size_t>> expanded(data.localDofs.size());
+    for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
+      expanded[subdomain].insert(data.localDofs[subdomain].begin(),
+                                 data.localDofs[subdomain].end());
+
+    for (auto const& cell : Dune::elements(grid.leafGridView()))
+    {
+      int const insideTag = material.value(cell,zero);
+      auto inside = tagToSubdomain.find(insideTag);
+      if (inside == tagToSubdomain.end())
+        continue;
+      for (auto const& intersection : Dune::intersections(grid.leafGridView(),cell))
+      {
+        if (!intersection.neighbor())
+          continue;
+        auto const& outsideCell = intersection.outside();
+        int const outsideTag = material.value(outsideCell,zero);
+        if (insideTag == outsideTag)
+          continue;
+        auto outside = tagToSubdomain.find(outsideTag);
+        if (outside == tagToSubdomain.end())
+          continue;
+        auto const insideDofs = space.mapper().globalIndices(cell);
+        auto const outsideDofs = space.mapper().globalIndices(outsideCell);
+        expanded[inside->second].insert(outsideDofs.begin(),outsideDofs.end());
+        expanded[outside->second].insert(insideDofs.begin(),insideDofs.end());
+      }
+    }
+
+    data.sharedDofs.clear();
+    data.dofSubdomains.assign(data.dofCells.size(),{});
+    data.subdomainSizes.clear();
+    std::vector<std::vector<LocalDof>> occurrences(data.dofCells.size());
+    for (size_t subdomain = 0; subdomain < expanded.size(); ++subdomain)
+    {
+      data.localDofs[subdomain].assign(expanded[subdomain].begin(),
+                                       expanded[subdomain].end());
+      data.subdomainSizes.push_back(static_cast<int>(data.localDofs[subdomain].size()));
+      for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
+        occurrences[data.localDofs[subdomain][local]].push_back(
+          {static_cast<int>(subdomain),static_cast<int>(local)});
+    }
+    for (size_t global = 0; global < occurrences.size(); ++global)
+    {
+      if (occurrences[global].size() > 1)
+        data.sharedDofs.push_back(occurrences[global]);
+      for (auto const& occurrence : occurrences[global])
+        data.dofSubdomains[global].push_back(occurrence.s);
+    }
+
+    data.weights.resize(data.localDofs.size());
+    size_t const taskLimit = nTasks > 0 ? static_cast<size_t>(nTasks)
+                                        : std::numeric_limits<size_t>::max();
+    auto buildWeights = [&](size_t subdomain)
+    {
+      Vector weight(data.localDofs[subdomain].size());
+      weight = 1.0;
+      for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
+      {
+        size_t const global = data.localDofs[subdomain][local];
+        size_t const count = std::max<size_t>(1,occurrences[global].size());
+        weight[local][0] = 1.0/static_cast<double>(count);
+      }
+      data.weights[subdomain] = std::move(weight);
+    };
+    if (taskLimit > 1)
+      Kaskade::parallelFor(0,data.localDofs.size(),buildWeights,taskLimit);
+    else
+      for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
+        buildWeights(subdomain);
+
+    if (mpiRankZero(mpiEnabled))
+    {
+      size_t totalDofs = 0;
+      for (auto const& localDofs : data.localDofs)
+        totalDofs += localDofs.size();
+      std::cout << "BDDC interface-neighbor overlap: total local dofs="
+                << totalDofs << ", shared dofs=" << data.sharedDofs.size() << "\n";
+    }
+  }
+
+  template <class Matrix, class Vector>
+  void buildDiagonalWeights(BddcData<Matrix,Vector>& data,
+                            std::vector<Matrix> const& localMatrices,
+                            Matrix const& globalMatrix,
+                            bool mpiEnabled)
+  {
+    bool const outputRankZero = mpiRankZero(mpiEnabled);
+    for (size_t subdomain = 0; subdomain < localMatrices.size(); ++subdomain)
+      for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
+      {
+        size_t const global = data.localDofs[subdomain][local];
+        double const globalDiagonal = globalMatrix[global][global][0][0];
+        double const localDiagonal = localMatrices[subdomain][local][local][0][0];
+        if (std::abs(globalDiagonal) > 1e-14)
+          data.weights[subdomain][local][0] = localDiagonal/globalDiagonal;
+      }
+    if (outputRankZero)
+      std::cout << "BDDC weights: diagonal-based local/global contributions\n";
+  }
+
   template <class Matrix, class Vector>
   std::vector<Matrix> extractLocalMatrices(BddcData<Matrix,Vector> const& data,
                                            Matrix const& globalMatrix,
@@ -358,6 +568,343 @@ namespace EmiBddc
       for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
         extractSubdomainMatrix(subdomain);
     return localMatrices;
+  }
+
+  // Install local operators assembled from disjoint physical contributions.
+  // Unlike overlapping principal restrictions, these matrices must sum to
+  // the global operator because BDDCSolver's CG iteration solves the
+  // subassembled system formed by summing its local operators.
+  template <class Matrix, class Vector>
+  void setLocalMatricesFromContributions(BddcData<Matrix,Vector>& data,
+                                         std::vector<Matrix> const& contributions)
+  {
+    using Kaskade::BDDC::LocalDof;
+    if (contributions.size() != data.tags.size())
+      throw std::runtime_error("BDDC local contribution count does not match material subdomains.");
+
+    std::vector<std::vector<size_t>> localDofs(contributions.size());
+    std::vector<Matrix> localMatrices(contributions.size());
+    for (size_t subdomain = 0; subdomain < contributions.size(); ++subdomain)
+    {
+      std::set<size_t> support;
+      auto const& contribution = contributions[subdomain];
+      for (auto row = contribution.begin(); row != contribution.end(); ++row)
+        for (auto col = row.begin(); col != row.end(); ++col)
+          if ((*col)[0][0] != 0.0)
+          {
+            support.insert(row.index());
+            support.insert(col.index());
+          }
+      if (support.empty())
+        throw std::runtime_error("BDDC material subdomain has an empty assembled operator contribution.");
+      localDofs[subdomain].assign(support.begin(),support.end());
+      localMatrices[subdomain] = Matrix(localDofs[subdomain],contribution);
+    }
+
+    std::vector<std::vector<LocalDof>> occurrences(data.dofSubdomains.size());
+    data.subdomainSizes.resize(localDofs.size());
+    for (size_t subdomain = 0; subdomain < localDofs.size(); ++subdomain)
+    {
+      if (localDofs[subdomain].size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+        throw std::runtime_error("BDDC local subdomain is too large for int local indices.");
+      data.subdomainSizes[subdomain] = static_cast<int>(localDofs[subdomain].size());
+      for (size_t local = 0; local < localDofs[subdomain].size(); ++local)
+        occurrences[localDofs[subdomain][local]].push_back(
+          {static_cast<int>(subdomain),static_cast<int>(local)});
+    }
+
+    data.sharedDofs.clear();
+    data.dofSubdomains.assign(occurrences.size(),{});
+    for (size_t global = 0; global < occurrences.size(); ++global)
+    {
+      if (occurrences[global].size() > 1)
+        data.sharedDofs.push_back(occurrences[global]);
+      for (auto const& occurrence : occurrences[global])
+        data.dofSubdomains[global].push_back(occurrence.s);
+    }
+
+    data.localDofs = std::move(localDofs);
+    data.localMatrices = std::move(localMatrices);
+    data.weights.resize(data.localDofs.size());
+    for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
+    {
+      Vector weight(data.localDofs[subdomain].size());
+      weight = 1.0;
+      for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
+      {
+        size_t const global = data.localDofs[subdomain][local];
+        size_t const copies = std::max<size_t>(1,occurrences[global].size());
+        weight[local][0] = 1.0/static_cast<double>(copies);
+      }
+      data.weights[subdomain] = std::move(weight);
+    }
+  }
+
+  // Assign every global nonzero matrix entry to exactly one subdomain that
+  // contains both endpoints. Principal extraction duplicates entries when
+  // endpoints occur in several overlapping subdomains; this removes those
+  // duplicate copies so the embedded local matrices add up to the global
+  // matrix exactly. The local operators still require a solver test.
+  template <class Matrix, class Vector>
+  void assignLocalMatrixEntryOwners(BddcData<Matrix,Vector> const& data,
+                                    std::vector<Matrix>& localMatrices,
+                                    Matrix const& globalMatrix,
+                                    bool mpiEnabled)
+  {
+    bool const outputRankZero = mpiRankZero(mpiEnabled);
+
+    using Key = std::pair<size_t,size_t>;
+    std::map<Key,size_t> owners;
+    size_t unowned = 0;
+    for (auto row = globalMatrix.begin(); row != globalMatrix.end(); ++row)
+    {
+      size_t const globalRow = row.index();
+      for (auto col = row.begin(); col != row.end(); ++col)
+      {
+        if ((*col)[0][0] == 0.0)
+          continue;
+        size_t const globalCol = col.index();
+        size_t owner = data.localDofs.size();
+        if (globalRow < data.dofSubdomains.size() &&
+            globalCol < data.dofSubdomains.size())
+          for (int candidate : data.dofSubdomains[globalRow])
+            if (std::find(data.dofSubdomains[globalCol].begin(),
+                          data.dofSubdomains[globalCol].end(),candidate) !=
+                data.dofSubdomains[globalCol].end())
+              owner = std::min(owner,static_cast<size_t>(candidate));
+        if (owner == data.localDofs.size())
+          ++unowned;
+        else
+          owners[{globalRow,globalCol}] = owner;
+      }
+    }
+
+    size_t removedDuplicates = 0;
+    for (size_t subdomain = 0; subdomain < localMatrices.size(); ++subdomain)
+    {
+      auto& localMatrix = localMatrices[subdomain];
+      for (auto row = localMatrix.begin(); row != localMatrix.end(); ++row)
+      {
+        size_t const localRow = row.index();
+        size_t const globalRow = data.localDofs[subdomain][localRow];
+        for (auto col = row.begin(); col != row.end(); ++col)
+        {
+          if ((*col)[0][0] == 0.0)
+            continue;
+          size_t const localCol = col.index();
+          size_t const globalCol = data.localDofs[subdomain][localCol];
+          auto const owner = owners.find({globalRow,globalCol});
+          if (owner == owners.end() || owner->second != subdomain)
+          {
+            (*col)[0][0] = 0.0;
+            ++removedDuplicates;
+          }
+        }
+      }
+    }
+
+    if (outputRankZero)
+      std::cout << "BDDC matrix entry ownership: owned=" << owners.size()
+                << " unowned=" << unowned
+                << " removedDuplicateCopies=" << removedDuplicates << "\n";
+  }
+
+  // Reconstruct the sum of local matrices in global coordinates. This is
+  // intended for small debugging meshes; avoid the sparse-map overhead for
+  // production-size systems.
+  template <class Matrix, class Vector>
+  void printLocalMatrixReconstruction(BddcData<Matrix,Vector> const& data,
+                                      std::vector<Matrix> const& localMatrices,
+                                      Matrix const& globalMatrix,
+                                      size_t nDofs,
+                                      bool mpiEnabled)
+  {
+    if (!mpiRankZero(mpiEnabled))
+      return;
+    if (nDofs > 5000)
+    {
+      std::cout << "BDDC local matrix reconstruction: skipped for N=" << nDofs
+                << " (diagnostic limit is 5000)\n";
+      return;
+    }
+
+    using Key = std::pair<size_t,size_t>;
+    struct Entry { double value = 0.0; size_t count = 0; };
+    std::map<Key,Entry> reconstructed;
+    size_t localNonzeros = 0;
+    size_t maxMultiplicity = 0;
+
+    for (size_t subdomain = 0; subdomain < localMatrices.size(); ++subdomain)
+    {
+      auto const& localMatrix = localMatrices[subdomain];
+      for (auto row = localMatrix.begin(); row != localMatrix.end(); ++row)
+      {
+        size_t const localRow = row.index();
+        if (localRow >= data.localDofs[subdomain].size())
+          continue;
+        size_t const globalRow = data.localDofs[subdomain][localRow];
+        for (auto col = row.begin(); col != row.end(); ++col)
+        {
+          double const value = (*col)[0][0];
+          if (value == 0.0)
+            continue;
+          size_t const localCol = col.index();
+          if (localCol >= data.localDofs[subdomain].size())
+            continue;
+          size_t const globalCol = data.localDofs[subdomain][localCol];
+          auto& entry = reconstructed[{globalRow,globalCol}];
+          entry.value += value;
+          ++entry.count;
+          ++localNonzeros;
+          maxMultiplicity = std::max(maxMultiplicity,entry.count);
+        }
+      }
+    }
+
+    size_t globalNonzeros = 0;
+    size_t missing = 0;
+    size_t duplicated = 0;
+    std::map<Key,double> globalEntries;
+    double maxDifference = 0.0;
+    double squaredDifference = 0.0;
+    for (auto row = globalMatrix.begin(); row != globalMatrix.end(); ++row)
+    {
+      size_t const globalRow = row.index();
+      for (auto col = row.begin(); col != row.end(); ++col)
+      {
+        double const reference = (*col)[0][0];
+        if (reference == 0.0)
+          continue;
+        ++globalNonzeros;
+        size_t const globalCol = col.index();
+        globalEntries[{globalRow,globalCol}] = reference;
+        auto const it = reconstructed.find({globalRow,globalCol});
+        double const reconstructedValue = it == reconstructed.end()
+                                            ? 0.0 : it->second.value;
+        if (it == reconstructed.end())
+          ++missing;
+        if (it != reconstructed.end() && it->second.count > 1)
+          ++duplicated;
+        double const difference = reconstructedValue-reference;
+        maxDifference = std::max(maxDifference,std::abs(difference));
+        squaredDifference += difference*difference;
+      }
+    }
+
+    size_t extra = 0;
+    for (auto const& [key,entry] : reconstructed)
+      if (globalEntries.find(key) == globalEntries.end())
+        ++extra;
+
+    std::cout << "BDDC local matrix reconstruction: "
+              << "globalNonzeros=" << globalNonzeros
+              << " localNonzeros=" << localNonzeros
+              << " reconstructedNonzeros=" << reconstructed.size()
+              << " missing=" << missing
+              << " duplicated=" << duplicated
+              << " extra=" << extra
+              << " maxMultiplicity=" << maxMultiplicity
+              << " maxAbsDifference=" << maxDifference
+              << " l2Difference=" << std::sqrt(squaredDifference)
+              << "\n";
+  }
+
+  template <class Matrix, class Vector>
+  void printLocalRhsReconstruction(BddcData<Matrix,Vector> const& data,
+                                   std::vector<Vector> const& subdomainRhs,
+                                   Vector const& rhs,
+                                   bool mpiEnabled)
+  {
+    if (!mpiRankZero(mpiEnabled))
+      return;
+    std::vector<double> reconstructed(rhs.size(),0.0);
+    for (size_t subdomain = 0; subdomain < subdomainRhs.size(); ++subdomain)
+      for (size_t local = 0; local < subdomainRhs[subdomain].size(); ++local)
+        reconstructed[data.localDofs[subdomain][local]] += subdomainRhs[subdomain][local];
+
+    double maxDifference = 0.0;
+    double squaredDifference = 0.0;
+    for (size_t global = 0; global < rhs.size(); ++global)
+    {
+      double const difference = reconstructed[global]-rhs[global];
+      maxDifference = std::max(maxDifference,std::abs(difference));
+      squaredDifference += difference*difference;
+    }
+    std::cout << "BDDC local RHS reconstruction: maxAbsDifference="
+              << maxDifference << " l2Difference="
+              << std::sqrt(squaredDifference) << "\n";
+  }
+
+  // Check whether every nonzero global matrix coupling is represented in at
+  // least one local BDDC matrix. A principal submatrix extraction preserves
+  // A_ij only when row i and column j occur in a common subdomain.
+  template <class Matrix, class Vector>
+  void printUncoveredMatrixCouplings(BddcData<Matrix,Vector> const& data,
+                                     Matrix const& globalMatrix,
+                                     char const* label,
+                                     bool mpiEnabled)
+  {
+    if (!mpiRankZero(mpiEnabled))
+      return;
+
+    size_t nonzeros = 0;
+    size_t covered = 0;
+    size_t uncovered = 0;
+    double maxUncoveredAbs = 0.0;
+    size_t firstRow = 0;
+    size_t firstCol = 0;
+    bool haveFirst = false;
+
+    for (auto row = globalMatrix.begin(); row != globalMatrix.end(); ++row)
+    {
+      size_t const rowIndex = row.index();
+      for (auto col = row.begin(); col != row.end(); ++col)
+      {
+        double const value = (*col)[0][0];
+        if (value == 0.0)
+          continue;
+        ++nonzeros;
+
+        size_t const colIndex = col.index();
+        bool commonSubdomain = false;
+        if (rowIndex < data.dofSubdomains.size() &&
+            colIndex < data.dofSubdomains.size())
+          for (int rowSubdomain : data.dofSubdomains[rowIndex])
+            if (std::find(data.dofSubdomains[colIndex].begin(),
+                          data.dofSubdomains[colIndex].end(),
+                          rowSubdomain) != data.dofSubdomains[colIndex].end())
+            {
+              commonSubdomain = true;
+              break;
+            }
+
+        if (commonSubdomain)
+          ++covered;
+        else
+        {
+          ++uncovered;
+          if (std::abs(value) > maxUncoveredAbs)
+          {
+            maxUncoveredAbs = std::abs(value);
+            if (!haveFirst)
+            {
+              firstRow = rowIndex;
+              firstCol = colIndex;
+              haveFirst = true;
+            }
+          }
+        }
+      }
+    }
+
+    std::cout << "BDDC coupling coverage (" << label << "): "
+              << "nonzeros=" << nonzeros
+              << " covered=" << covered
+              << " uncovered=" << uncovered
+              << " maxUncoveredAbs=" << maxUncoveredAbs;
+    if (haveFirst)
+      std::cout << " firstUncovered=(" << firstRow << "," << firstCol << ")";
+    std::cout << "\n";
   }
 
   template <class Matrix, class Vector>
@@ -1082,6 +1629,7 @@ State runBddcSdc(Functional& F,
                 State state,
                 Element&,
                 BddcData<Matrix,Vector> const& data,
+                Matrix const& globalMatrix,
                 size_t nDofs,
                 int steps,
                 Options const& options)
@@ -1133,6 +1681,8 @@ State runBddcSdc(Functional& F,
           subdomainRhs[subdomain][local] = data.weights[subdomain][local][0] * rhs[global];
         }
       }
+      if (options.diagnostics && step == 0)
+        printLocalRhsReconstruction(data,subdomainRhs,rhs,options.mpi != 0);
 
       auto subdomains = constructOwnedSubdomains<BddcSubdomain>(data.localMatrices,
                                                                  interfaceAverages,
@@ -1253,6 +1803,19 @@ State runBddcSdc(Functional& F,
       Vector stepVector(nDofs);
       for (size_t i = 0; i < nDofs; ++i)
         stepVector[i] = globalStep[i];
+
+      if (options.diagnostics && mpiRankZero(options.mpi != 0))
+      {
+        Vector residual(rhs);
+        residual *= -1.0;
+        globalMatrix.umv(stepVector,residual);
+        double const residualNorm = std::sqrt(std::max(0.0,residual.dot(residual)));
+        double const rhsNorm = std::sqrt(std::max(0.0,rhs.dot(rhs)));
+        std::cout << "BDDC global residual step " << step+1
+                  << ": abs=" << residualNorm
+                  << " rel=" << (rhsNorm > 0.0 ? residualNorm/rhsNorm : residualNorm)
+                  << "\n";
+      }
 
       for (size_t i = 0; i < nDofs; ++i)
         boost::fusion::at_c<0>(stepState.data).coefficients()[i] = stepVector[i];
