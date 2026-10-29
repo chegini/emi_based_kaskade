@@ -1225,8 +1225,13 @@ int main(int argc, char* argv[])
              {std::pair<int,int>{tag,neighborTag},std::pair<int,int>{neighborTag,tag}})
         {
           F.setRowColSubdomain(rowTag,colTag);
-          assembler.assemble(SemiLinearization(equation,u,u,duState),Assembler::MATRIX,
-                             options.assemblyThreads);
+          auto rowCellFilter = [&material,rowTag,zeroForTags](auto const& cell)
+          {
+            return material.value(cell,zeroForTags) == rowTag;
+          };
+          assembler.template assemble<AssemblyDetail::TakeAllBlocks>(
+            SemiLinearization(equation,u,u,duState),rowCellFilter,Assembler::MATRIX,
+            options.assemblyThreads);
           Matrix const massBlock = assembler.template get<Matrix>(false);
           size_t const sourceSubdomain = tagToSubdomain.at(rowTag);
           size_t const destinationSubdomain = tagToSubdomain.at(colTag);
