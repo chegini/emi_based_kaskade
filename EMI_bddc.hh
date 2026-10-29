@@ -199,6 +199,7 @@ namespace EmiBddc
     double adaptivity = 0.0;
     double localOperatorExtraction = 0.0;
     size_t bddcSystems = 0;
+    size_t bddcSolverConstructions = 0;
     size_t bddcSubdomainConstructions = 0;
     size_t bddcSolveCalls = 0;
 
@@ -218,6 +219,7 @@ namespace EmiBddc
                 << "  transfer configuration: " << transferSetup << "\n"
                 << "  BDDC solver/coarse setup: " << solverConstruction << "\n"
                 << "  BDDC RHS setup: " << rhsSetup << "\n"
+                << "  BDDC solver/coarse constructions: " << bddcSolverConstructions << "\n"
                 << "  BDDC subdomain constructions: " << bddcSubdomainConstructions << "\n"
                 << "  BDDC solve calls: " << bddcSolveCalls
                 << " across " << bddcSystems << " systems (wall seconds: "
@@ -1659,7 +1661,10 @@ void computeBddcSdcResiduals(Functional& F,
       if (options.bddcHistogram)
         solver.setHistogramOutput(options.outputDir + "/histograms");
       if (profile)
+      {
         profile->solverConstruction += ProfileTimes::seconds(solverStart);
+        ++profile->bddcSolverConstructions;
+      }
 
       auto const rhsSetupStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
       solver.setRhs(rhs);
@@ -1920,6 +1925,117 @@ State runBddcSdc(Functional& F,
     zeroState *= 0.0;
     stepState *= 0.0;
 
+    // Fixed local operators: retain the two local factorizations across timesteps.
+    auto const subdomainStart = options.profile
+                              ? ProfileTimes::Clock::now()
+                              : ProfileTimes::Clock::time_point{};
+    auto subdomains = constructOwnedSubdomains<BddcSubdomain>(data.localMatrices,
+                                                               interfaceAverages,
+                                                               options.assemblyThreads,
+                                                               options.mpi != 0,
+                                                               options.masterWorker != 0);
+    if (options.profile)
+    {
+      profile.subdomainConstruction += ProfileTimes::seconds(subdomainStart);
+      profile.bddcSubdomainConstructions += subdomains.size();
+    }
+
+    auto const transferStart = options.profile
+                             ? ProfileTimes::Clock::now()
+                             : ProfileTimes::Clock::time_point{};
+    if constexpr (requires(Transfer& transfer) {
+                    transfer.setQuantizationBits(0);
+                    transfer.setRestrictEncoding(true);
+                    transfer.setProlongateEncoding(true);
+                    transfer.setRestrictTransform(true);
+                    transfer.setProlongateTransform(true);
+                    transfer.setRestrictBitlengthEncoding(true);
+                    transfer.setProlongateBitlengthEncoding(true);
+                    transfer.setRestrictZigzagEncoding(true);
+                    transfer.setProlongateZigzagEncoding(true);
+                  })
+    {
+      for (size_t id = 0; id < subdomains.size(); ++id)
+      {
+        if (!subdomains.has(id))
+          continue;
+        auto& subdomain = subdomains[id];
+        subdomain.transfer().setQuantizationBits(options.bddcCompressionBits);
+        subdomain.transfer().setCompressionMinInterfaceSize(
+            static_cast<std::size_t>(
+                std::max(0, options.bddcCompressionMinInterfaceSize)));
+        subdomain.transfer().setCompressionThresholdInterfaceTypes(
+            options.bddcCompressionThresholdInterfaceTypes);
+        subdomain.transfer().enableTransform((options.bddcGraphLifting || options.bddcGraphLiftingAfterQuantization)
+                                               ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
+                                               : Kaskade::BDDC::TransformType::NONE);
+        subdomain.transfer().setRestrictEncoding(options.bddcHuffman != 0);
+        subdomain.transfer().setProlongateEncoding(options.bddcHuffman != 0);
+        subdomain.transfer().setRestrictTransform(options.bddcGraphLifting != 0);
+        subdomain.transfer().setProlongateTransform(options.bddcGraphLifting != 0);
+        subdomain.transfer().setRestrictTransformAfterQuantization(options.bddcGraphLiftingAfterQuantization != 0);
+        subdomain.transfer().setProlongateTransformAfterQuantization(options.bddcGraphLiftingAfterQuantization != 0);
+        subdomain.transfer().setRestrictBitlengthEncoding(options.bddcBitlength != 0);
+        subdomain.transfer().setProlongateBitlengthEncoding(options.bddcBitlength != 0);
+        subdomain.transfer().setRestrictZigzagEncoding(options.bddcZigzag != 0);
+        subdomain.transfer().setProlongateZigzagEncoding(options.bddcZigzag != 0);
+        // Apply the same corner policy in the non-SDC BDDC path.  The
+        // transfer object performs the filtering consistently for both
+        // restriction and prolongation.
+        if (options.bddcExcludeCornersFromCompression != 0)
+          if constexpr (requires(Transfer& t, std::vector<int> const& d) {
+                          t.setExcludedLocalDofs(d);
+                        })
+            subdomain.transfer().setExcludedLocalDofs(interfaceAverages.cornerDofs(id));
+      }
+    }
+    if (options.profile)
+      profile.transferSetup += ProfileTimes::seconds(transferStart);
+
+    if (mpiRankZero(options.mpi != 0))
+      std::cout << "BDDC local and coarse setup reused for " << steps << " time steps\n";
+
+    // The fixed coarse operator is assembled and factored once as well.
+    std::vector<int> activeIds(subdomains.size());
+    std::iota(activeIds.begin(),activeIds.end(),0);
+    bool useCgSolver = options.bddcUseCg != 0;
+    bool verbose = options.bddcVerbose != 0;
+
+    auto const solverStart = options.profile
+                           ? ProfileTimes::Clock::now()
+                           : ProfileTimes::Clock::time_point{};
+    Kaskade::BDDC::BDDCSolver<BddcSubdomain,decltype(subdomains)> solver(subdomains,
+                                                    interfaceAverages.coarseConstraints(),
+                                                    activeIds,
+                                                    useCgSolver,
+                                                    verbose,
+                                                    options.mpi != 0,
+                                                    options.masterWorker != 0);
+    if (options.profile)
+    {
+      profile.solverConstruction += ProfileTimes::seconds(solverStart);
+      ++profile.bddcSolverConstructions;
+    }
+    if (options.bddcHistogram)
+      solver.setHistogramOutput(options.outputDir + "/histograms");
+
+    // These work vectors have fixed sizes. Each RHS and solution is fully
+    // overwritten below; the accumulated local correction is cleared each step.
+    Vector rhs(nDofs);
+    Vector stepVector(nDofs);
+    std::vector<Vector> subdomainRhs;
+    subdomainRhs.reserve(data.localDofs.size());
+    for (auto const& dofs : data.localDofs)
+      subdomainRhs.emplace_back(dofs.size());
+    std::vector<typename BddcSubdomain::XVector> subdomainSolutions(subdomains.size());
+    for (size_t id = 0; id < subdomains.size(); ++id)
+      if (subdomains.has(id))
+        subdomainSolutions[id].resize(data.localDofs[id].size());
+    std::vector<double> localStep(nDofs, 0.0);
+    std::vector<double> globalStep(nDofs, 0.0);
+    bool const computeDiagnostics = options.diagnostics && mpiRankZero(options.mpi != 0);
+    Vector diagnosticResidual(computeDiagnostics ? nDofs : 0);
+
     for (int step = 0; step < steps; ++step)
     {
       double const time = step*options.dt;
@@ -1937,17 +2053,13 @@ State runBddcSdc(Functional& F,
       if (options.profile)
         profile.residualAssembly += ProfileTimes::seconds(residualAssemblyStart);
 
-      Vector rhs(nDofs);
       assembler.rhs().write(rhs.begin());
 
       auto const rhsSetupStart = options.profile
                                ? ProfileTimes::Clock::now()
                                : ProfileTimes::Clock::time_point{};
-      std::vector<Vector> subdomainRhs(data.localDofs.size());
       for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
       {
-        subdomainRhs[subdomain] = Vector(data.localDofs[subdomain].size());
-        subdomainRhs[subdomain] = 0.0;
         for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
         {
           size_t const global = data.localDofs[subdomain][local];
@@ -1959,95 +2071,10 @@ State runBddcSdc(Functional& F,
       if (options.diagnostics && step == 0)
         printLocalRhsReconstruction(data,subdomainRhs,rhs,options.mpi != 0);
 
-      auto const subdomainStart = options.profile
-                                ? ProfileTimes::Clock::now()
-                                : ProfileTimes::Clock::time_point{};
-      auto subdomains = constructOwnedSubdomains<BddcSubdomain>(data.localMatrices,
-                                                                 interfaceAverages,
-                                                                 options.assemblyThreads,
-                                                                 options.mpi != 0,
-                                                                 options.masterWorker != 0);
-      if (options.profile)
-      {
-        profile.subdomainConstruction += ProfileTimes::seconds(subdomainStart);
-        profile.bddcSubdomainConstructions += subdomains.size();
-      }
-
-      auto const transferStart = options.profile
-                               ? ProfileTimes::Clock::now()
-                               : ProfileTimes::Clock::time_point{};
-      if constexpr (requires(Transfer& transfer) {
-                      transfer.setQuantizationBits(0);
-                      transfer.setRestrictEncoding(true);
-                      transfer.setProlongateEncoding(true);
-                      transfer.setRestrictTransform(true);
-                      transfer.setProlongateTransform(true);
-                      transfer.setRestrictBitlengthEncoding(true);
-                      transfer.setProlongateBitlengthEncoding(true);
-                      transfer.setRestrictZigzagEncoding(true);
-                      transfer.setProlongateZigzagEncoding(true);
-                    })
-      {
-        for (size_t id = 0; id < subdomains.size(); ++id)
-        {
-          if (!subdomains.has(id))
-            continue;
-          auto& subdomain = subdomains[id];
-          subdomain.transfer().setQuantizationBits(options.bddcCompressionBits);
-          subdomain.transfer().setCompressionMinInterfaceSize(
-              static_cast<std::size_t>(
-                  std::max(0, options.bddcCompressionMinInterfaceSize)));
-          subdomain.transfer().setCompressionThresholdInterfaceTypes(
-              options.bddcCompressionThresholdInterfaceTypes);
-          subdomain.transfer().enableTransform((options.bddcGraphLifting || options.bddcGraphLiftingAfterQuantization)
-                                                 ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
-                                                 : Kaskade::BDDC::TransformType::NONE);
-          subdomain.transfer().setRestrictEncoding(options.bddcHuffman != 0);
-          subdomain.transfer().setProlongateEncoding(options.bddcHuffman != 0);
-          subdomain.transfer().setRestrictTransform(options.bddcGraphLifting != 0);
-          subdomain.transfer().setProlongateTransform(options.bddcGraphLifting != 0);
-          subdomain.transfer().setRestrictTransformAfterQuantization(options.bddcGraphLiftingAfterQuantization != 0);
-          subdomain.transfer().setProlongateTransformAfterQuantization(options.bddcGraphLiftingAfterQuantization != 0);
-          subdomain.transfer().setRestrictBitlengthEncoding(options.bddcBitlength != 0);
-          subdomain.transfer().setProlongateBitlengthEncoding(options.bddcBitlength != 0);
-          subdomain.transfer().setRestrictZigzagEncoding(options.bddcZigzag != 0);
-          subdomain.transfer().setProlongateZigzagEncoding(options.bddcZigzag != 0);
-          // Apply the same corner policy in the non-SDC BDDC path.  The
-          // transfer object performs the filtering consistently for both
-          // restriction and prolongation.
-          if (options.bddcExcludeCornersFromCompression != 0)
-            if constexpr (requires(Transfer& t, std::vector<int> const& d) {
-                            t.setExcludedLocalDofs(d);
-                          })
-              subdomain.transfer().setExcludedLocalDofs(interfaceAverages.cornerDofs(id));
-        }
-      }
-      if (options.profile)
-        profile.transferSetup += ProfileTimes::seconds(transferStart);
-
-      std::vector<int> activeIds(subdomains.size());
-      std::iota(activeIds.begin(),activeIds.end(),0);
-      bool useCgSolver = options.bddcUseCg != 0;
-      bool verbose = options.bddcVerbose != 0;
-
-      auto const solverStart = options.profile
-                             ? ProfileTimes::Clock::now()
-                             : ProfileTimes::Clock::time_point{};
-      Kaskade::BDDC::BDDCSolver<BddcSubdomain,decltype(subdomains)> solver(subdomains,
-                                                      interfaceAverages.coarseConstraints(),
-                                                      activeIds,
-                                                      useCgSolver,
-                                                      verbose,
-                                                      options.mpi != 0,
-                                                      options.masterWorker != 0);
-      if (options.profile)
-        profile.solverConstruction += ProfileTimes::seconds(solverStart);
-      if (options.bddcHistogram)
-        solver.setHistogramOutput(options.outputDir + "/histograms");
       auto const solverRhsStart = options.profile
                                 ? ProfileTimes::Clock::now()
                                 : ProfileTimes::Clock::time_point{};
-      solver.setRhs(subdomainRhs);
+      solver.restartRhs(subdomainRhs);
       if (options.profile)
       {
         profile.rhsSetup += ProfileTimes::seconds(solverRhsStart);
@@ -2076,25 +2103,19 @@ State runBddcSdc(Functional& F,
       }
       if (options.profile)
         profile.bddcSolve += ProfileTimes::seconds(solveStart);
-      if (options.bddcCompressionReport)
-      {
-        if (options.bddcCompression)
-          compressionReport.add(solver.compressionTraffic());
-        else
-          compressionReport.addUncompressed(solver.traffic());
-      }
 
       auto const correctionStart = options.profile
                                  ? ProfileTimes::Clock::now()
                                  : ProfileTimes::Clock::time_point{};
       // Owned subdomains contribute locally; reduce the assembled global
       // correction so every rank advances the same EMI state.
-      std::vector<double> localStep(nDofs, 0.0);
+      std::fill(localStep.begin(),localStep.end(),0.0);
       for (size_t subdomain = 0; subdomain < subdomains.size(); ++subdomain)
       {
         if (!subdomains.has(subdomain))
           continue;
-        auto localSolution = subdomains[subdomain].getSolution();
+        auto& localSolution = subdomainSolutions[subdomain];
+        subdomains[subdomain].getSolution(localSolution);
         for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
         {
           size_t const global = data.localDofs[subdomain][local];
@@ -2102,7 +2123,6 @@ State runBddcSdc(Functional& F,
         }
       }
 
-      std::vector<double> globalStep(localStep.size(), 0.0);
 #ifdef KASKADE_HAVE_MPI
       if (options.mpi != 0)
         MPI_Allreduce(localStep.data(), globalStep.data(), static_cast<int>(nDofs),
@@ -2111,18 +2131,18 @@ State runBddcSdc(Functional& F,
 #endif
         globalStep = localStep;
 
-      Vector stepVector(nDofs);
       for (size_t i = 0; i < nDofs; ++i)
         stepVector[i] = globalStep[i];
       if (options.profile)
         profile.correctionAssembly += ProfileTimes::seconds(correctionStart);
 
-      if (options.diagnostics && mpiRankZero(options.mpi != 0))
+      if (computeDiagnostics)
       {
-        Vector residual(rhs);
-        residual *= -1.0;
-        globalMatrix.umv(stepVector,residual);
-        double const residualNorm = std::sqrt(std::max(0.0,residual.dot(residual)));
+        diagnosticResidual = rhs;
+        diagnosticResidual *= -1.0;
+        globalMatrix.umv(stepVector,diagnosticResidual);
+        double const residualNorm = std::sqrt(
+          std::max(0.0,diagnosticResidual.dot(diagnosticResidual)));
         double const rhsNorm = std::sqrt(std::max(0.0,rhs.dot(rhs)));
         std::cout << "BDDC global residual step " << step+1
                   << ": abs=" << residualNorm
@@ -2138,6 +2158,15 @@ State runBddcSdc(Functional& F,
         std::cout << "BDDC step " << step+1 << "/" << steps
                   << ": iterations=" << std::min(iteration+1,options.bddcIterations)
                   << ", residual=" << residual << "\n";
+    }
+
+    // The retained solver reports cumulative traffic. Add it once at the end.
+    if (options.bddcCompressionReport)
+    {
+      if (options.bddcCompression)
+        compressionReport.add(solver.compressionTraffic());
+      else
+        compressionReport.addUncompressed(solver.traffic());
     }
 
     if (options.profile)
