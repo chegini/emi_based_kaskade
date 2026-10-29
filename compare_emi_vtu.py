@@ -46,6 +46,10 @@ def main() -> None:
     max_error = max(abs_errors, default=0.0)
     max_reference = max(reference_abs, default=0.0)
     mean_error = sum(abs_errors) / len(abs_errors) if abs_errors else 0.0
+    mean_signed_error = sum(errors) / len(errors) if errors else 0.0
+    gauge_corrected_errors = [value - mean_signed_error for value in errors]
+    gauge_corrected_l2 = math.sqrt(sum(value * value for value in gauge_corrected_errors))
+    gauge_corrected_max = max((abs(value) for value in gauge_corrected_errors), default=0.0)
 
     print(f"compressed:          {args.compressed}")
     print(f"reference:           {args.reference}")
@@ -57,6 +61,9 @@ def main() -> None:
     print(f"relative L2 error:   {l2_error / l2_reference:.16e}")
     print(f"relative max error:  {max_error / max_reference:.16e}")
     print(f"mean absolute error: {mean_error:.16e}")
+    print(f"mean signed offset (first - reference): {mean_signed_error:.16e}")
+    print(f"relative L2 after removing mean offset: {gauge_corrected_l2 / l2_reference:.16e}")
+    print(f"max error after removing mean offset: {gauge_corrected_max:.16e}")
 
 
 if __name__ == "__main__":
