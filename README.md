@@ -335,7 +335,6 @@ as distributed EMI-BDDC scaling experiments.
 | `--sigma_e` | `20.0` | Extracellular conductivity |
 | `--C_m` | `1.0` | Membrane capacitance |
 | `--R` | `0.1` | Gap-junction conductance |
-| `--R_extra` | `1e-7` | Extracellular interface conductance |
 
 ### Complete example
 

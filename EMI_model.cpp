@@ -110,7 +110,6 @@ struct EmiOptions
   double sigmaE = 20.0;
   double membraneCapacitance = 1.0;
   double gapConductance = 0.1;
-  double extraConductance = 1e-7;
 
   bool direct = false;
   bool cgShift = true;
@@ -918,7 +917,6 @@ int main(int argc, char* argv[])
     ("sigma_e", options.sigmaE, options.sigmaE, "extracellular conductivity")
     ("C_m", options.membraneCapacitance, options.membraneCapacitance, "membrane capacitance")
     ("R", options.gapConductance, options.gapConductance, "gap junction conductance")
-    ("R_extra", options.extraConductance, options.extraConductance, "extracellular interface conductance")
   )) return 0;
 
   if (options.dt <= 0.0)
@@ -995,9 +993,8 @@ int main(int argc, char* argv[])
   for (int tag : intraTags)
     domainMap[tag] = static_cast<double>(tag);
 
-  // The piecewise-continuous mapper is what makes EMI possible with one scalar
-  // variable: extracellular regions share one potential, while each
-  // intracellular material tag gets its own disconnected potential component.
+  // All extracellular material tags belong to the same continuous electrical
+  // domain. Intracellular tags retain separate potential components.
   FEFunctionSpace uSpace(gridManager,
                          PiecewiseContinuousLagrangeMapper(gridManager.grid().leafGridView(),
                                                            options.order,
@@ -1036,8 +1033,7 @@ int main(int argc, char* argv[])
                options.sigmaI,
                options.sigmaE,
                options.membraneCapacitance,
-               options.gapConductance,
-               options.extraConductance);
+               options.gapConductance);
   F.extracellularMaterials(extraTags);
 
   auto u = variableSetDesc.variableSet();
