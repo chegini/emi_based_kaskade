@@ -1166,9 +1166,15 @@ int main(int argc, char* argv[])
     F.setMassSubmatrix(false);
     std::vector<Matrix> localContributions(bddcData.tags.size());
     Dune::FieldVector<double,Grid::dimension> zeroMaterial(0.0);
+    if (outputRankZero)
+      std::cout << "Assembling BDDC material subdomain matrices ("
+                << bddcData.tags.size() << " subdomains)\n";
     for (size_t subdomain = 0; subdomain < bddcData.tags.size(); ++subdomain)
     {
       int const tag = bddcData.tags[subdomain];
+      if (outputRankZero)
+        std::cout << "  subdomain " << subdomain+1 << "/" << bddcData.tags.size()
+                  << " (tag " << tag << "): assembling..." << std::flush;
       auto cellFilter = [&material,tag,zeroMaterial](auto const& cell)
       {
         return material.value(cell,zeroMaterial) == tag;
@@ -1177,6 +1183,8 @@ int main(int argc, char* argv[])
         SemiLinearization(equation,u,u,duState),cellFilter,Assembler::MATRIX,
         options.assemblyThreads);
       localContributions[subdomain] = assembler.template get<Matrix>(false);
+      if (outputRankZero)
+        std::cout << " done\n" << std::flush;
     }
 
     // The legacy EMI decomposition adds half of each directed membrane-mass
@@ -1206,6 +1214,8 @@ int main(int argc, char* argv[])
           neighboringTags[tag].insert(neighborTag);
       }
     }
+    if (outputRankZero)
+      std::cout << "Redistributing interface mass blocks across material neighbors...\n";
     for (auto const& [tag,neighbors] : neighboringTags)
       for (int neighborTag : neighbors)
       {
@@ -1229,7 +1239,12 @@ int main(int argc, char* argv[])
                 localContributions[destinationSubdomain][row.index()][col.index()] += transfer;
               }
         }
+        if (outputRankZero)
+          std::cout << "  interface tags " << tag << " and " << neighborTag
+                    << ": done\n" << std::flush;
       }
+    if (outputRankZero)
+      std::cout << "Interface mass redistribution complete\n";
     F.Mass_stiff(10);
     F.setMassSubmatrix(false);
     F.setRowColSubdomain(0,0);
