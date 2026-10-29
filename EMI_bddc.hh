@@ -684,6 +684,7 @@ namespace EmiBddc
     for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
     {
       for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
+      {
         dofsAndWeights << subdomain << ',' << data.tags[subdomain] << ',' << local << ','
                        << data.localDofs[subdomain][local] << ','
                        << data.weights[subdomain][local][0] << '\n';
@@ -692,6 +693,7 @@ namespace EmiBddc
                  << data.weights[subdomain][local][0] << ','
                  << data.weights[subdomain][local][0]
                     * globalRhs[data.localDofs[subdomain][local]][0] << '\n';
+      }
 
       auto const& matrix = data.localMatrices[subdomain];
       for (auto row = matrix.begin(); row != matrix.end(); ++row)

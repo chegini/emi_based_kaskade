@@ -1178,6 +1178,11 @@ int main(int argc, char* argv[])
     }
     EmiBddc::setLocalMatricesFromContributions(bddcData,localContributions,
                                                options.mpi != 0);
+    // The old EMI BDDC path partitions residuals and corrections by each
+    // local diagonal's share of the assembled global diagonal. Recompute
+    // those weights after material-local operators have been finalized.
+    EmiBddc::buildDiagonalWeights(bddcData,bddcData.localMatrices,lhs,
+                                  options.mpi != 0);
     if (options.bddcDumpLocalData && outputRankZero)
       EmiBddc::dumpLocalBddcData(bddcData,options.outputDir + "/bddc_local_data",
                                  assembledSystemRhs,
