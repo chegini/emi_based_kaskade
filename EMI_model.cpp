@@ -55,10 +55,10 @@ using namespace Kaskade;
 
 struct EmiOptions
 {
-  std::string input = "./input/2Cells3d_2extra_mesh.vtu";
-  std::string extraSet = "./input/2Cells3d_2extra_list_extracellular.txt";
-  std::string intraSet = "./input/2Cells3d_2extra_list_intracellular.txt";
-  std::string excitedSet = "./input/2Cells3d_2extra_early_excited.txt";
+  std::string input = "./input/10Cells3d_10extra_mesh.vtu";
+  std::string extraSet = "./input/10Cells3d_10extra_list_extracellular.txt";
+  std::string intraSet = "./input/10Cells3d_10extra_list_intracellular.txt";
+  std::string excitedSet = "./input/10Cells3d_10extra_early_excited.txt";
   std::string outputDir = "output";
 
   int refinements = 0;
@@ -1074,6 +1074,16 @@ int main(int argc, char* argv[])
 
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
       gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads,options.mpi != 0);
+    // EMI membrane and gap-junction terms couple DOFs belonging to different
+    // material tags. Include neighboring cells in the local spaces so those
+    // off-tag matrix entries are retained by the principal local operators.
+    EmiBddc::expandSubdomainsToInterfaceNeighbors(
+      bddcData,gridManager.grid(),uSpace,material,
+      options.assemblyThreads,options.mpi != 0);
+    EmiBddc::printUncoveredMatrixCouplings(
+      bddcData,mass,"SDC mass",options.mpi != 0);
+    EmiBddc::printUncoveredMatrixCouplings(
+      bddcData,stiffness,"SDC stiffness",options.mpi != 0);
     if (options.bddcCompression)
     {
       using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint32_t,std::uint8_t>;
@@ -1117,14 +1127,41 @@ int main(int argc, char* argv[])
       std::cout << "time integrator: semi-implicit Euler with BDDC\n";
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
       gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads,options.mpi != 0);
-    bddcData.localMatrices = EmiBddc::extractLocalMatrices(bddcData,lhs,options.assemblyThreads);
+    EmiBddc::printUncoveredMatrixCouplings(
+      bddcData,lhs,"before material contributions",options.mpi != 0);
+
+    // Assemble each cell's full EMI Jacobian contribution into its material
+    // subdomain. This makes the assembled sum of local operators equal lhs;
+    // overlapping principal restrictions instead duplicate matrix entries.
+    F.Mass_stiff(10);
+    F.setMassSubmatrix(false);
+    std::vector<Matrix> localContributions(bddcData.tags.size());
+    Dune::FieldVector<double,Grid::dimension> zeroMaterial(0.0);
+    for (size_t subdomain = 0; subdomain < bddcData.tags.size(); ++subdomain)
+    {
+      int const tag = bddcData.tags[subdomain];
+      auto cellFilter = [&material,tag,zeroMaterial](auto const& cell)
+      {
+        return material.value(cell,zeroMaterial) == tag;
+      };
+      assembler.template assemble<AssemblyDetail::TakeAllBlocks>(
+        SemiLinearization(equation,u,u,duState),cellFilter,Assembler::MATRIX,
+        options.assemblyThreads);
+      localContributions[subdomain] = assembler.template get<Matrix>(false);
+    }
+    EmiBddc::setLocalMatricesFromContributions(bddcData,localContributions);
+    EmiBddc::printUncoveredMatrixCouplings(
+      bddcData,lhs,"after material contributions",options.mpi != 0);
+    if (options.diagnostics)
+      EmiBddc::printLocalMatrixReconstruction(bddcData,bddcData.localMatrices,lhs,
+                                              nDofs,options.mpi != 0);
     if (options.bddcCompression)
     {
       using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint32_t,std::uint8_t>;
-      u = EmiBddc::runBddc<CompressedTransfer>(F,spaces,u,uAll,bddcData,nDofs,steps,options);
+      u = EmiBddc::runBddc<CompressedTransfer>(F,spaces,u,uAll,bddcData,lhs,nDofs,steps,options);
     }
     else
-      u = EmiBddc::runBddc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,nDofs,steps,options);
+      u = EmiBddc::runBddc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,lhs,nDofs,steps,options);
     if (writeVtkOnThisRank(options.writeVTK))
       writeState(u,uAll,options.order,
                  options.outputDir + (options.bddcCompression
