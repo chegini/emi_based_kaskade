@@ -194,6 +194,7 @@ namespace EmiBddc
     double solverConstruction = 0.0;
     double rhsSetup = 0.0;
     double bddcSolve = 0.0;
+    double correctionAssembly = 0.0;
     double sdcUpdate = 0.0;
     double adaptivity = 0.0;
     double localOperatorExtraction = 0.0;
@@ -219,10 +220,11 @@ namespace EmiBddc
                 << "  BDDC RHS setup: " << rhsSetup << "\n"
                 << "  BDDC subdomain constructions: " << bddcSubdomainConstructions << "\n"
                 << "  BDDC solve calls: " << bddcSolveCalls
-                << " across " << bddcSystems << " interval systems (wall seconds: "
+                << " across " << bddcSystems << " systems (wall seconds: "
                 << bddcSolve << ", average calls/system: "
                 << (bddcSystems > 0 ? static_cast<double>(bddcSolveCalls)/bddcSystems : 0.0)
                 << ")\n"
+                << "  correction assembly/reduction: " << correctionAssembly << "\n"
                 << "  SDC update/bookkeeping: " << sdcUpdate << "\n"
                 << "  algebraic adaptivity: " << adaptivity << "\n";
     }
@@ -1914,6 +1916,7 @@ State runBddcSdc(Functional& F,
     auto zeroState(state);
     auto stepState(state);
     CompressionReport compressionReport;
+    ProfileTimes profile;
     zeroState *= 0.0;
     stepState *= 0.0;
 
@@ -1925,13 +1928,21 @@ State runBddcSdc(Functional& F,
 
       Kaskade::SemiImplicitEulerStep<Functional> equation(&F,options.dt);
       equation.setTau(options.dt);
+      auto const residualAssemblyStart = options.profile
+                                       ? ProfileTimes::Clock::now()
+                                       : ProfileTimes::Clock::time_point{};
       assembler.assemble(SemiLinearization(equation,state,state,zeroState),
                          Assembler::RHS,
                          options.assemblyThreads);
+      if (options.profile)
+        profile.residualAssembly += ProfileTimes::seconds(residualAssemblyStart);
 
       Vector rhs(nDofs);
       assembler.rhs().write(rhs.begin());
 
+      auto const rhsSetupStart = options.profile
+                               ? ProfileTimes::Clock::now()
+                               : ProfileTimes::Clock::time_point{};
       std::vector<Vector> subdomainRhs(data.localDofs.size());
       for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
       {
@@ -1943,15 +1954,28 @@ State runBddcSdc(Functional& F,
           subdomainRhs[subdomain][local] = data.weights[subdomain][local][0] * rhs[global];
         }
       }
+      if (options.profile)
+        profile.rhsSetup += ProfileTimes::seconds(rhsSetupStart);
       if (options.diagnostics && step == 0)
         printLocalRhsReconstruction(data,subdomainRhs,rhs,options.mpi != 0);
 
+      auto const subdomainStart = options.profile
+                                ? ProfileTimes::Clock::now()
+                                : ProfileTimes::Clock::time_point{};
       auto subdomains = constructOwnedSubdomains<BddcSubdomain>(data.localMatrices,
                                                                  interfaceAverages,
                                                                  options.assemblyThreads,
                                                                  options.mpi != 0,
                                                                  options.masterWorker != 0);
+      if (options.profile)
+      {
+        profile.subdomainConstruction += ProfileTimes::seconds(subdomainStart);
+        profile.bddcSubdomainConstructions += subdomains.size();
+      }
 
+      auto const transferStart = options.profile
+                               ? ProfileTimes::Clock::now()
+                               : ProfileTimes::Clock::time_point{};
       if constexpr (requires(Transfer& transfer) {
                       transfer.setQuantizationBits(0);
                       transfer.setRestrictEncoding(true);
@@ -1998,12 +2022,17 @@ State runBddcSdc(Functional& F,
               subdomain.transfer().setExcludedLocalDofs(interfaceAverages.cornerDofs(id));
         }
       }
+      if (options.profile)
+        profile.transferSetup += ProfileTimes::seconds(transferStart);
 
       std::vector<int> activeIds(subdomains.size());
       std::iota(activeIds.begin(),activeIds.end(),0);
       bool useCgSolver = options.bddcUseCg != 0;
       bool verbose = options.bddcVerbose != 0;
 
+      auto const solverStart = options.profile
+                             ? ProfileTimes::Clock::now()
+                             : ProfileTimes::Clock::time_point{};
       Kaskade::BDDC::BDDCSolver<BddcSubdomain,decltype(subdomains)> solver(subdomains,
                                                       interfaceAverages.coarseConstraints(),
                                                       activeIds,
@@ -2011,14 +2040,29 @@ State runBddcSdc(Functional& F,
                                                       verbose,
                                                       options.mpi != 0,
                                                       options.masterWorker != 0);
+      if (options.profile)
+        profile.solverConstruction += ProfileTimes::seconds(solverStart);
       if (options.bddcHistogram)
         solver.setHistogramOutput(options.outputDir + "/histograms");
+      auto const solverRhsStart = options.profile
+                                ? ProfileTimes::Clock::now()
+                                : ProfileTimes::Clock::time_point{};
       solver.setRhs(subdomainRhs);
+      if (options.profile)
+      {
+        profile.rhsSetup += ProfileTimes::seconds(solverRhsStart);
+        ++profile.bddcSystems;
+      }
 
       double residual = std::numeric_limits<double>::infinity();
       int iteration = 0;
+      auto const solveStart = options.profile
+                            ? ProfileTimes::Clock::now()
+                            : ProfileTimes::Clock::time_point{};
       for (; iteration < options.bddcIterations; ++iteration)
       {
+        if (options.profile)
+          ++profile.bddcSolveCalls;
         residual = solver.solve();
         if (solver.stopped())
         {
@@ -2030,6 +2074,8 @@ State runBddcSdc(Functional& F,
         if (residual < options.bddcTolerance)
           break;
       }
+      if (options.profile)
+        profile.bddcSolve += ProfileTimes::seconds(solveStart);
       if (options.bddcCompressionReport)
       {
         if (options.bddcCompression)
@@ -2038,6 +2084,9 @@ State runBddcSdc(Functional& F,
           compressionReport.addUncompressed(solver.traffic());
       }
 
+      auto const correctionStart = options.profile
+                                 ? ProfileTimes::Clock::now()
+                                 : ProfileTimes::Clock::time_point{};
       // Owned subdomains contribute locally; reduce the assembled global
       // correction so every rank advances the same EMI state.
       std::vector<double> localStep(nDofs, 0.0);
@@ -2065,6 +2114,8 @@ State runBddcSdc(Functional& F,
       Vector stepVector(nDofs);
       for (size_t i = 0; i < nDofs; ++i)
         stepVector[i] = globalStep[i];
+      if (options.profile)
+        profile.correctionAssembly += ProfileTimes::seconds(correctionStart);
 
       if (options.diagnostics && mpiRankZero(options.mpi != 0))
       {
@@ -2089,6 +2140,8 @@ State runBddcSdc(Functional& F,
                   << ", residual=" << residual << "\n";
     }
 
+    if (options.profile)
+      profile.print("BDDC");
     if (options.bddcCompressionReport)
       compressionReport.printGlobal("BDDC",options.mpi != 0);
     return state;
