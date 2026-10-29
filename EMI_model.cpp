@@ -8,6 +8,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -1285,23 +1286,39 @@ int main(int argc, char* argv[])
 
   if (outputRankZero)
     std::cout << "time integrator: semi-implicit Euler\n";
+
+  // This path uses the same lhs for every timestep. Keep its factorization
+  // for successive RHS solves; each step still starts with a zero correction.
+  std::optional<DirectSolver<Vector,Vector>> directSolver;
+  if (options.direct && steps > 0)
+  {
+    if (outputRankZero)
+      std::cout << "Factoring fixed EMI matrix once for " << steps << " time steps\n";
+    directSolver.emplace(lhs);
+  }
+
+  // The mesh and operator dimensions are fixed throughout this timestep loop.
+  Vector rhsVector(nDofs);
+  Vector stepVector(nDofs);
   for (int step = 0; step < steps; ++step)
   {
     double const time = step*options.dt;
     F.time(time);
 
     assembler.assemble(SemiLinearization(equation,u,u,duState),Assembler::RHS,options.assemblyThreads);
-    auto rhs = assembler.rhs();
-
-    Vector rhsVector(nDofs);
-    Vector stepVector(nDofs);
-    rhs.write(rhsVector.begin());
+    assembler.rhs().write(rhsVector.begin());
     if (options.diagnostics && outputRankZero)
       printVectorDiagnostics(rhsVector,"rhs");
 
     if (outputRankZero)
       std::cout << "EMI step " << step+1 << "/" << steps << "\n";
-    solveLinearSystem(lhs,stepVector,rhsVector,options);
+    if (directSolver)
+    {
+      stepVector = 0.0;
+      directSolver->apply(stepVector,rhsVector);
+    }
+    else
+      solveLinearSystem(lhs,stepVector,rhsVector,options);
 
     for (size_t i = 0; i < nDofs; ++i)
       at_c<0>(stepState.data).coefficients()[i] = stepVector[i];
