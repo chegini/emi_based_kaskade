@@ -68,6 +68,7 @@ struct EmiOptions
   int maxCGIter = 10000;
   int writeVTK = 1;
   int diagnostics = 0;
+  int bddcDumpLocalData = 0;
   int profile = 0;
   int sdc = 0;
   int sdcCollocationPoints = 3;
@@ -378,6 +379,26 @@ void printMatrixDiagnostics(Matrix const& A, std::string const& name)
             << " min=" << minValue
             << " max=" << maxValue
             << " maxAbs=" << maxAbs << "\n";
+}
+
+template <class Matrix, class Vector>
+void dumpGlobalSystem(Matrix const& A, Vector const& b, std::string const& directory)
+{
+  std::filesystem::create_directories(directory);
+  std::ofstream matrixFile(directory + "/global_lhs.csv");
+  std::ofstream rhsFile(directory + "/global_rhs.csv");
+  if (!matrixFile || !rhsFile)
+    throw std::runtime_error("cannot write global-system diagnostics in " + directory);
+
+  matrixFile << "row,col,value\n" << std::setprecision(17);
+  for (auto row = A.begin(); row != A.end(); ++row)
+    for (auto col = row.begin(); col != row.end(); ++col)
+      if ((*col)[0][0] != 0.0)
+        matrixFile << row.index() << ',' << col.index() << ',' << (*col)[0][0] << '\n';
+
+  rhsFile << "dof,value\n" << std::setprecision(17);
+  for (size_t i = 0; i < b.N(); ++i)
+    rhsFile << i << ',' << b[i][0] << '\n';
 }
 
 template <class Vector>
@@ -854,6 +875,7 @@ int main(int argc, char* argv[])
     ("CG_shift", options.cgShift, options.cgShift, "apply constant shift correction after PCG")
     ("vtk", options.writeVTK, options.writeVTK, "write VTK output: 0=no, 1=yes")
     ("diagnostics", options.diagnostics, options.diagnostics, "print per-step vector diagnostics: 0=no, 1=yes")
+    ("bddcDumpLocalData", options.bddcDumpLocalData, options.bddcDumpLocalData, "dump global LHS/RHS and BDDC local data: 0=no, 1=yes")
     ("profile", options.profile, options.profile, "print cumulative SDC+BDDC phase wall times: 0=no, 1=yes")
     ("sdc", options.sdc, options.sdc, "use SDC time integrator: 0=no, 1=yes")
     ("sdcCollocationPoints", options.sdcCollocationPoints, options.sdcCollocationPoints, "target number of SDC collocation points")
@@ -1074,11 +1096,10 @@ int main(int argc, char* argv[])
 
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
       gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads,options.mpi != 0);
-    // EMI membrane and gap-junction terms couple DOFs belonging to different
-    // material tags. Include neighboring cells in the local spaces so those
-    // off-tag matrix entries are retained by the principal local operators.
+    // Add only neighboring-cell DOFs that participate in a nonzero cross-tag
+    // mass coupling; unrelated cell-interior DOFs would create singular local blocks.
     EmiBddc::expandSubdomainsToInterfaceNeighbors(
-      bddcData,gridManager.grid(),uSpace,material,
+      bddcData,gridManager.grid(),uSpace,material,mass,
       options.assemblyThreads,options.mpi != 0);
     EmiBddc::printUncoveredMatrixCouplings(
       bddcData,mass,"SDC mass",options.mpi != 0);
@@ -1118,6 +1139,13 @@ int main(int argc, char* argv[])
                      Assembler::MATRIX|Assembler::RHS,
                      options.assemblyThreads);
   Matrix lhs = assembler.template get<Matrix>(false);
+  Vector assembledSystemRhs(nDofs);
+  assembler.rhs().write(assembledSystemRhs.begin());
+  if (options.bddcDumpLocalData && outputRankZero)
+  {
+    dumpGlobalSystem(lhs,assembledSystemRhs,options.outputDir + "/global_system");
+    std::cout << "Global LHS/RHS dumped to " << options.outputDir << "/global_system\n";
+  }
   if (outputRankZero)
     printMatrixDiagnostics(lhs,"lhs");
 
@@ -1131,8 +1159,7 @@ int main(int argc, char* argv[])
       bddcData,lhs,"before material contributions",options.mpi != 0);
 
     // Assemble each cell's full EMI Jacobian contribution into its material
-    // subdomain. This makes the assembled sum of local operators equal lhs;
-    // overlapping principal restrictions instead duplicate matrix entries.
+    // subdomain so the embedded local operators add up to the global matrix.
     F.Mass_stiff(10);
     F.setMassSubmatrix(false);
     std::vector<Matrix> localContributions(bddcData.tags.size());
@@ -1149,7 +1176,12 @@ int main(int argc, char* argv[])
         options.assemblyThreads);
       localContributions[subdomain] = assembler.template get<Matrix>(false);
     }
-    EmiBddc::setLocalMatricesFromContributions(bddcData,localContributions);
+    EmiBddc::setLocalMatricesFromContributions(bddcData,localContributions,
+                                               options.mpi != 0);
+    if (options.bddcDumpLocalData && outputRankZero)
+      EmiBddc::dumpLocalBddcData(bddcData,options.outputDir + "/bddc_local_data",
+                                 assembledSystemRhs,
+                                 options.bddcInterfaceTypes);
     EmiBddc::printUncoveredMatrixCouplings(
       bddcData,lhs,"after material contributions",options.mpi != 0);
     if (options.diagnostics)

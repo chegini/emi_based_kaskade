@@ -7,6 +7,9 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -430,15 +433,15 @@ namespace EmiBddc
     }
   }
 
-  // Reproduce the original EMI decomposition: add only the DOFs of the
-  // neighboring cell across a material interface. Do not expand by every
-  // nonzero matrix coupling; that creates unnecessarily large and incorrect
-  // local domains for the EMI membrane/gap terms.
+  // Add only neighboring-cell DOFs that actually couple across a material
+  // interface. This retains membrane/gap couplings without adding unrelated
+  // cell-interior DOFs to the local spaces.
   template <class Grid, class Space, class Material, class Matrix, class Vector>
   void expandSubdomainsToInterfaceNeighbors(BddcData<Matrix,Vector>& data,
                                             Grid const& grid,
                                             Space const& space,
                                             Material const& material,
+                                            Matrix const& globalMatrix,
                                             int nTasks,
                                             bool mpiEnabled)
   {
@@ -472,8 +475,21 @@ namespace EmiBddc
           continue;
         auto const insideDofs = space.mapper().globalIndices(cell);
         auto const outsideDofs = space.mapper().globalIndices(outsideCell);
-        expanded[inside->second].insert(outsideDofs.begin(),outsideDofs.end());
-        expanded[outside->second].insert(insideDofs.begin(),insideDofs.end());
+        auto hasCoupling = [&globalMatrix](size_t rowIndex, size_t columnIndex)
+        {
+          auto row = globalMatrix[rowIndex];
+          for (auto col = row.begin(); col != row.end(); ++col)
+            if (col.index() == columnIndex)
+              return (*col)[0][0] != 0.0;
+          return false;
+        };
+        for (size_t insideDof : insideDofs)
+          for (size_t outsideDof : outsideDofs)
+            if (hasCoupling(insideDof,outsideDof) || hasCoupling(outsideDof,insideDof))
+            {
+              expanded[inside->second].insert(outsideDof);
+              expanded[outside->second].insert(insideDof);
+            }
       }
     }
 
@@ -570,18 +586,16 @@ namespace EmiBddc
     return localMatrices;
   }
 
-  // Install local operators assembled from disjoint physical contributions.
-  // Unlike overlapping principal restrictions, these matrices must sum to
-  // the global operator because BDDCSolver's CG iteration solves the
-  // subassembled system formed by summing its local operators.
+  // Build additive local operators from disjoint material contributions.
+  // Their embedded sum must reproduce the global matrix exactly.
   template <class Matrix, class Vector>
   void setLocalMatricesFromContributions(BddcData<Matrix,Vector>& data,
-                                         std::vector<Matrix> const& contributions)
+                                         std::vector<Matrix> const& contributions,
+                                         bool mpiEnabled)
   {
     using Kaskade::BDDC::LocalDof;
     if (contributions.size() != data.tags.size())
       throw std::runtime_error("BDDC local contribution count does not match material subdomains.");
-
     std::vector<std::vector<size_t>> localDofs(contributions.size());
     std::vector<Matrix> localMatrices(contributions.size());
     for (size_t subdomain = 0; subdomain < contributions.size(); ++subdomain)
@@ -626,8 +640,10 @@ namespace EmiBddc
     data.localDofs = std::move(localDofs);
     data.localMatrices = std::move(localMatrices);
     data.weights.resize(data.localDofs.size());
+    size_t totalLocalDofs = 0;
     for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
     {
+      totalLocalDofs += data.localDofs[subdomain].size();
       Vector weight(data.localDofs[subdomain].size());
       weight = 1.0;
       for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
@@ -638,6 +654,118 @@ namespace EmiBddc
       }
       data.weights[subdomain] = std::move(weight);
     }
+
+    if (mpiRankZero(mpiEnabled))
+      std::cout << "BDDC material-supported local spaces: total local dofs="
+                << totalLocalDofs << ", shared global dofs="
+                << data.sharedDofs.size() << "\n";
+  }
+
+  template <class Matrix, class Vector>
+  void dumpLocalBddcData(BddcData<Matrix,Vector> const& data,
+                         std::string const& directory,
+                         Vector const& globalRhs,
+                         int interfaceTypes)
+  {
+    std::filesystem::create_directories(directory);
+    std::ofstream matrices(directory + "/local_matrices.csv");
+    std::ofstream dofsAndWeights(directory + "/local_dofs_weights.csv");
+    std::ofstream localRhs(directory + "/local_rhs.csv");
+    std::ofstream sharedDofs(directory + "/shared_dofs.csv");
+    std::ofstream coarseConstraints(directory + "/coarse_constraints.csv");
+    if (!matrices || !dofsAndWeights || !localRhs || !sharedDofs || !coarseConstraints)
+      throw std::runtime_error("cannot open BDDC local-data diagnostic files in " + directory);
+
+    matrices << "subdomain,tag,row_global,col_global,value\n" << std::setprecision(17);
+    dofsAndWeights << "subdomain,tag,local_dof,global_dof,weight\n" << std::setprecision(17);
+    localRhs << "subdomain,tag,local_dof,global_dof,weight,value\n" << std::setprecision(17);
+    sharedDofs << "global_dof,subdomain,tag,local_dof,weight\n" << std::setprecision(17);
+    coarseConstraints << "constraint_id,type,subdomain,tag,global_dof,local_dof\n";
+    for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
+    {
+      for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
+        dofsAndWeights << subdomain << ',' << data.tags[subdomain] << ',' << local << ','
+                       << data.localDofs[subdomain][local] << ','
+                       << data.weights[subdomain][local][0] << '\n';
+        localRhs << subdomain << ',' << data.tags[subdomain] << ',' << local << ','
+                 << data.localDofs[subdomain][local] << ','
+                 << data.weights[subdomain][local][0] << ','
+                 << data.weights[subdomain][local][0]
+                    * globalRhs[data.localDofs[subdomain][local]][0] << '\n';
+
+      auto const& matrix = data.localMatrices[subdomain];
+      for (auto row = matrix.begin(); row != matrix.end(); ++row)
+        for (auto col = row.begin(); col != row.end(); ++col)
+          if ((*col)[0][0] != 0.0)
+            matrices << subdomain << ',' << data.tags[subdomain] << ','
+                     << data.localDofs[subdomain][row.index()] << ','
+                     << data.localDofs[subdomain][col.index()] << ','
+                     << (*col)[0][0] << '\n';
+    }
+
+    // Mirror InterfaceAverages: each shared global DOF contributes to the
+    // coarse group identified by its complete set of subdomain appearances.
+    std::map<std::vector<int>,std::vector<size_t>> dofsBySubdomainGroup;
+    for (auto const& occurrences : data.sharedDofs)
+    {
+      if (occurrences.empty())
+        continue;
+      size_t const global = data.localDofs[static_cast<size_t>(occurrences.front().s)]
+                                           [static_cast<size_t>(occurrences.front().i)];
+      std::vector<int> subdomains;
+      subdomains.reserve(occurrences.size());
+      for (auto const& occurrence : occurrences)
+        subdomains.push_back(occurrence.s);
+      std::sort(subdomains.begin(),subdomains.end());
+      dofsBySubdomainGroup[subdomains].push_back(global);
+
+      for (auto const& occurrence : occurrences)
+      {
+        size_t const subdomain = static_cast<size_t>(occurrence.s);
+        size_t const local = static_cast<size_t>(occurrence.i);
+        sharedDofs << global << ',' << occurrence.s << ',' << data.tags[subdomain] << ','
+                   << occurrence.i << ',' << data.weights[subdomain][local][0] << '\n';
+      }
+    }
+
+    Kaskade::BDDC::InterfaceAverages<1,int> interfaceAverages(
+      data.sharedDofs,data.subdomainSizes,interfaceTypes);
+    auto const& actualConstraints = interfaceAverages.coarseConstraints();
+    auto const actualCounts = interfaceAverages.interfaceCount();
+    for (size_t constraintId = 0; constraintId < actualConstraints.size(); ++constraintId)
+    {
+      auto const& subdomains = actualConstraints[constraintId].first;
+      auto const group = dofsBySubdomainGroup.find(subdomains);
+      if (group == dofsBySubdomainGroup.end())
+        throw std::runtime_error("Kaskade coarse constraint has no matching shared-DOF group");
+      auto const& globalDofs = group->second;
+
+      // Match the interface classification used by InterfaceAverages.
+      char const* type = subdomains.size() == 2 ? "face"
+                       : globalDofs.size() == 1 ? "corner"
+                       : "edge";
+      for (size_t global : globalDofs)
+        for (int subdomainId : subdomains)
+        {
+          auto const& localDofs = data.localDofs[static_cast<size_t>(subdomainId)];
+          auto const local = std::lower_bound(localDofs.begin(),localDofs.end(),global);
+          if (local == localDofs.end() || *local != global)
+            throw std::runtime_error("shared BDDC DOF is absent from its listed subdomain");
+          coarseConstraints << constraintId << ',' << type << ',' << subdomainId << ','
+                            << data.tags[static_cast<size_t>(subdomainId)] << ',' << global << ','
+                            << std::distance(localDofs.begin(),local) << '\n';
+        }
+    }
+
+    std::ofstream summary(directory + "/coarse_summary.txt");
+    if (!summary)
+      throw std::runtime_error("cannot open BDDC coarse-space summary in " + directory);
+    summary << "shared_global_dofs," << data.sharedDofs.size() << '\n'
+            << "enabled_constraints," << actualConstraints.size() << '\n'
+            << "corners," << actualCounts[0] << '\n'
+            << "edges," << actualCounts[1] << '\n'
+            << "faces," << actualCounts[2] << '\n'
+            << "interface_type_mask," << interfaceTypes << '\n';
   }
 
   // Assign every global nonzero matrix entry to exactly one subdomain that
