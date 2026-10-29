@@ -342,6 +342,126 @@ namespace EmiBddc
     return data;
   }
 
+  // Match the legacy EMI BDDC local spaces: keep every DOF supported by the
+  // cells of a material tag and add the coordinate-matched DOFs on adjacent
+  // cells of a different tag.  The legacy mapper has distinct global IDs on
+  // the two sides of a material interface, so matrix-support membership alone
+  // does not recover these interface-neighbor copies.
+  template <class Grid, class Space, class Material, class Matrix, class Vector>
+  void expandSubdomainsToLegacyInterfaceDofs(BddcData<Matrix,Vector>& data,
+                                              Grid const& grid,
+                                              Space& space,
+                                              Material const& material,
+                                              bool mpiEnabled)
+  {
+    using LocalDof = Kaskade::BDDC::LocalDof;
+    Dune::FieldVector<double,Grid::dimension> zero(0.0);
+    std::map<int,size_t> tagToSubdomain;
+    for (size_t subdomain = 0; subdomain < data.tags.size(); ++subdomain)
+      tagToSubdomain[data.tags[subdomain]] = subdomain;
+
+    auto localNodes = [&space](auto const& cell)
+    {
+      typename Space::Evaluator evaluator(space);
+      evaluator.moveTo(cell);
+      auto const& interpolationNodes = evaluator.shapeFunctions().interpolationNodes();
+      auto const globalDofs = space.mapper().globalIndices(cell);
+      if (interpolationNodes.size() != globalDofs.size())
+        throw std::runtime_error("BDDC interface mapper and interpolation nodes have different sizes.");
+
+      using Coordinate = Dune::FieldVector<double,Grid::dimension>;
+      std::vector<std::pair<size_t,Coordinate>> nodes;
+      nodes.reserve(globalDofs.size());
+      for (size_t i = 0; i < globalDofs.size(); ++i)
+      {
+        auto const x = cell.geometry().global(interpolationNodes[i]);
+        Coordinate coordinate;
+        for (int d = 0; d < Grid::dimension; ++d)
+          coordinate[d] = x[d];
+        nodes.emplace_back(globalDofs[i],coordinate);
+      }
+      return nodes;
+    };
+
+    std::vector<std::set<size_t>> expanded(data.localDofs.size());
+    for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
+      expanded[subdomain].insert(data.localDofs[subdomain].begin(),
+                                 data.localDofs[subdomain].end());
+
+    for (auto const& cell : Dune::elements(grid.leafGridView()))
+    {
+      int const insideTag = material.value(cell,zero);
+      auto inside = tagToSubdomain.find(insideTag);
+      if (inside == tagToSubdomain.end())
+        continue;
+      auto const insideNodes = localNodes(cell);
+      for (auto const& intersection : Dune::intersections(grid.leafGridView(),cell))
+      {
+        if (!intersection.neighbor())
+          continue;
+        auto const& outsideCell = intersection.outside();
+        int const outsideTag = material.value(outsideCell,zero);
+        if (insideTag == outsideTag)
+          continue;
+        auto outside = tagToSubdomain.find(outsideTag);
+        if (outside == tagToSubdomain.end())
+          continue;
+        auto const outsideNodes = localNodes(outsideCell);
+        for (auto const& insideNode : insideNodes)
+          for (auto const& outsideNode : outsideNodes)
+          {
+            bool sameCoordinate = true;
+            for (int d = 0; d < Grid::dimension; ++d)
+              sameCoordinate = sameCoordinate &&
+                insideNode.second[d] == outsideNode.second[d];
+            if (!sameCoordinate)
+              continue;
+            expanded[inside->second].insert(outsideNode.first);
+            expanded[outside->second].insert(insideNode.first);
+          }
+      }
+    }
+
+    data.sharedDofs.clear();
+    data.dofSubdomains.assign(data.dofCells.size(),{});
+    data.subdomainSizes.clear();
+    std::vector<std::vector<LocalDof>> occurrences(data.dofCells.size());
+    for (size_t subdomain = 0; subdomain < expanded.size(); ++subdomain)
+    {
+      data.localDofs[subdomain].assign(expanded[subdomain].begin(),
+                                       expanded[subdomain].end());
+      if (data.localDofs[subdomain].size() >
+          static_cast<size_t>(std::numeric_limits<int>::max()))
+        throw std::runtime_error("BDDC local subdomain is too large for int local indices.");
+      data.subdomainSizes.push_back(static_cast<int>(data.localDofs[subdomain].size()));
+      for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
+      {
+        size_t const global = data.localDofs[subdomain][local];
+        if (global >= occurrences.size())
+          throw std::runtime_error("BDDC interface DOF is outside the global vector.");
+        occurrences[global].push_back(
+          {static_cast<int>(subdomain),static_cast<int>(local)});
+      }
+    }
+
+    for (size_t global = 0; global < occurrences.size(); ++global)
+    {
+      if (occurrences[global].size() > 1)
+        data.sharedDofs.push_back(occurrences[global]);
+      for (auto const& occurrence : occurrences[global])
+        data.dofSubdomains[global].push_back(occurrence.s);
+    }
+
+    if (mpiRankZero(mpiEnabled))
+    {
+      size_t totalDofs = 0;
+      for (auto const& localDofs : data.localDofs)
+        totalDofs += localDofs.size();
+      std::cout << "BDDC legacy interface-neighbor local spaces: total local dofs="
+                << totalDofs << ", shared dofs=" << data.sharedDofs.size() << "\n";
+    }
+  }
+
   // Add one algebraic overlap layer to the material-tag subdomains. The
   // original tag partition is useful as a starting point, but a local
   // principal matrix must contain both endpoints of every nonzero coupling
@@ -596,34 +716,46 @@ namespace EmiBddc
     using Kaskade::BDDC::LocalDof;
     if (contributions.size() != data.tags.size())
       throw std::runtime_error("BDDC local contribution count does not match material subdomains.");
-    std::vector<std::vector<size_t>> localDofs(contributions.size());
+    if (data.localDofs.size() != contributions.size())
+      throw std::runtime_error("BDDC local-space count does not match material subdomains.");
     std::vector<Matrix> localMatrices(contributions.size());
     for (size_t subdomain = 0; subdomain < contributions.size(); ++subdomain)
     {
-      std::set<size_t> support;
+      if (data.localDofs[subdomain].empty())
+        throw std::runtime_error("BDDC material subdomain has an empty local space.");
+      std::set<size_t> localDofSet(data.localDofs[subdomain].begin(),
+                                   data.localDofs[subdomain].end());
       auto const& contribution = contributions[subdomain];
       for (auto row = contribution.begin(); row != contribution.end(); ++row)
         for (auto col = row.begin(); col != row.end(); ++col)
           if ((*col)[0][0] != 0.0)
           {
-            support.insert(row.index());
-            support.insert(col.index());
+            if (!localDofSet.contains(row.index()) ||
+                !localDofSet.contains(col.index()))
+              throw std::runtime_error("legacy BDDC local space omits a nonzero material coupling endpoint.");
           }
-      if (support.empty())
+      bool hasNonzero = false;
+      for (auto row = contribution.begin(); row != contribution.end() && !hasNonzero; ++row)
+        for (auto col = row.begin(); col != row.end(); ++col)
+          if ((*col)[0][0] != 0.0)
+          {
+            hasNonzero = true;
+            break;
+          }
+      if (!hasNonzero)
         throw std::runtime_error("BDDC material subdomain has an empty assembled operator contribution.");
-      localDofs[subdomain].assign(support.begin(),support.end());
-      localMatrices[subdomain] = Matrix(localDofs[subdomain],contribution);
+      localMatrices[subdomain] = Matrix(data.localDofs[subdomain],contribution);
     }
 
     std::vector<std::vector<LocalDof>> occurrences(data.dofSubdomains.size());
-    data.subdomainSizes.resize(localDofs.size());
-    for (size_t subdomain = 0; subdomain < localDofs.size(); ++subdomain)
+    data.subdomainSizes.resize(data.localDofs.size());
+    for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
     {
-      if (localDofs[subdomain].size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+      if (data.localDofs[subdomain].size() > static_cast<size_t>(std::numeric_limits<int>::max()))
         throw std::runtime_error("BDDC local subdomain is too large for int local indices.");
-      data.subdomainSizes[subdomain] = static_cast<int>(localDofs[subdomain].size());
-      for (size_t local = 0; local < localDofs[subdomain].size(); ++local)
-        occurrences[localDofs[subdomain][local]].push_back(
+      data.subdomainSizes[subdomain] = static_cast<int>(data.localDofs[subdomain].size());
+      for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
+        occurrences[data.localDofs[subdomain][local]].push_back(
           {static_cast<int>(subdomain),static_cast<int>(local)});
     }
 
@@ -637,7 +769,6 @@ namespace EmiBddc
         data.dofSubdomains[global].push_back(occurrence.s);
     }
 
-    data.localDofs = std::move(localDofs);
     data.localMatrices = std::move(localMatrices);
     data.weights.resize(data.localDofs.size());
     size_t totalLocalDofs = 0;
@@ -656,7 +787,7 @@ namespace EmiBddc
     }
 
     if (mpiRankZero(mpiEnabled))
-      std::cout << "BDDC material-supported local spaces: total local dofs="
+      std::cout << "BDDC legacy-interface local spaces: total local dofs="
                 << totalLocalDofs << ", shared global dofs="
                 << data.sharedDofs.size() << "\n";
   }

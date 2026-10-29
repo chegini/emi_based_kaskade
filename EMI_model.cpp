@@ -1155,6 +1155,8 @@ int main(int argc, char* argv[])
       std::cout << "time integrator: semi-implicit Euler with BDDC\n";
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
       gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads,options.mpi != 0);
+    EmiBddc::expandSubdomainsToLegacyInterfaceDofs(
+      bddcData,gridManager.grid(),uSpace,material,options.mpi != 0);
     EmiBddc::printUncoveredMatrixCouplings(
       bddcData,lhs,"before material contributions",options.mpi != 0);
 
@@ -1176,6 +1178,63 @@ int main(int argc, char* argv[])
         options.assemblyThreads);
       localContributions[subdomain] = assembler.template get<Matrix>(false);
     }
+
+    // The legacy EMI decomposition adds half of each directed membrane-mass
+    // block to both material subdomains adjacent to an interface. These
+    // blocks give the neighbor-side interface DOFs nonzero local rows.
+    // Without them the legacy-sized local spaces contain zero rows and the
+    // local direct factorizations are singular.
+    F.Mass_stiff(1);
+    F.setMassSubmatrix(true);
+    F.setRowColSubdomain(0,0);
+    equation.setTau(0.0);
+    std::map<int,size_t> tagToSubdomain;
+    for (size_t subdomain = 0; subdomain < bddcData.tags.size(); ++subdomain)
+      tagToSubdomain[bddcData.tags[subdomain]] = subdomain;
+    std::map<int,std::set<int>> neighboringTags;
+    Dune::FieldVector<double,Grid::dimension> zeroForTags(0.0);
+    for (auto const& cell : Dune::elements(gridManager.grid().leafGridView()))
+    {
+      int const tag = material.value(cell,zeroForTags);
+      for (auto const& intersection : Dune::intersections(gridManager.grid().leafGridView(),cell))
+      {
+        if (!intersection.neighbor())
+          continue;
+        int const neighborTag = material.value(intersection.outside(),zeroForTags);
+        if (tag != neighborTag && tagToSubdomain.contains(tag) &&
+            tagToSubdomain.contains(neighborTag))
+          neighboringTags[tag].insert(neighborTag);
+      }
+    }
+    for (auto const& [tag,neighbors] : neighboringTags)
+      for (int neighborTag : neighbors)
+      {
+        if (tag >= neighborTag)
+          continue;
+        for (auto const [rowTag,colTag] :
+             {std::pair<int,int>{tag,neighborTag},std::pair<int,int>{neighborTag,tag}})
+        {
+          F.setRowColSubdomain(rowTag,colTag);
+          assembler.assemble(SemiLinearization(equation,u,u,duState),Assembler::MATRIX,
+                             options.assemblyThreads);
+          Matrix const massBlock = assembler.template get<Matrix>(false);
+          size_t const sourceSubdomain = tagToSubdomain.at(rowTag);
+          size_t const destinationSubdomain = tagToSubdomain.at(colTag);
+          for (auto row = massBlock.begin(); row != massBlock.end(); ++row)
+            for (auto col = row.begin(); col != row.end(); ++col)
+              if ((*col)[0][0] != 0.0)
+              {
+                double const transfer = 0.5*(*col)[0][0];
+                localContributions[sourceSubdomain][row.index()][col.index()] -= transfer;
+                localContributions[destinationSubdomain][row.index()][col.index()] += transfer;
+              }
+        }
+      }
+    F.Mass_stiff(10);
+    F.setMassSubmatrix(false);
+    F.setRowColSubdomain(0,0);
+    equation.setTau(options.dt);
+
     EmiBddc::setLocalMatricesFromContributions(bddcData,localContributions,
                                                options.mpi != 0);
     // The old EMI BDDC path partitions residuals and corrections by each
