@@ -312,9 +312,6 @@ namespace EmiBddc
       for (auto const& occurrence : dofOccurrences[global])
         data.dofSubdomains[global].push_back(occurrence.s);
 
-    if (data.sharedDofs.empty() && data.tags.size() > 1)
-      throw std::runtime_error("BDDC setup found multiple subdomains but no shared dofs.");
-
     data.weights.resize(data.localDofs.size());
     size_t const taskLimit = nTasks > 0 ? static_cast<size_t>(nTasks)
                                         : std::numeric_limits<size_t>::max();
@@ -451,6 +448,10 @@ namespace EmiBddc
       for (auto const& occurrence : occurrences[global])
         data.dofSubdomains[global].push_back(occurrence.s);
     }
+
+    if (data.sharedDofs.empty() && data.tags.size() > 1)
+      throw std::runtime_error(
+        "BDDC interface expansion found multiple subdomains but no shared dofs.");
 
     if (mpiRankZero(mpiEnabled))
     {
