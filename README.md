@@ -222,7 +222,9 @@ runs (see the convergence-report section below). When that report is disabled,
 During BDDC setup, rank zero lists every local submatrix
 with its material tag and dimensions once material assembly/exchange and local
 matrix extraction have completed, including submatrices assembled by other MPI
-ranks. The true-residual stopping rule is printed once on rank zero before the
+ranks. The coarse-interface counts (corners, edges and faces) are printed once
+on rank zero during setup, including in quiet mode. The true-residual stopping
+rule is printed once on rank zero before the
 first solve, including in quiet mode. When the internal table is selected,
 a legend follows the stopping rule: `||du||_A` is the energy norm of the unscaled search
 direction, and `p[0]` is the internal residual/preconditioned-residual inner
