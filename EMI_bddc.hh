@@ -38,6 +38,7 @@
 #include "utilities/threading.hh"
 
 #include "EMI_bddc_stopping.hh"
+#include "EMI_bddc_condition.hh"
 
 namespace EmiBddc
 {
@@ -2076,6 +2077,10 @@ State runBddcSdc(Functional& F,
       std::cout << "BDDC stopping rule: ||b-A*du||_2 / ||b||_2 <= "
                 << options.bddcRelativeTolerance
                 << " (zero RHS: absolute residual; legacy internal tolerance is inactive)\n";
+    if (options.bddcConditionEstimate && rankZero)
+      std::cout << "BDDC condition diagnostic: RHS-dependent CG/Lanczos Ritz estimate "
+                << "after interior elimination; fixed SPD preconditioner assumed, "
+                << "not the exact condition number of A\n";
 
     for (int step = 0; step < steps; ++step)
     {
@@ -2157,6 +2162,16 @@ State runBddcSdc(Functional& F,
 
       double residual = std::numeric_limits<double>::infinity();
       int solveCalls = 0;
+      CgConditionEstimator conditionEstimator;
+      auto recordCgStep = [&]()
+      {
+        if (options.bddcConditionEstimate && rankZero)
+        {
+          auto const& cgStep = solver.lastCgStep();
+          if (cgStep.applied)
+            conditionEstimator.append(cgStep.alpha,cgStep.beta);
+        }
+      };
       TrueResidualResult trueResult;
       if (relativeStopping)
       {
@@ -2166,6 +2181,7 @@ State runBddcSdc(Functional& F,
             auto const start = options.profile ? ProfileTimes::Clock::now()
                                                : ProfileTimes::Clock::time_point{};
             double const internalNorm = solver.solve();
+            recordCgStep();
             if (options.profile)
             {
               profile.bddcSolve += ProfileTimes::seconds(start);
@@ -2193,6 +2209,7 @@ State runBddcSdc(Functional& F,
             ++profile.bddcSolveCalls;
           ++solveCalls;
           residual = solver.solve();
+          recordCgStep();
           if (solver.stopped())
           {
             if (verbose)
@@ -2220,6 +2237,19 @@ State runBddcSdc(Functional& F,
                       << " status=" << (trueResult.converged() ? "converged" : "not-converged");
           std::cout << " iterations=" << solveCalls << "\n";
         }
+      }
+      if (options.bddcConditionEstimate && rankZero)
+      {
+        auto const estimate = conditionEstimator.estimate();
+        std::cout << "BDDC condition estimate step " << step+1;
+        if (std::string(estimate.status) == "estimated")
+          std::cout << ": lambda_min=" << estimate.lambdaMin
+                    << " lambda_max=" << estimate.lambdaMax
+                    << " kappa_ritz=" << estimate.condition;
+        else
+          std::cout << ": kappa_ritz=unavailable";
+        std::cout << " krylov_dim=" << estimate.dimension
+                  << " status=" << estimate.status << "\n";
       }
       if (relativeStopping && !trueResult.converged())
       {

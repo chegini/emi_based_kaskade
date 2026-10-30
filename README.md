@@ -217,6 +217,7 @@ solver instead.
 | Option | Default | Meaning |
 | --- | ---: | --- |
 | `--direct` | `0` | `0` PCG, `1` direct solver |
+| `--directBackend` | `umfpack` | Global reference factorization: `umfpack`, or opt-in `mumps-spd` for a single-rank, non-SDC direct solve |
 | `--cgTol` | `1e-8` | PCG stopping tolerance |
 | `--maxCGIter` | `10000` | Maximum PCG iterations |
 | `--CG_shift` | `1` | Apply constant-shift correction after PCG |
@@ -225,6 +226,45 @@ Example:
 
 ```bash
 ./emiModel --direct 0 --cgTol 1e-8 --maxCGIter 10000
+```
+
+If UMFPACK's global LU factorization runs out of memory, the optional
+`--direct 1 --directBackend mumps-spd --bddc 0 --sdc 0` path uses the already
+linked sequential MUMPS solver in positive-definite mode. It checks the full
+assembled scalar matrix for finite entries, positive diagonal entries and
+`max|A-A^T| <= 1e-12*max|A|` before submitting only the nonzero lower triangle.
+This input check is not an SPD proof; a failed MUMPS SPD factorization stops
+the run. Only exact zeros and the redundant upper triangle are omitted.
+No diagonal shift, coefficient change or dropping tolerance is applied.
+Changing the backend can change floating-point roundoff, and reduced memory
+use is a possibility rather than a guarantee. UMFPACK remains the default;
+BDDC's local/coarse solvers are unaffected.
+
+MUMPS factors the fixed global matrix once, reuses it for all steps, and prints
+the absolute and relative residual of each correction against the original
+full matrix before advancing the state. Nonfinite residuals stop the run.
+There is no iterative stopping tolerance in this direct path; check that its
+reported residuals are well below the BDDC target before treating the output
+as a reference. The path requires `-np 1`; increasing MPI ranks does not
+distribute this sequential factorization.
+
+After rebuilding the application in the MPI-enabled container:
+
+```bash
+bash tests/run_emi_rizzo_direct.sh
+```
+
+This runs the same ten-step Rizzo computational problem with VTK enabled,
+records output in `output/rizzo-direct-mumps-spd-10steps/run.log`, and compares
+the final solution with the existing eight-rank BDDC VTU when present. If
+`/usr/bin/time` is available, it measures the application inside the MPI
+launch, including its maximum resident set size. The direct-matrix input
+checks can be tested independently of Dune/MUMPS:
+
+```bash
+c++ -std=c++20 -O2 -Wall -Wextra -pedantic \
+  tests/test_direct_matrix.cpp -o /tmp/test_direct_matrix
+/tmp/test_direct_matrix
 ```
 
 ### Spectral deferred correction
@@ -271,6 +311,7 @@ Example:
 | `--bddcInterfaceTypes` | `7` | Interface flags: `1` corner, `2` edge, `4` face, `7` all |
 | `--bddcVerbose` | `0` | Print BDDC iteration information |
 | `--bddcUseCg` | `1` | Use CG in the BDDC coarse-solve path |
+| `--bddcConditionEstimate` | `0` | Print an RHS-dependent CG/Lanczos Ritz estimate of the BDDC-preconditioned spectral condition number; requires uncompressed, non-SDC CG |
 | `--bddcAudit` | `0` | Audit the constant mode and coarse interface groups; requires `--bddc 1 --sdc 0` |
 | `--bddcMaterialAssembly` | `0` | Non-SDC material matrix assembly: `0` replicated legacy path; `1` assemble on each subdomain's MPI owner, then exchange sparse nonzeros |
 | `--bddcMaterialAssemblyCheck` | `0` | Audit owner-assembled material matrices against the replicated assembler before interface redistribution; requires material mode `1` |
@@ -278,6 +319,52 @@ Example:
 | `--bddcInterfaceAssemblyCheck` | `0` | Compare optimized directed mass blocks against legacy pair assembly before redistribution; requires assembly mode `1` or `2` |
 | `--bddcSplitInterfaces` | `0` | Separate coarse averages by connected electrical component; requires `--bddc 1 --sdc 0` |
 | `--bddcOperatorAudit` | `0` | Diagnose uncompressed BDDC operators, then exit without timestep solves; requires `--bddc 1 --sdc 0 --bddcCompression 0` |
+
+With `--bddcConditionEstimate 1`, each non-SDC timestep also prints
+`lambda_min`, `lambda_max`, `kappa_ritz` and `krylov_dim`. The existing accepted
+CG alpha/beta coefficients reconstruct the small Lanczos tridiagonal, whose
+extreme eigenvalues are computed by scaled Sturm bisection. This adds no
+operator applications or MPI reductions and leaves the solver/stopping rule
+unchanged. The Kaskade headers must include `BDDCSolver::lastCgStep()`.
+The estimate assumes a fixed SPD preconditioner and describes the spectrum
+of the symmetrically preconditioned operator on the sampled Krylov space
+after interior elimination. It is not the exact condition number of the full
+matrix `A`, nor the Euclidean singular-value condition number of `B*A`.
+It depends on the RHS, can miss eigenmodes, and is affected by floating-point
+loss of CG orthogonality. A fresh history is used per RHS; rejected updates
+are excluded. Fewer than two accepted iterations or invalid spectral data
+produce `kappa_ritz=unavailable` with an explanatory status.
+The option requires `--bddc 1 --sdc 0 --bddcUseCg 1 --bddcCompression 0
+--bddcOperatorAudit 0`. See the
+[Netlib Lanczos connection](https://www.netlib.org/linalg/html_templates/node118.html).
+
+The standalone estimator check needs only a C++20 compiler:
+
+```bash
+c++ -std=c++20 -O2 -Wall -Wextra -pedantic \
+  tests/test_bddc_condition.cpp -o /tmp/test_bddc_condition
+/tmp/test_bddc_condition
+```
+
+The existing Rizzo inputs are `../input_emi_mesh/rizzo_combi_domi.vtu` and
+the accompanying `_extracellular.txt`, `_intracellular.txt`, `_excited.txt`
+files: 20 extracellular tags, 20 intracellular tags and excitation tag 147.
+After recompiling the application in the MPI-enabled container:
+
+```bash
+# One-step smoke runs at 1 and 8 ranks; optimized assembly and Ritz estimates.
+bash tests/run_emi_rizzo.sh 1
+
+# Ten steps with VTK output, on eight ranks only.
+RANKS=8 VTK=1 bash tests/run_emi_rizzo.sh 10
+```
+
+The script retains the Pepe computational benchmark coefficients
+`sigma_i=3`, `sigma_e=20`, `C_m=1`, `R=0.1`, `dt=0.01`, the weak Robin
+boundary and the existing initial-excitation mechanism. It does not claim
+physical equivalence to an openCARP setup or introduce a units correction.
+Default VTK output is off for timing. Logs are written to
+`output/rizzo-bddc-optimized-cond-np<RANKS>-<STEPS>steps/run.log`.
 
 With `--bddcRelativeTolerance 1e-7`, the non-SDC BDDC solve stops when the
 assembled, unpreconditioned correction residual satisfies
