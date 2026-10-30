@@ -19,7 +19,7 @@ namespace EmiBddc
   {
     threadPool, meshLoading, materialAndRefinement, spacesAndInitialState,
     initialVtk, globalAssembly, partitionMetadata, materialAssembly,
-    interfaceDiscovery, interfaceAssembly, interfaceRedistribution,
+    materialExchange, interfaceDiscovery, interfaceAssembly, interfaceRedistribution,
     localMatrixExtraction, diagonalWeights, diagnostics, solver, vtkOutput,
     other, count
   };
@@ -103,6 +103,7 @@ namespace EmiBddc
       "  material tags and refinement", "  spaces, initial state and DOF support",
       "  initial VTK output", "  global system assembly",
       "  BDDC partition metadata", "  material subdomain assembly",
+      "  material matrix exchange",
       "  interface-neighbor discovery", "  interface mass-block assembly",
       "  interface mass redistribution", "  local matrix extraction",
       "  diagonal weights", "  diagnostics and interface splitting",

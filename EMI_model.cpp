@@ -52,6 +52,7 @@
 #include "EMI_bddc_operator_audit.hh"
 #include "EMI_phase_profile.hh"
 #include "EMI_interface_assembly.hh"
+#include "EMI_material_assembly.hh"
 #include "EMI_model.hh"
 
 using namespace Kaskade;
@@ -81,6 +82,8 @@ struct EmiOptions
   int bddcSplitInterfaces = 0;
   int bddcInterfaceAssembly = 0;
   int bddcInterfaceAssemblyCheck = 0;
+  int bddcMaterialAssembly = 0;
+  int bddcMaterialAssemblyCheck = 0;
   int profile = 0;
   int sdc = 0;
   int sdcCollocationPoints = 3;
@@ -891,6 +894,8 @@ int main(int argc, char* argv[])
     ("bddcAudit", options.bddcAudit, options.bddcAudit, "audit constant mode and coarse interface groups (requires bddc=1, sdc=0)")
     ("bddcOperatorAudit", options.bddcOperatorAudit, options.bddcOperatorAudit, "audit uncompressed BDDC weights and operators, then exit without timesteps")
     ("bddcSplitInterfaces", options.bddcSplitInterfaces, options.bddcSplitInterfaces, "split coarse interface averages by cell-connected electrical component (requires bddc=1, sdc=0)")
+    ("bddcMaterialAssembly", options.bddcMaterialAssembly, options.bddcMaterialAssembly, "material assembly: 0=replicated, 1=MPI owner assembly and sparse exchange")
+    ("bddcMaterialAssemblyCheck", options.bddcMaterialAssemblyCheck, options.bddcMaterialAssemblyCheck, "compare owner-assembled material matrices with replicated assembly")
     ("bddcInterfaceAssembly", options.bddcInterfaceAssembly, options.bddcInterfaceAssembly, "interface mass assembly: 0=legacy pairs, 1=shared traversal, 2=MPI owner shared traversal")
     ("bddcInterfaceAssemblyCheck", options.bddcInterfaceAssemblyCheck, options.bddcInterfaceAssemblyCheck, "compare shared directed blocks with legacy assembly before redistribution")
     ("profile", options.profile, options.profile, "print solver timings and end-to-end phase min/mean/max: 0=no, 1=yes")
@@ -979,6 +984,16 @@ int main(int argc, char* argv[])
     throw std::runtime_error("shared interface assembly requires --bddc 1 --sdc 0");
   if (options.bddcInterfaceAssemblyCheck && !options.bddcInterfaceAssembly)
     throw std::runtime_error("bddcInterfaceAssemblyCheck requires interface assembly mode 1 or 2");
+
+  if (options.bddcMaterialAssembly != 0 && options.bddcMaterialAssembly != 1)
+    throw std::runtime_error("bddcMaterialAssembly must be 0 or 1");
+  if (options.bddcMaterialAssemblyCheck != 0 && options.bddcMaterialAssemblyCheck != 1)
+    throw std::runtime_error("bddcMaterialAssemblyCheck must be 0 or 1");
+  if ((options.bddcMaterialAssembly || options.bddcMaterialAssemblyCheck) &&
+      (!options.bddc || options.sdc))
+    throw std::runtime_error("owner material assembly requires --bddc 1 --sdc 0");
+  if (options.bddcMaterialAssemblyCheck && !options.bddcMaterialAssembly)
+    throw std::runtime_error("bddcMaterialAssemblyCheck requires --bddcMaterialAssembly 1");
 
   OptionalMpiSession mpiSession(argc,argv,options.mpi != 0);
   bool const outputRankZero = EmiBddc::mpiRankZero(options.mpi != 0);
@@ -1256,22 +1271,72 @@ int main(int argc, char* argv[])
     if (outputRankZero)
       std::cout << "Assembling BDDC material subdomain matrices ("
                 << bddcData.tags.size() << " subdomains)\n";
-    for (size_t subdomain = 0; subdomain < bddcData.tags.size(); ++subdomain)
+    Kaskade::BDDC::MpiDomainLayout materialLayout;
+    materialLayout.configure(options.bddcMaterialAssembly && options.mpi != 0,
+                             bddcData.tags.size(),options.masterWorker != 0);
+    std::exception_ptr materialError;
+    try
     {
-      int const tag = bddcData.tags[subdomain];
-      if (outputRankZero)
-        std::cout << "  subdomain " << subdomain+1 << "/" << bddcData.tags.size()
-                  << " (tag " << tag << "): assembling..." << std::flush;
-      auto cellFilter = [&material,tag,zeroMaterial](auto const& cell)
+      for (size_t subdomain = 0; subdomain < bddcData.tags.size(); ++subdomain)
       {
-        return material.value(cell,zeroMaterial) == tag;
-      };
-      assembler.template assemble<AssemblyDetail::TakeAllBlocks>(
-        SemiLinearization(equation,u,u,duState),cellFilter,Assembler::MATRIX,
-        options.assemblyThreads);
-      localContributions[subdomain] = assembler.template get<Matrix>(false);
+        if (options.bddcMaterialAssembly && !materialLayout.owns(static_cast<int>(subdomain)))
+          continue;
+        int const tag = bddcData.tags[subdomain];
+        if (outputRankZero)
+          std::cout << "  subdomain " << subdomain+1 << "/" << bddcData.tags.size()
+                    << " (tag " << tag << "): assembling..." << std::flush;
+        auto cellFilter = [&material,tag,zeroMaterial](auto const& cell)
+        {
+          return material.value(cell,zeroMaterial) == tag;
+        };
+        assembler.template assemble<AssemblyDetail::TakeAllBlocks>(
+          SemiLinearization(equation,u,u,duState),cellFilter,Assembler::MATRIX,
+          options.assemblyThreads);
+        localContributions[subdomain] = assembler.template get<Matrix>(false);
+        if (outputRankZero)
+          std::cout << " done\n" << std::flush;
+      }
+    }
+    catch (...) { materialError = std::current_exception(); }
+    EmiBddc::checkInterfaceAssemblyError(materialError,materialLayout,"Material assembly");
+    if (options.bddcMaterialAssembly)
+    {
+      phaseProfile.next(Phase::materialExchange);
+      EmiBddc::replicateMaterialMatrices(localContributions,lhs,materialLayout);
       if (outputRankZero)
-        std::cout << " done\n" << std::flush;
+        std::cout << "BDDC material assembly: source owners, sparse matrix exchange\n";
+    }
+    if (options.bddcMaterialAssemblyCheck)
+    {
+      phaseProfile.next(Phase::diagnostics);
+      EmiBddc::InterfaceBlockDifference difference;
+      std::exception_ptr auditError;
+      try
+      {
+        for (size_t subdomain = 0; subdomain < bddcData.tags.size(); ++subdomain)
+        {
+          int const tag = bddcData.tags[subdomain];
+          auto filter = [&material,tag,zeroMaterial](auto const& cell)
+          {
+            return material.value(cell,zeroMaterial) == tag;
+          };
+          assembler.template assemble<AssemblyDetail::TakeAllBlocks>(
+            SemiLinearization(equation,u,u,duState),filter,Assembler::MATRIX,
+            options.assemblyThreads);
+          Matrix const reference = assembler.template get<Matrix>(false);
+          EmiBddc::compareMaterialMatrices(localContributions[subdomain],reference,difference);
+        }
+        if (!difference.acceptable())
+          throw std::runtime_error("Owner material matrices differ from legacy assembly");
+      }
+      catch (...) { auditError = std::current_exception(); }
+      if (outputRankZero)
+        std::cout << "BDDC material matrix equivalence: maxAbsDifference=" << difference.maxAbs
+                  << " relativeL2=" << std::sqrt(difference.squaredError/
+                       std::max(difference.squaredReference,std::numeric_limits<double>::min()))
+                  << " tolerance=" << 1e-14+1e-11*difference.maxReference
+                  << " status=" << (auditError ? "failed" : "passed") << "\n";
+      EmiBddc::checkInterfaceAssemblyError(auditError,materialLayout,"Material matrix audit");
     }
 
     // The legacy EMI decomposition adds half of each directed membrane-mass

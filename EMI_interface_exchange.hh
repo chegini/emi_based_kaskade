@@ -4,6 +4,7 @@
 #include <exception>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #ifdef KASKADE_HAVE_MPI
@@ -18,7 +19,8 @@ namespace EmiBddc
   // All ranks must reach the same decision before entering payload exchange.
   // A failure on another rank must not leave a peer waiting in Allgatherv.
   inline void checkInterfaceAssemblyError(std::exception_ptr error,
-                                          Kaskade::BDDC::MpiDomainLayout const& layout)
+                                          Kaskade::BDDC::MpiDomainLayout const& layout,
+                                          char const* context = "Interface assembly")
   {
     int failed = error ? 1 : 0;
 #ifdef KASKADE_HAVE_MPI
@@ -34,7 +36,7 @@ namespace EmiBddc
     if (error)
       std::rethrow_exception(error);
     if (failed)
-      throw std::runtime_error("Interface assembly failed on another MPI rank");
+      throw std::runtime_error(std::string(context) + " failed on another MPI rank");
   }
 
   // Each directed face is integrated only by its source material's owner.

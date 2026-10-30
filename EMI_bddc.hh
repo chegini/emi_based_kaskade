@@ -2218,7 +2218,7 @@ State runBddcSdc(Functional& F,
           if (relativeStopping)
             std::cout << " target=" << options.bddcRelativeTolerance
                       << " status=" << (trueResult.converged() ? "converged" : "not-converged");
-          std::cout << "\n";
+          std::cout << " iterations=" << solveCalls << "\n";
         }
       }
       if (relativeStopping && !trueResult.converged())
