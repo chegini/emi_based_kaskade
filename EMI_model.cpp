@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -41,6 +42,7 @@
 #include "timestepping/semieuler.hh"
 #include "timestepping/sdc.hh"
 #include "utilities/kaskopt.hh"
+#include "utilities/threading.hh"
 #include "utilities/timing.hh"
 
 #include "fem/diffops/membraneModels.hh"
@@ -48,6 +50,7 @@
 #include "EMI_bddc.hh"
 #include "EMI_bddc_audit.hh"
 #include "EMI_bddc_operator_audit.hh"
+#include "EMI_phase_profile.hh"
 #include "EMI_model.hh"
 
 using namespace Kaskade;
@@ -885,7 +888,7 @@ int main(int argc, char* argv[])
     ("bddcAudit", options.bddcAudit, options.bddcAudit, "audit constant mode and coarse interface groups (requires bddc=1, sdc=0)")
     ("bddcOperatorAudit", options.bddcOperatorAudit, options.bddcOperatorAudit, "audit uncompressed BDDC weights and operators, then exit without timesteps")
     ("bddcSplitInterfaces", options.bddcSplitInterfaces, options.bddcSplitInterfaces, "split coarse interface averages by cell-connected electrical component (requires bddc=1, sdc=0)")
-    ("profile", options.profile, options.profile, "print cumulative BDDC phase wall times: 0=no, 1=yes")
+    ("profile", options.profile, options.profile, "print solver timings and end-to-end phase min/mean/max: 0=no, 1=yes")
     ("sdc", options.sdc, options.sdc, "use SDC time integrator: 0=no, 1=yes")
     ("sdcCollocationPoints", options.sdcCollocationPoints, options.sdcCollocationPoints, "target number of SDC collocation points")
     ("sdcStartCollocationPoints", options.sdcStartCollocationPoints, options.sdcStartCollocationPoints, "initial number of SDC collocation points")
@@ -922,7 +925,7 @@ int main(int argc, char* argv[])
     ("bddcUseCg", options.bddcUseCg, options.bddcUseCg, "use CG in BDDC coarse solve path: 0=no, 1=yes")
     ("masterWorker", options.masterWorker, options.masterWorker, "dedicated rank-0 coarse master: 0=existing path, 1=master-worker")
     ("mpi", options.mpi, options.mpi, "initialize MPI and run a startup communication check: 0=no, 1=yes")
-    ("nThreads", options.assemblyThreads, options.assemblyThreads, "number of assembler and BDDC setup threads")
+    ("nThreads", options.assemblyThreads, options.assemblyThreads, "assembly/setup tasks and Kaskade global worker limit per rank; 1=sequential, 0=automatic")
     ("penalty", options.penalty, options.penalty, "boundary penalty")
     ("sigma_i", options.sigmaI, options.sigmaI, "intracellular conductivity")
     ("sigma_e", options.sigmaE, options.sigmaE, "extracellular conductivity")
@@ -934,6 +937,8 @@ int main(int argc, char* argv[])
     throw std::runtime_error("dt must be positive");
   if (options.finalTime < 0.0)
     throw std::runtime_error("finalTime must be nonnegative");
+  if (options.assemblyThreads < 0)
+    throw std::runtime_error("nThreads must be nonnegative (0 means automatic)");
   if (options.minimumSdcSweeps < 1)
     throw std::runtime_error("minimumSdcSweeps must be at least 1");
   if (options.maximumSdcSweeps < options.minimumSdcSweeps)
@@ -998,11 +1003,38 @@ int main(int argc, char* argv[])
   using LeafView = Grid::LeafGridView;
 
   boost::timer::cpu_timer totalTimer;
+  EmiBddc::PhaseProfile phaseProfile(options.profile != 0,options.mpi != 0);
+  using Phase = EmiBddc::EmiPhase;
+  phaseProfile.next(Phase::threadPool);
 
+  // The first pool access fixes its global worker limit for the entire run.
+  // Configure it before VTK/grid/FE allocations can create the default pool.
+  // Keep initialization inside the timed region for honest startup comparisons.
+  int const globalWorkerLimit = options.assemblyThreads > 0
+                              ? options.assemblyThreads : std::numeric_limits<int>::max();
+  auto& threadPool = NumaThreadPool::instance(globalWorkerLimit);
+  if (options.assemblyThreads == 1 && !threadPool.isSequential())
+    throw std::runtime_error("Kaskade thread pool was initialized before nThreads=1 took effect");
+  if (outputRankZero)
+  {
+    auto environment = [](char const* name)
+    {
+      char const* value = std::getenv(name);
+      return value ? value : "unset";
+    };
+    std::cout << "Kaskade task execution per rank: nThreads=" << options.assemblyThreads
+              << ", sequential=" << (threadPool.isSequential() ? "yes" : "no") << "\n"
+              << "BLAS environment: OPENBLAS_NUM_THREADS="
+              << environment("OPENBLAS_NUM_THREADS")
+              << ", OMP_NUM_THREADS=" << environment("OMP_NUM_THREADS") << "\n";
+  }
+
+  phaseProfile.next(Phase::meshLoading);
   VTKReader vtk(options.input);
   GridManager<Grid> gridManager(vtk.createGrid<Grid>());
   gridManager.enforceConcurrentReads(true);
 
+  phaseProfile.next(Phase::materialAndRefinement);
   using MaterialSpace = FEFunctionSpace<DiscontinuousLagrangeMapper<double,LeafView>>;
   using Material = MaterialSpace::Element<1>::type;
   MaterialSpace materialSpace(gridManager,gridManager.grid().leafGridView(),0);
@@ -1012,6 +1044,7 @@ int main(int argc, char* argv[])
   // registered P0 fields to all refined child cells.
   gridManager.globalRefine(options.refinements);
 
+  phaseProfile.next(Phase::spacesAndInitialState);
   Dune::FieldVector<double,dim> zero(0);
   std::map<int,Dune::FieldVector<double,1>> domainMap;
   for (int tag : extraTags)
@@ -1073,8 +1106,10 @@ int main(int argc, char* argv[])
     std::cout << "dofs: " << nDofs << "\n";
   }
 
+  phaseProfile.next(Phase::initialVtk);
   if (writeVtkOnThisRank(options.writeVTK))
     writeState(u,uAll,options.order,options.outputDir + "/emiInitial");
+  phaseProfile.next(Phase::other);
 
   SemiImplicitEulerStep<Functional> equation(&F,options.dt);
   equation.setTau(options.dt);
@@ -1099,6 +1134,7 @@ int main(int argc, char* argv[])
     if (outputRankZero)
       std::cout << "time integrator: SDC with BDDC linear solves\n";
 
+    phaseProfile.next(Phase::globalAssembly);
     equation.setTau(0.0);
     F.Mass_stiff(1);
     assembler.assemble(SemiLinearization(equation,u,u,duState),
@@ -1113,9 +1149,11 @@ int main(int argc, char* argv[])
                        options.assemblyThreads);
     Matrix stiffness = assembler.template get<Matrix>(false);
 
+    phaseProfile.next(Phase::diagnostics);
     printMatrixDiagnostics(mass,"sdc mass");
     printMatrixDiagnostics(stiffness,"sdc stiffness");
 
+    phaseProfile.next(Phase::partitionMetadata);
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
       gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads,options.mpi != 0);
     // Add only neighboring-cell DOFs that participate in a nonzero cross-tag
@@ -1127,6 +1165,7 @@ int main(int argc, char* argv[])
       bddcData,mass,"SDC mass",options.mpi != 0);
     EmiBddc::printUncoveredMatrixCouplings(
       bddcData,stiffness,"SDC stiffness",options.mpi != 0);
+    phaseProfile.next(Phase::solver);
     if (options.bddcCompression)
     {
       using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint32_t,std::uint8_t>;
@@ -1134,11 +1173,13 @@ int main(int argc, char* argv[])
     }
     else
       u = EmiBddc::runBddcSdc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,mass,stiffness,nDofs,steps,options,uSpace.indexSet());
+    phaseProfile.next(Phase::vtkOutput);
     if (writeVtkOnThisRank(options.writeVTK))
       writeState(u,uAll,options.order,
                  options.outputDir + (options.bddcCompression
                                         ? "/emiSDCBDDCLastCompression"
                                         : "/emiSDCBDDCLast"));
+    phaseProfile.printGlobal();
     printTotalCpuTime(totalTimer,options.mpi != 0);
     return 0;
   }
@@ -1147,9 +1188,12 @@ int main(int argc, char* argv[])
   {
     if (outputRankZero)
       std::cout << "time integrator: SDC\n";
+    phaseProfile.next(Phase::solver);
     u = runFullSdc(F,spaces,u,uAll,nDofs,dofCells,uSpace.indexSet(),steps,options);
+    phaseProfile.next(Phase::vtkOutput);
     if (writeVtkOnThisRank(options.writeVTK))
       writeState(u,uAll,options.order,options.outputDir + "/emiSDCLast");
+    phaseProfile.printGlobal();
     printTotalCpuTime(totalTimer,options.mpi != 0);
     return 0;
   }
@@ -1157,12 +1201,14 @@ int main(int argc, char* argv[])
   // Assemble the combined implicit-Euler matrix only for solver paths that
   // use it directly. SDC assembles its mass and spatial operators separately.
   // The second assemble argument is a flag mask, not a thread count.
+  phaseProfile.next(Phase::globalAssembly);
   assembler.assemble(SemiLinearization(equation,u,u,duState),
                      Assembler::MATRIX|Assembler::RHS,
                      options.assemblyThreads);
   Matrix lhs = assembler.template get<Matrix>(false);
   Vector assembledSystemRhs(nDofs);
   assembler.rhs().write(assembledSystemRhs.begin());
+  phaseProfile.next(Phase::diagnostics);
   if (options.bddcAudit)
     EmiBddc::auditConstantMode(lhs,assembledSystemRhs,options.mpi != 0);
   if (options.bddcDumpLocalData && outputRankZero)
@@ -1177,6 +1223,7 @@ int main(int argc, char* argv[])
   {
     if (outputRankZero)
       std::cout << "time integrator: semi-implicit Euler with BDDC\n";
+    phaseProfile.next(Phase::partitionMetadata);
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
       gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads,options.mpi != 0);
     EmiBddc::expandSubdomainsToLegacyInterfaceDofs(
@@ -1186,6 +1233,7 @@ int main(int argc, char* argv[])
 
     // Assemble each cell's full EMI Jacobian contribution into its material
     // subdomain so the embedded local operators add up to the global matrix.
+    phaseProfile.next(Phase::materialAssembly);
     F.Mass_stiff(10);
     F.setMassSubmatrix(false);
     std::vector<Matrix> localContributions(bddcData.tags.size());
@@ -1216,6 +1264,7 @@ int main(int argc, char* argv[])
     // blocks give the neighbor-side interface DOFs nonzero local rows.
     // Without them the legacy-sized local spaces contain zero rows and the
     // local direct factorizations are singular.
+    phaseProfile.next(Phase::interfaceDiscovery);
     F.Mass_stiff(1);
     F.setMassSubmatrix(true);
     F.setRowColSubdomain(0,0);
@@ -1240,6 +1289,7 @@ int main(int argc, char* argv[])
     }
     if (outputRankZero)
       std::cout << "Redistributing interface mass blocks across material neighbors...\n";
+    phaseProfile.next(Phase::interfaceAssembly);
     for (auto const& [tag,neighbors] : neighboringTags)
       for (int neighborTag : neighbors)
       {
@@ -1253,10 +1303,12 @@ int main(int argc, char* argv[])
           {
             return material.value(cell,zeroForTags) == rowTag;
           };
+          phaseProfile.next(Phase::interfaceAssembly);
           assembler.template assemble<AssemblyDetail::TakeAllBlocks>(
             SemiLinearization(equation,u,u,duState),rowCellFilter,Assembler::MATRIX,
             options.assemblyThreads);
           Matrix const massBlock = assembler.template get<Matrix>(false);
+          phaseProfile.next(Phase::interfaceRedistribution);
           size_t const sourceSubdomain = tagToSubdomain.at(rowTag);
           size_t const destinationSubdomain = tagToSubdomain.at(colTag);
           for (auto row = massBlock.begin(); row != massBlock.end(); ++row)
@@ -1279,13 +1331,16 @@ int main(int argc, char* argv[])
     F.setRowColSubdomain(0,0);
     equation.setTau(options.dt);
 
+    phaseProfile.next(Phase::localMatrixExtraction);
     EmiBddc::setLocalMatricesFromContributions(bddcData,localContributions,
                                                options.mpi != 0);
     // The old EMI BDDC path partitions residuals and corrections by each
     // local diagonal's share of the assembled global diagonal. Recompute
     // those weights after material-local operators have been finalized.
+    phaseProfile.next(Phase::diagonalWeights);
     EmiBddc::buildDiagonalWeights(bddcData,bddcData.localMatrices,lhs,
                                   options.mpi != 0);
+    phaseProfile.next(Phase::diagnostics);
     if (options.bddcSplitInterfaces)
       EmiBddc::splitInterfaceGroups(
         bddcData,gridManager.grid(),uSpace,material,extraTags,options.mpi != 0);
@@ -1295,7 +1350,9 @@ int main(int argc, char* argv[])
         options.bddcInterfaceTypes,options.outputDir + "/bddc_audit",options.mpi != 0);
     if (options.bddcOperatorAudit)
     {
+      phaseProfile.next(Phase::solver);
       EmiBddc::auditBddcOperator(bddcData,lhs,options);
+      phaseProfile.printGlobal();
       printTotalCpuTime(totalTimer,options.mpi != 0);
       return 0;
     }
@@ -1308,6 +1365,7 @@ int main(int argc, char* argv[])
     if (options.diagnostics)
       EmiBddc::printLocalMatrixReconstruction(bddcData,bddcData.localMatrices,lhs,
                                               nDofs,options.mpi != 0);
+    phaseProfile.next(Phase::solver);
     if (options.bddcCompression)
     {
       using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint32_t,std::uint8_t>;
@@ -1315,11 +1373,13 @@ int main(int argc, char* argv[])
     }
     else
       u = EmiBddc::runBddc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,lhs,nDofs,steps,options);
+    phaseProfile.next(Phase::vtkOutput);
     if (writeVtkOnThisRank(options.writeVTK))
       writeState(u,uAll,options.order,
                  options.outputDir + (options.bddcCompression
                                         ? "/emiBDDCLastCompression"
                                         : "/emiBDDCLast"));
+    phaseProfile.printGlobal();
     printTotalCpuTime(totalTimer,options.mpi != 0);
     return 0;
   }
@@ -1329,6 +1389,7 @@ int main(int argc, char* argv[])
 
   // This path uses the same lhs for every timestep. Keep its factorization
   // for successive RHS solves; each step still starts with a zero correction.
+  phaseProfile.next(Phase::solver);
   std::optional<DirectSolver<Vector,Vector>> directSolver;
   if (options.direct && steps > 0)
   {
@@ -1365,12 +1426,16 @@ int main(int argc, char* argv[])
 
     component<0>(u) += component<0>(stepState);
 
+    phaseProfile.next(Phase::vtkOutput);
     if (writeVtkOnThisRank(options.writeVTK))
       writeState(u,uAll,options.order,options.outputDir + "/emiStep" + paddedString(step+1,3));
+    phaseProfile.next(Phase::solver);
   }
 
+  phaseProfile.next(Phase::vtkOutput);
   if (writeVtkOnThisRank(options.writeVTK))
     writeState(u,uAll,options.order,options.outputDir + "/emiLast");
 
+  phaseProfile.printGlobal();
   printTotalCpuTime(totalTimer,options.mpi != 0);
 }
