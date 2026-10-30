@@ -127,7 +127,7 @@ namespace EmiBddc
 
     // Reduce communication counters across MPI ranks before printing. The
     // shared codebook is common metadata, so report its maximum size once.
-    void printGlobal(std::string const& label, bool mpiEnabled) const
+    void printGlobal(std::string const& label, bool mpiEnabled, bool show = true) const
     {
 #ifdef KASKADE_HAVE_MPI
       int initialized = 0;
@@ -176,13 +176,15 @@ namespace EmiBddc
         global.encodeCount = globalCounts[0];
         global.decodeCount = globalCounts[1];
         global.codebookBits = globalCodebook;
-        global.print(label);
+        if (show)
+          global.print(label);
         return;
       }
 #else
       (void)mpiEnabled;
 #endif
-      print(label);
+      if (show)
+        print(label);
     }
   };
 
@@ -264,7 +266,7 @@ namespace EmiBddc
                                         Material const& material,
                                         size_t nDofs,
                                         int nTasks,
-                                        bool mpiEnabled)
+                                        bool mpiEnabled, bool detailedOutput = true)
   {
     using Kaskade::BDDC::LocalDof;
 
@@ -347,7 +349,7 @@ namespace EmiBddc
       for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
         buildSubdomainData(subdomain);
 
-    if (mpiRankZero(mpiEnabled))
+    if (detailedOutput && mpiRankZero(mpiEnabled))
       std::cout << "BDDC subdomains: " << data.tags.size()
                 << ", shared dofs: " << data.sharedDofs.size() << "\n";
     return data;
@@ -363,7 +365,7 @@ namespace EmiBddc
                                               Grid const& grid,
                                               Space& space,
                                               Material const& material,
-                                              bool mpiEnabled)
+                                              bool mpiEnabled, bool detailedOutput = true)
   {
     using LocalDof = Kaskade::BDDC::LocalDof;
     Dune::FieldVector<double,Grid::dimension> zero(0.0);
@@ -467,7 +469,7 @@ namespace EmiBddc
       throw std::runtime_error(
         "BDDC interface expansion found multiple subdomains but no shared dofs.");
 
-    if (mpiRankZero(mpiEnabled))
+    if (detailedOutput && mpiRankZero(mpiEnabled))
     {
       size_t totalDofs = 0;
       for (auto const& localDofs : data.localDofs)
@@ -578,7 +580,7 @@ namespace EmiBddc
                                             Material const& material,
                                             Matrix const& globalMatrix,
                                             int nTasks,
-                                            bool mpiEnabled)
+                                            bool mpiEnabled, bool detailedOutput = true)
   {
     using LocalDof = Kaskade::BDDC::LocalDof;
     Dune::FieldVector<double,Grid::dimension> zero(0.0);
@@ -670,7 +672,7 @@ namespace EmiBddc
       for (size_t subdomain = 0; subdomain < data.localDofs.size(); ++subdomain)
         buildWeights(subdomain);
 
-    if (mpiRankZero(mpiEnabled))
+    if (detailedOutput && mpiRankZero(mpiEnabled))
     {
       size_t totalDofs = 0;
       for (auto const& localDofs : data.localDofs)
@@ -684,7 +686,7 @@ namespace EmiBddc
   void buildDiagonalWeights(BddcData<Matrix,Vector>& data,
                             std::vector<Matrix> const& localMatrices,
                             Matrix const& globalMatrix,
-                            bool mpiEnabled)
+                            bool mpiEnabled, bool detailedOutput = true)
   {
     bool const outputRankZero = mpiRankZero(mpiEnabled);
     for (size_t subdomain = 0; subdomain < localMatrices.size(); ++subdomain)
@@ -696,7 +698,7 @@ namespace EmiBddc
         if (std::abs(globalDiagonal) > 1e-14)
           data.weights[subdomain][local][0] = localDiagonal/globalDiagonal;
       }
-    if (outputRankZero)
+    if (detailedOutput && outputRankZero)
       std::cout << "BDDC weights: diagonal-based local/global contributions\n";
   }
 
@@ -726,7 +728,7 @@ namespace EmiBddc
   template <class Matrix, class Vector>
   void setLocalMatricesFromContributions(BddcData<Matrix,Vector>& data,
                                          std::vector<Matrix> const& contributions,
-                                         bool mpiEnabled)
+                                         bool mpiEnabled, bool detailedOutput = true)
   {
     using Kaskade::BDDC::LocalDof;
     if (contributions.size() != data.tags.size())
@@ -801,7 +803,7 @@ namespace EmiBddc
       data.weights[subdomain] = std::move(weight);
     }
 
-    if (mpiRankZero(mpiEnabled))
+    if (detailedOutput && mpiRankZero(mpiEnabled))
       std::cout << "BDDC legacy-interface local spaces: total local dofs="
                 << totalLocalDofs << ", shared global dofs="
                 << data.sharedDofs.size() << "\n";
@@ -1110,7 +1112,7 @@ namespace EmiBddc
   void printUncoveredMatrixCouplings(BddcData<Matrix,Vector> const& data,
                                      Matrix const& globalMatrix,
                                      char const* label,
-                                     bool mpiEnabled)
+                                     bool mpiEnabled, bool detailedOutput = true)
   {
     if (!mpiRankZero(mpiEnabled))
       return;
@@ -1165,6 +1167,9 @@ namespace EmiBddc
       }
     }
 
+    // Always report missing couplings, even in quiet mode.
+    if (!detailedOutput && uncovered == 0)
+      return;
     std::cout << "BDDC coupling coverage (" << label << "): "
               << "nonzeros=" << nonzeros
               << " covered=" << covered
@@ -1581,6 +1586,7 @@ void computeBddcSdcResiduals(Functional& F,
 
     std::vector<int> solverActiveIds(activeIds);
     bool useCgSolver = options.bddcUseCg != 0;
+    // Explicit iteration verbosity also applies in quiet mode.
     bool verbose = options.bddcVerbose != 0;
 
     for (int i = 1; i <= intervals; ++i)
@@ -1685,7 +1691,7 @@ void computeBddcSdcResiduals(Functional& F,
           ++profile->bddcSolveCalls;
         if (solver.stopped())
         {
-          if (verbose)
+          if (verbose || (options.quiet && mpiRankZero(options.mpi != 0)))
             std::cout << "    BDDC stopped before applying the current correction: "
                       << (solver.stagnated() ? "stagnation" : "breakdown") << "\n";
           break;
@@ -1888,10 +1894,10 @@ State runBddcSdc(Functional& F,
       F.time(stepEnd);
     }
 
-    if (options.profile)
+    if (options.profile && !options.quiet)
       profile.print("SDC + BDDC");
     if (options.bddcCompressionReport)
-      compressionReport.printGlobal("SDC + BDDC",options.mpi != 0);
+      compressionReport.printGlobal("SDC + BDDC",options.mpi != 0,!options.quiet);
     return state;
   }
 
@@ -1916,7 +1922,7 @@ State runBddcSdc(Functional& F,
                                                               options.bddcInterfaceTypes,
                                                               data.interfaceComponents);
     auto const interfaceCount = interfaceAverages.interfaceCount();
-    if (mpiRankZero(options.mpi != 0))
+    if (!options.quiet && mpiRankZero(options.mpi != 0))
       std::cout << "BDDC coarse interfaces: corners=" << interfaceCount[0]
                 << ", edges=" << interfaceCount[1]
                 << ", faces=" << interfaceCount[2] << "\n";
@@ -1996,13 +2002,14 @@ State runBddcSdc(Functional& F,
     if (options.profile)
       profile.transferSetup += ProfileTimes::seconds(transferStart);
 
-    if (mpiRankZero(options.mpi != 0))
+    if (!options.quiet && mpiRankZero(options.mpi != 0))
       std::cout << "BDDC local and coarse setup reused for " << steps << " time steps\n";
 
     // The fixed coarse operator is assembled and factored once as well.
     std::vector<int> activeIds(subdomains.size());
     std::iota(activeIds.begin(),activeIds.end(),0);
     bool useCgSolver = options.bddcUseCg != 0;
+    // Explicit iteration verbosity also applies in quiet mode.
     bool verbose = options.bddcVerbose != 0;
 
     auto const solverStart = options.profile
@@ -2077,7 +2084,7 @@ State runBddcSdc(Functional& F,
       std::cout << "BDDC stopping rule: ||b-A*du||_2 / ||b||_2 <= "
                 << options.bddcRelativeTolerance
                 << " (zero RHS: absolute residual; legacy internal tolerance is inactive)\n";
-    if (options.bddcConditionEstimate && rankZero)
+    if (options.bddcConditionEstimate && rankZero && !options.quiet)
       std::cout << "BDDC condition diagnostic: RHS-dependent CG/Lanczos Ritz estimate "
                 << "after interior elimination; fixed SPD preconditioner assumed, "
                 << "not the exact condition number of A\n";
@@ -2212,7 +2219,7 @@ State runBddcSdc(Functional& F,
           recordCgStep();
           if (solver.stopped())
           {
-            if (verbose)
+            if (verbose || (options.quiet && rankZero))
               std::cout << "  BDDC stopped before applying the current correction: "
                         << (solver.stagnated() ? "stagnation" : "breakdown") << "\n";
             break;
@@ -2230,27 +2237,55 @@ State runBddcSdc(Functional& F,
                                                         : measureCurrentResidual();
         if (rankZero)
         {
-          std::cout << "BDDC global residual step " << step+1
+          if (options.quiet)
+            std::cout << "BDDC step " << step+1 << "/" << steps
+                      << ": iterations=" << solveCalls << " rel=" << measured.relative();
+          else
+            std::cout << "BDDC global residual step " << step+1
                     << ": abs=" << measured.absolute << " rel=" << measured.relative();
-          if (relativeStopping)
+          if (relativeStopping && options.quiet)
+            std::cout << " status=" << (trueResult.converged() ? "converged" : "not-converged");
+          if (relativeStopping && !options.quiet)
             std::cout << " target=" << options.bddcRelativeTolerance
                       << " status=" << (trueResult.converged() ? "converged" : "not-converged");
-          std::cout << " iterations=" << solveCalls << "\n";
+          if (!options.quiet)
+            std::cout << " iterations=" << solveCalls;
+          if (!options.quiet || !options.bddcConditionEstimate)
+            std::cout << "\n";
         }
+      }
+      if (options.quiet && rankZero && !relativeStopping && !computeDiagnostics)
+      {
+        std::cout << "BDDC step " << step+1 << "/" << steps
+                  << ": iterations=" << solveCalls << " internal_norm=" << residual;
+        if (!options.bddcConditionEstimate)
+          std::cout << "\n";
       }
       if (options.bddcConditionEstimate && rankZero)
       {
         auto const estimate = conditionEstimator.estimate();
-        std::cout << "BDDC condition estimate step " << step+1;
-        if (std::string(estimate.status) == "estimated")
-          std::cout << ": lambda_min=" << estimate.lambdaMin
-                    << " lambda_max=" << estimate.lambdaMax
-                    << " kappa_ritz=" << estimate.condition;
+        if (options.quiet)
+        {
+          if (std::string(estimate.status) == "estimated")
+            std::cout << " condition_estimate=" << estimate.condition << "\n";
+          else
+            std::cout << " condition_estimate=unavailable(" << estimate.status << ")\n";
+        }
         else
-          std::cout << ": kappa_ritz=unavailable";
-        std::cout << " krylov_dim=" << estimate.dimension
-                  << " status=" << estimate.status << "\n";
+        {
+          std::cout << "BDDC condition estimate step " << step+1;
+          if (std::string(estimate.status) == "estimated")
+            std::cout << ": lambda_min=" << estimate.lambdaMin
+                      << " lambda_max=" << estimate.lambdaMax
+                      << " condition_estimate=" << estimate.condition;
+          else
+            std::cout << ": condition_estimate=unavailable";
+          std::cout << " krylov_dim=" << estimate.dimension
+                    << " status=" << estimate.status << "\n";
+        }
       }
+      if (options.quiet && rankZero)
+        std::cout << std::flush;
       if (relativeStopping && !trueResult.converged())
       {
         char const* reason = trueResult.status == TrueResidualStatus::iterationLimit
@@ -2269,7 +2304,7 @@ State runBddcSdc(Functional& F,
         boost::fusion::at_c<0>(stepState.data).coefficients()[i] = stepVector[i];
 
       Kaskade::component<0>(state) += Kaskade::component<0>(stepState);
-      if (verbose && rankZero)
+      if (verbose && rankZero && !options.quiet)
       {
         std::cout << "BDDC step " << step+1 << "/" << steps
                   << ": iterations=" << solveCalls;
@@ -2289,10 +2324,10 @@ State runBddcSdc(Functional& F,
         compressionReport.addUncompressed(solver.traffic());
     }
 
-    if (options.profile)
+    if (options.profile && !options.quiet)
       profile.print("BDDC");
     if (options.bddcCompressionReport)
-      compressionReport.printGlobal("BDDC",options.mpi != 0);
+      compressionReport.printGlobal("BDDC",options.mpi != 0,!options.quiet);
     return state;
   }
 }

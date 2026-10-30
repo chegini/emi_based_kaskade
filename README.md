@@ -209,6 +209,70 @@ list. The defaults below are defined in `EMI_model.cpp`.
 | `--dt` | `0.01` | Time-step size |
 | `--maximumNumberOfTimeSteps` | `0` | Maximum number of steps; `0` uses `finalTime/dt` |
 
+### Optional compact output
+
+Add `--quiet 1` to a non-SDC BDDC or direct run for compact console output.
+The default, `--quiet 0`, retains the existing output. Quiet mode hides routine
+assembly messages, timing/compression tables and MUMPS informational output.
+`--bddcVerbose 1` enables the BDDC iteration table even in quiet mode;
+`--bddcVerbose 0` shows only the per-step summaries. The Rizzo BDDC runner enables
+`--bddcVerbose 1`. During BDDC setup, rank zero lists every local submatrix
+with its material tag and dimensions once material assembly/exchange and local
+matrix extraction have completed, including submatrices assembled by other MPI
+ranks. The true-residual stopping rule is printed once on rank zero before the
+first solve, including in quiet mode. It retains mesh information, per-step progress, failures,
+explicitly requested diagnostics/audits, and final wall time. Solver settings,
+stopping checks, MPI reductions and VTK output are unchanged.
+
+With `--bddcConditionEstimate 1`, every BDDC step includes `condition_estimate`:
+
+```text
+BDDC step 1/10: iterations=44 rel=6.66935e-08 status=converged condition_estimate=39.6139
+```
+
+This is the RHS-dependent CG/Lanczos estimate for the preconditioned operator
+after interior elimination, not the exact condition number of the full matrix.
+An unavailable estimate is reported explicitly. Without true-residual stopping
+or diagnostics, quiet mode labels the existing internal norm as `internal_norm`.
+Direct solvers have no iteration count; MUMPS SPD prints the checked relative
+residual for every step. Quiet mode does not add a condition estimator to direct
+solves or enable BDDC condition estimation automatically.
+
+After recompiling in the container, the existing Rizzo runners accept `QUIET=1`:
+
+```bash
+# Optimized BDDC, ten steps, eight ranks, with per-step condition estimates.
+QUIET=1 RANKS=8 VTK=1 bash tests/run_emi_rizzo.sh 10
+
+# MUMPS SPD direct reference, ten steps, one rank.
+QUIET=1 bash tests/run_emi_rizzo_direct.sh
+```
+
+For matching one-step BDDC and direct solves on the Pepe mesh:
+
+```bash
+# Optimized BDDC on eight ranks, with VTK output for the comparison.
+QUIET=1 RANKS=8 VTK=1 bash tests/run_emi_pepe.sh 1
+
+# MUMPS SPD direct reference on one rank, followed by the error comparison.
+QUIET=1 bash tests/run_emi_pepe_direct.sh 1
+```
+
+Both Pepe runners accept a positive step count as their argument; use `10` in
+both commands for ten steps. Without an argument, the BDDC runner defaults to
+one step and the direct runner retains its previous ten-step default. The
+direct runner always uses one MPI rank and computes `finalTime=0.01*steps`.
+It saves the MUMPS SPD result under `output/pepe-direct-mumps-spd-<STEPS>steps`
+and compares it with the matching optimized BDDC solution
+`output/pepe-bddc-optimized-cond-np8-<STEPS>steps/emiBDDCLast.vtu` when present.
+Set `BDDC_REFERENCE=/path/to/emiBDDCLast.vtu` to compare against a different
+matching Pepe run. A missing reference is reported explicitly; the comparison
+report is saved as `compare-bddc.log` in the direct output directory.
+
+Omit `QUIET=1` for the original output. The direct runner still prints its final
+VTU comparison when a BDDC reference file exists; its verbose memory/timing
+report is disabled in quiet mode. Both runners keep their existing log paths.
+
 ### PCG and direct linear solvers
 
 The default EMI linear solver is PCG. Set `--direct 1` to use the direct
@@ -309,7 +373,7 @@ Example:
 | `--bddcTolerance` | `1e-8` | Legacy internal search-direction energy-norm tolerance |
 | `--bddcRelativeTolerance` | `0` | True global relative residual target for non-SDC BDDC; `0` keeps the legacy stopping rule |
 | `--bddcInterfaceTypes` | `7` | Interface flags: `1` corner, `2` edge, `4` face, `7` all |
-| `--bddcVerbose` | `0` | Print BDDC iteration information |
+| `--bddcVerbose` | `0` | Print BDDC iteration information, including in quiet mode; enabled by the Rizzo BDDC runner |
 | `--bddcUseCg` | `1` | Use CG in the BDDC coarse-solve path |
 | `--bddcConditionEstimate` | `0` | Print an RHS-dependent CG/Lanczos Ritz estimate of the BDDC-preconditioned spectral condition number; requires uncompressed, non-SDC CG |
 | `--bddcAudit` | `0` | Audit the constant mode and coarse interface groups; requires `--bddc 1 --sdc 0` |
@@ -321,7 +385,7 @@ Example:
 | `--bddcOperatorAudit` | `0` | Diagnose uncompressed BDDC operators, then exit without timestep solves; requires `--bddc 1 --sdc 0 --bddcCompression 0` |
 
 With `--bddcConditionEstimate 1`, each non-SDC timestep also prints
-`lambda_min`, `lambda_max`, `kappa_ritz` and `krylov_dim`. The existing accepted
+`lambda_min`, `lambda_max`, `condition_estimate` and `krylov_dim`. The existing accepted
 CG alpha/beta coefficients reconstruct the small Lanczos tridiagonal, whose
 extreme eigenvalues are computed by scaled Sturm bisection. This adds no
 operator applications or MPI reductions and leaves the solver/stopping rule
@@ -333,7 +397,7 @@ matrix `A`, nor the Euclidean singular-value condition number of `B*A`.
 It depends on the RHS, can miss eigenmodes, and is affected by floating-point
 loss of CG orthogonality. A fresh history is used per RHS; rejected updates
 are excluded. Fewer than two accepted iterations or invalid spectral data
-produce `kappa_ritz=unavailable` with an explanatory status.
+produce `condition_estimate=unavailable` with an explanatory status.
 The option requires `--bddc 1 --sdc 0 --bddcUseCg 1 --bddcCompression 0
 --bddcOperatorAudit 0`. See the
 [Netlib Lanczos connection](https://www.netlib.org/linalg/html_templates/node118.html).

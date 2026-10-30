@@ -78,6 +78,7 @@ struct EmiOptions
   int maxCGIter = 10000;
   int writeVTK = 1;
   int diagnostics = 0;
+  int quiet = 0;
   int bddcDumpLocalData = 0;
   int bddcAudit = 0;
   int bddcOperatorAudit = 0;
@@ -140,7 +141,7 @@ struct EmiOptions
 class OptionalMpiSession
 {
 public:
-  OptionalMpiSession(int& argc, char**& argv, bool enabled)
+  OptionalMpiSession(int& argc, char**& argv, bool enabled, bool verbose = true)
   {
 #ifdef KASKADE_HAVE_MPI
     if (!enabled)
@@ -158,9 +159,11 @@ public:
     MPI_Comm_size(MPI_COMM_WORLD,&size);
     int localValue = rank + 1;
     MPI_Allreduce(&localValue,&rankSum,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
-    std::cout << "MPI smoke test: rank " << rank << "/" << size
+    if (verbose)
+      std::cout << "MPI smoke test: rank " << rank << "/" << size
               << ", allreduce sum=" << rankSum << "\n";
 #else
+    (void)verbose;
     if (enabled)
       throw std::runtime_error(
           "--mpi 1 requested, but this executable was built without MPI support");
@@ -257,7 +260,7 @@ bool writeVtkOnThisRank(bool requested)
 
 // Report one MPI-wide timing summary. Wall time is the slowest rank, while
 // user and system CPU times represent the total CPU work of all ranks.
-void printTotalCpuTime(boost::timer::cpu_timer const& timer, bool mpiEnabled)
+void printTotalCpuTime(boost::timer::cpu_timer const& timer, bool mpiEnabled, bool quiet)
 {
   boost::timer::cpu_times times = timer.elapsed();
 #ifdef KASKADE_HAVE_MPI
@@ -282,15 +285,25 @@ void printTotalCpuTime(boost::timer::cpu_timer const& timer, bool mpiEnabled)
     aggregate.wall = global[0];
     aggregate.user = global[1];
     aggregate.system = global[2];
-    std::cout << "total cpu-time: " << boost::timer::format(aggregate) << "\n";
-    std::cout << "EMI model completed\n";
+    if (quiet)
+      std::cout << "EMI model completed: wall=" << aggregate.wall/1e9 << " s\n";
+    else
+    {
+      std::cout << "total cpu-time: " << boost::timer::format(aggregate) << "\n";
+      std::cout << "EMI model completed\n";
+    }
     return;
   }
 #else
   (void)mpiEnabled;
 #endif
-  std::cout << "total cpu-time: " << boost::timer::format(times) << "\n";
-  std::cout << "EMI model completed\n";
+  if (quiet)
+    std::cout << "EMI model completed: wall=" << times.wall/1e9 << " s\n";
+  else
+  {
+    std::cout << "total cpu-time: " << boost::timer::format(times) << "\n";
+    std::cout << "EMI model completed\n";
+  }
 }
 
 template <class Matrix, class Vector>
@@ -894,6 +907,7 @@ int main(int argc, char* argv[])
      "global direct backend: umfpack (default), or mumps-spd (single-rank non-SDC)")
     ("CG_shift", options.cgShift, options.cgShift, "apply constant shift correction after PCG")
     ("vtk", options.writeVTK, options.writeVTK, "write VTK output: 0=no, 1=yes")
+    ("quiet", options.quiet, options.quiet, "compact non-SDC solver output: 0=current output, 1=per-step summaries")
     ("diagnostics", options.diagnostics, options.diagnostics, "print per-step vector diagnostics: 0=no, 1=yes")
     ("bddcDumpLocalData", options.bddcDumpLocalData, options.bddcDumpLocalData, "dump global LHS/RHS and BDDC local data: 0=no, 1=yes")
     ("bddcAudit", options.bddcAudit, options.bddcAudit, "audit constant mode and coarse interface groups (requires bddc=1, sdc=0)")
@@ -950,6 +964,8 @@ int main(int argc, char* argv[])
     ("R", options.gapConductance, options.gapConductance, "gap junction conductance")
   )) return 0;
 
+  if (options.quiet != 0 && options.quiet != 1)
+    throw std::runtime_error("quiet must be 0 or 1");
   if (options.dt <= 0.0)
     throw std::runtime_error("dt must be positive");
   if (options.directBackend != "umfpack" && options.directBackend != "mumps-spd")
@@ -1013,8 +1029,9 @@ int main(int argc, char* argv[])
   if (options.bddcMaterialAssemblyCheck && !options.bddcMaterialAssembly)
     throw std::runtime_error("bddcMaterialAssemblyCheck requires --bddcMaterialAssembly 1");
 
-  OptionalMpiSession mpiSession(argc,argv,options.mpi != 0);
+  OptionalMpiSession mpiSession(argc,argv,options.mpi != 0,options.quiet == 0);
   bool const outputRankZero = EmiBddc::mpiRankZero(options.mpi != 0);
+  bool const detailedOutput = outputRankZero && !options.quiet;
 #ifdef KASKADE_HAVE_MPI
   if (options.directBackend == "mumps-spd")
   {
@@ -1039,7 +1056,7 @@ int main(int argc, char* argv[])
       std::cout << options.maximumNumberOfTimeSteps;
     else
       std::cout << "automatic";
-    std::cout << "\n";
+    std::cout << "\n" << std::flush;
   }
 
   std::vector<int> extraTags;
@@ -1049,7 +1066,7 @@ int main(int argc, char* argv[])
   readTagList(options.intraSet,intraTags);
   readTagList(options.excitedSet,excitedTags);
 
-  if (outputRankZero)
+  if (detailedOutput)
   {
     std::cout << "extracellular tags: " << extraTags.size() << "\n";
     std::cout << "intracellular tags: " << intraTags.size() << "\n";
@@ -1073,7 +1090,7 @@ int main(int argc, char* argv[])
   auto& threadPool = NumaThreadPool::instance(globalWorkerLimit);
   if (options.assemblyThreads == 1 && !threadPool.isSequential())
     throw std::runtime_error("Kaskade thread pool was initialized before nThreads=1 took effect");
-  if (outputRankZero)
+  if (detailedOutput)
   {
     auto environment = [](char const* name)
     {
@@ -1184,12 +1201,12 @@ int main(int argc, char* argv[])
   int const steps = options.maximumNumberOfTimeSteps > 0
                   ? std::min(options.maximumNumberOfTimeSteps,requestedNumberOfTimeSteps)
                   : requestedNumberOfTimeSteps;
-  if (outputRankZero)
+  if (detailedOutput)
     std::cout << "time steps: " << steps << "\n";
 
   if (options.sdc && options.bddc)
   {
-    if (outputRankZero)
+    if (detailedOutput)
       std::cout << "time integrator: SDC with BDDC linear solves\n";
 
     phaseProfile.next(Phase::globalAssembly);
@@ -1213,16 +1230,16 @@ int main(int argc, char* argv[])
 
     phaseProfile.next(Phase::partitionMetadata);
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
-      gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads,options.mpi != 0);
+      gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads,options.mpi != 0,!options.quiet);
     // Add only neighboring-cell DOFs that participate in a nonzero cross-tag
     // mass coupling; unrelated cell-interior DOFs would create singular local blocks.
     EmiBddc::expandSubdomainsToInterfaceNeighbors(
       bddcData,gridManager.grid(),uSpace,material,mass,
-      options.assemblyThreads,options.mpi != 0);
+      options.assemblyThreads,options.mpi != 0,!options.quiet);
     EmiBddc::printUncoveredMatrixCouplings(
-      bddcData,mass,"SDC mass",options.mpi != 0);
+      bddcData,mass,"SDC mass",options.mpi != 0,!options.quiet);
     EmiBddc::printUncoveredMatrixCouplings(
-      bddcData,stiffness,"SDC stiffness",options.mpi != 0);
+      bddcData,stiffness,"SDC stiffness",options.mpi != 0,!options.quiet);
     phaseProfile.next(Phase::solver);
     if (options.bddcCompression)
     {
@@ -1237,22 +1254,22 @@ int main(int argc, char* argv[])
                  options.outputDir + (options.bddcCompression
                                         ? "/emiSDCBDDCLastCompression"
                                         : "/emiSDCBDDCLast"));
-    phaseProfile.printGlobal();
-    printTotalCpuTime(totalTimer,options.mpi != 0);
+    phaseProfile.printGlobal(std::cout,!options.quiet);
+    printTotalCpuTime(totalTimer,options.mpi != 0,options.quiet != 0);
     return 0;
   }
 
   if (options.sdc)
   {
-    if (outputRankZero)
+    if (detailedOutput)
       std::cout << "time integrator: SDC\n";
     phaseProfile.next(Phase::solver);
     u = runFullSdc(F,spaces,u,uAll,nDofs,dofCells,uSpace.indexSet(),steps,options);
     phaseProfile.next(Phase::vtkOutput);
     if (writeVtkOnThisRank(options.writeVTK))
       writeState(u,uAll,options.order,options.outputDir + "/emiSDCLast");
-    phaseProfile.printGlobal();
-    printTotalCpuTime(totalTimer,options.mpi != 0);
+    phaseProfile.printGlobal(std::cout,!options.quiet);
+    printTotalCpuTime(totalTimer,options.mpi != 0,options.quiet != 0);
     return 0;
   }
 
@@ -1274,20 +1291,25 @@ int main(int argc, char* argv[])
     dumpGlobalSystem(lhs,assembledSystemRhs,options.outputDir + "/global_system");
     std::cout << "Global LHS/RHS dumped to " << options.outputDir << "/global_system\n";
   }
-  if (outputRankZero)
+  if (detailedOutput)
     printMatrixDiagnostics(lhs,"lhs");
 
   if (options.bddc)
   {
     if (outputRankZero)
-      std::cout << "time integrator: semi-implicit Euler with BDDC\n";
+    {
+      if (options.quiet)
+        std::cout << "BDDC setup (" << steps << " time steps)...\n" << std::flush;
+      else
+        std::cout << "time integrator: semi-implicit Euler with BDDC\n";
+    }
     phaseProfile.next(Phase::partitionMetadata);
     auto bddcData = EmiBddc::buildBddcData<Grid,decltype(uSpace),Material,Matrix,Vector>(
-      gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads,options.mpi != 0);
+      gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads,options.mpi != 0,!options.quiet);
     EmiBddc::expandSubdomainsToLegacyInterfaceDofs(
-      bddcData,gridManager.grid(),uSpace,material,options.mpi != 0);
+      bddcData,gridManager.grid(),uSpace,material,options.mpi != 0,!options.quiet);
     EmiBddc::printUncoveredMatrixCouplings(
-      bddcData,lhs,"before material contributions",options.mpi != 0);
+      bddcData,lhs,"before material contributions",options.mpi != 0,!options.quiet);
 
     // Assemble each cell's full EMI Jacobian contribution into its material
     // subdomain so the embedded local operators add up to the global matrix.
@@ -1296,7 +1318,7 @@ int main(int argc, char* argv[])
     F.setMassSubmatrix(false);
     std::vector<Matrix> localContributions(bddcData.tags.size());
     Dune::FieldVector<double,Grid::dimension> zeroMaterial(0.0);
-    if (outputRankZero)
+    if (detailedOutput)
       std::cout << "Assembling BDDC material subdomain matrices ("
                 << bddcData.tags.size() << " subdomains)\n";
     Kaskade::BDDC::MpiDomainLayout materialLayout;
@@ -1310,7 +1332,7 @@ int main(int argc, char* argv[])
         if (options.bddcMaterialAssembly && !materialLayout.owns(static_cast<int>(subdomain)))
           continue;
         int const tag = bddcData.tags[subdomain];
-        if (outputRankZero)
+        if (detailedOutput)
           std::cout << "  subdomain " << subdomain+1 << "/" << bddcData.tags.size()
                     << " (tag " << tag << "): assembling..." << std::flush;
         auto cellFilter = [&material,tag,zeroMaterial](auto const& cell)
@@ -1321,7 +1343,7 @@ int main(int argc, char* argv[])
           SemiLinearization(equation,u,u,duState),cellFilter,Assembler::MATRIX,
           options.assemblyThreads);
         localContributions[subdomain] = assembler.template get<Matrix>(false);
-        if (outputRankZero)
+        if (detailedOutput)
           std::cout << " done\n" << std::flush;
       }
     }
@@ -1331,7 +1353,7 @@ int main(int argc, char* argv[])
     {
       phaseProfile.next(Phase::materialExchange);
       EmiBddc::replicateMaterialMatrices(localContributions,lhs,materialLayout);
-      if (outputRankZero)
+      if (detailedOutput)
         std::cout << "BDDC material assembly: source owners, sparse matrix exchange\n";
     }
     if (options.bddcMaterialAssemblyCheck)
@@ -1395,7 +1417,7 @@ int main(int argc, char* argv[])
           neighboringTags[tag].insert(neighborTag);
       }
     }
-    if (outputRankZero)
+    if (detailedOutput)
       std::cout << "Redistributing interface mass blocks across material neighbors...\n";
     if (options.bddcInterfaceAssembly == 0)
     {
@@ -1430,7 +1452,7 @@ int main(int argc, char* argv[])
                   localContributions[destinationSubdomain][row.index()][col.index()] += transfer;
                 }
           }
-          if (outputRankZero)
+          if (detailedOutput)
             std::cout << "  interface tags " << tag << " and " << neighborTag
                       << ": done\n" << std::flush;
         }
@@ -1448,7 +1470,7 @@ int main(int argc, char* argv[])
       if (options.bddcInterfaceAssembly == 2)
         blocks = EmiBddc::exchangeInterfaceBlocks(std::move(blocks),interfaceLayout,
                                                   bddcData.tags.size(),nDofs);
-      if (outputRankZero)
+      if (detailedOutput)
         std::cout << "BDDC interface mass assembly: shared traversal"
                   << (options.bddcInterfaceAssembly == 2 ? ", source-owner MPI work" : ", replicated work")
                   << ", directed blocks=" << blocks.size() << "\n";
@@ -1513,7 +1535,7 @@ int main(int argc, char* argv[])
       catch (...) { redistributionError = std::current_exception(); }
       EmiBddc::checkInterfaceAssemblyError(redistributionError,interfaceLayout);
     }
-    if (outputRankZero)
+    if (detailedOutput)
       std::cout << "Interface mass redistribution complete\n";
     F.Mass_stiff(10);
     F.setMassSubmatrix(false);
@@ -1522,13 +1544,25 @@ int main(int argc, char* argv[])
 
     phaseProfile.next(Phase::localMatrixExtraction);
     EmiBddc::setLocalMatricesFromContributions(bddcData,localContributions,
-                                               options.mpi != 0);
+                                               options.mpi != 0,!options.quiet);
+    if (options.quiet && outputRankZero)
+    {
+      std::cout << "BDDC submatrices (" << bddcData.localMatrices.size() << "):\n";
+      for (size_t subdomain = 0; subdomain < bddcData.localMatrices.size(); ++subdomain)
+      {
+        auto const& matrix = bddcData.localMatrices[subdomain];
+        std::cout << "  submatrix " << subdomain+1 << "/" << bddcData.localMatrices.size()
+                  << " (tag " << bddcData.tags[subdomain] << "): "
+                  << matrix.N() << " x " << matrix.M() << " ready\n";
+      }
+      std::cout << std::flush;
+    }
     // The old EMI BDDC path partitions residuals and corrections by each
     // local diagonal's share of the assembled global diagonal. Recompute
     // those weights after material-local operators have been finalized.
     phaseProfile.next(Phase::diagonalWeights);
     EmiBddc::buildDiagonalWeights(bddcData,bddcData.localMatrices,lhs,
-                                  options.mpi != 0);
+                                  options.mpi != 0,!options.quiet);
     phaseProfile.next(Phase::diagnostics);
     if (options.bddcSplitInterfaces)
       EmiBddc::splitInterfaceGroups(
@@ -1541,8 +1575,8 @@ int main(int argc, char* argv[])
     {
       phaseProfile.next(Phase::solver);
       EmiBddc::auditBddcOperator(bddcData,lhs,options);
-      phaseProfile.printGlobal();
-      printTotalCpuTime(totalTimer,options.mpi != 0);
+      phaseProfile.printGlobal(std::cout,!options.quiet);
+      printTotalCpuTime(totalTimer,options.mpi != 0,options.quiet != 0);
       return 0;
     }
     if (options.bddcDumpLocalData && outputRankZero)
@@ -1550,7 +1584,7 @@ int main(int argc, char* argv[])
                                  assembledSystemRhs,
                                  options.bddcInterfaceTypes);
     EmiBddc::printUncoveredMatrixCouplings(
-      bddcData,lhs,"after material contributions",options.mpi != 0);
+      bddcData,lhs,"after material contributions",options.mpi != 0,!options.quiet);
     if (options.diagnostics)
       EmiBddc::printLocalMatrixReconstruction(bddcData,bddcData.localMatrices,lhs,
                                               nDofs,options.mpi != 0);
@@ -1568,12 +1602,12 @@ int main(int argc, char* argv[])
                  options.outputDir + (options.bddcCompression
                                         ? "/emiBDDCLastCompression"
                                         : "/emiBDDCLast"));
-    phaseProfile.printGlobal();
-    printTotalCpuTime(totalTimer,options.mpi != 0);
+    phaseProfile.printGlobal(std::cout,!options.quiet);
+    printTotalCpuTime(totalTimer,options.mpi != 0,options.quiet != 0);
     return 0;
   }
 
-  if (outputRankZero)
+  if (detailedOutput)
     std::cout << "time integrator: semi-implicit Euler\n";
 
   // This path uses the same lhs for every timestep. Keep its factorization
@@ -1588,7 +1622,7 @@ int main(int argc, char* argv[])
     if (options.directBackend == "mumps-spd")
     {
       auto const check = EmiBddc::checkSpdDirectInput(lhs);
-      if (outputRankZero)
+      if (detailedOutput)
         std::cout << "SPD direct input: maxAbsSkew=" << check.maxAbsSkew
                   << " symmetryTolerance=" << check.symmetryTolerance
                   << " lowerNonzeros=" << check.lowerNonzeros << "\n";
@@ -1601,7 +1635,7 @@ int main(int argc, char* argv[])
         lower.addEntry(row,col,value);
       });
       directSolver.emplace(lower,DirectType::MUMPS,
-                           FactorizationOptions(MatrixProperties::POSITIVEDEFINITE,1));
+                           FactorizationOptions(MatrixProperties::POSITIVEDEFINITE,options.quiet ? 0 : 1));
     }
     else
       directSolver.emplace(lhs);
@@ -1620,7 +1654,7 @@ int main(int argc, char* argv[])
     if (options.diagnostics && outputRankZero)
       printVectorDiagnostics(rhsVector,"rhs");
 
-    if (outputRankZero)
+    if (detailedOutput)
       std::cout << "EMI step " << step+1 << "/" << steps << "\n";
     if (directSolver)
     {
@@ -1635,14 +1669,24 @@ int main(int argc, char* argv[])
         double const rhsNorm = std::sqrt(rhsVector.dot(rhsVector));
         double const relative = rhsNorm > 0 ? absolute/rhsNorm : absolute;
         if (outputRankZero)
-          std::cout << "Direct global residual step " << step+1
-                    << ": abs=" << absolute << " rel=" << relative << "\n";
+        {
+          if (options.quiet)
+            std::cout << "Direct step " << step+1 << "/" << steps << ": rel=" << relative << "\n" << std::flush;
+          else
+            std::cout << "Direct global residual step " << step+1
+                      << ": abs=" << absolute << " rel=" << relative << "\n";
+        }
         if (!std::isfinite(absolute) || !std::isfinite(relative))
           throw std::runtime_error("Nonfinite MUMPS direct solution residual; state not advanced");
       }
     }
     else
       solveLinearSystem(lhs,stepVector,rhsVector,options);
+
+    if (options.quiet && outputRankZero &&
+        (!directSolver || options.directBackend != "mumps-spd"))
+      std::cout << (directSolver ? "Direct step " : "PCG step ")
+                << step+1 << "/" << steps << "\n" << std::flush;
 
     for (size_t i = 0; i < nDofs; ++i)
       at_c<0>(stepState.data).coefficients()[i] = stepVector[i];
@@ -1659,6 +1703,6 @@ int main(int argc, char* argv[])
   if (writeVtkOnThisRank(options.writeVTK))
     writeState(u,uAll,options.order,options.outputDir + "/emiLast");
 
-  phaseProfile.printGlobal();
-  printTotalCpuTime(totalTimer,options.mpi != 0);
+  phaseProfile.printGlobal(std::cout,!options.quiet);
+  printTotalCpuTime(totalTimer,options.mpi != 0,options.quiet != 0);
 }

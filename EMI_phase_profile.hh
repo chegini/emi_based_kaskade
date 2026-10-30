@@ -48,7 +48,7 @@ namespace EmiBddc
       start_ = now;
     }
 
-    void printGlobal(std::ostream& output = std::cout)
+    void printGlobal(std::ostream& output = std::cout, bool show = true)
     {
       if (!enabled_ || finished_)
         return;
@@ -77,7 +77,7 @@ namespace EmiBddc
 #else
       (void)mpiEnabled_;
 #endif
-      if (rank != 0)
+      if (rank != 0 || !show)
         return;
       std::ostringstream report;
       report << "Profile (wall seconds, EMI end-to-end phases; " << ranks << " rank(s)):\n"
