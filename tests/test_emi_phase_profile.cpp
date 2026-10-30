@@ -51,20 +51,23 @@ int main(int argc, char** argv)
   FakeClock::elapsed += FakeClock::duration(3*scale);
   profile.next(Phase::meshLoading);
   FakeClock::elapsed += FakeClock::duration(3*scale);
+  profile.next(Phase::materialExchange);
+  FakeClock::elapsed += FakeClock::duration(4*scale);
   std::ostringstream output;
   profile.printGlobal(output);
-  assert(FakeClock::calls == 6);
+  assert(FakeClock::calls == 7);
   profile.next(Phase::solver);
   std::ostringstream duplicate;
   profile.printGlobal(duplicate);
-  assert(duplicate.str().empty() && FakeClock::calls == 6);
+  assert(duplicate.str().empty() && FakeClock::calls == 7);
   if (rank == 0)
   {
     std::vector<std::pair<std::string,double>> expected = {
       {"thread-pool initialization",2.0},
       {"mesh loading and grid creation",8.0},
+      {"material matrix exchange",4.0},
       {"other setup/bookkeeping",3.0},
-      {"accounted total",13.0}
+      {"accounted total",17.0}
     };
     for (auto const& [label,value] : expected)
     {

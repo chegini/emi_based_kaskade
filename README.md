@@ -272,6 +272,8 @@ Example:
 | `--bddcVerbose` | `0` | Print BDDC iteration information |
 | `--bddcUseCg` | `1` | Use CG in the BDDC coarse-solve path |
 | `--bddcAudit` | `0` | Audit the constant mode and coarse interface groups; requires `--bddc 1 --sdc 0` |
+| `--bddcMaterialAssembly` | `0` | Non-SDC material matrix assembly: `0` replicated legacy path; `1` assemble on each subdomain's MPI owner, then exchange sparse nonzeros |
+| `--bddcMaterialAssemblyCheck` | `0` | Audit owner-assembled material matrices against the replicated assembler before interface redistribution; requires material mode `1` |
 | `--bddcInterfaceAssembly` | `0` | Non-SDC interface mass assembly: `0` legacy pair-by-pair, `1` shared traversal on every rank, `2` shared traversal on source MPI owners |
 | `--bddcInterfaceAssemblyCheck` | `0` | Compare optimized directed mass blocks against legacy pair assembly before redistribution; requires assembly mode `1` or `2` |
 | `--bddcSplitInterfaces` | `0` | Separate coarse averages by connected electrical component; requires `--bddc 1 --sdc 0` |
@@ -330,6 +332,100 @@ Multiple components or labels identify candidates for additional constraints,
 not proven errors. The hypothetical constraint count does not change the solver.
 The `C*1` check verifies agreement of the actual constraint row sums across
 subdomains; it does not test near-null-mode reproduction by the coarse basis.
+
+Material assembly mode `1` assigns each material's existing filtered assembler
+call to its deterministic BDDC owner, including `--masterWorker`. For 20
+subdomains and eight ordinary ranks, each rank assembles two or three matrices.
+The quadrature, global numbering, symmetric extraction, physical coefficients,
+Robin BC, initial excitation and solver tolerances are unchanged. No new
+stimulation or Dirichlet configuration is introduced by this option.
+
+Each owner broadcasts its nonzero entries as `(row, column, double-bits)` words,
+without a floating-point reduction. Receivers copy the full global matrix
+pattern and fill the received entries; retaining replicated matrices preserves
+the current interface redistribution, local extraction, weights, dumps and
+audits. One material is exchanged at a time to bound temporary storage, and
+large messages are chunked within MPI's integer count limit. Empty messages
+produce zero matrices; nonfinite entries, invalid indices and writes outside
+the pattern fail before the matrices are used. Collective error checks prevent
+peers proceeding to the next broadcast after an owner/receiver failure.
+
+With one rank or MPI disabled, material mode `1` assembles every subdomain
+locally and needs no exchange. Mode `0` remains the default and adds no material
+exchange collectives. With `--profile 1`, `material subdomain assembly` and
+`material matrix exchange` are separate rows. Waiting for other owners is
+included in assembly, and allocation/initialization of replicas is included in
+exchange; compare total time as well as these phases. Saved assembly work does
+not guarantee a speedup once transfer and copying are included.
+
+`--bddcMaterialAssemblyCheck 1` additionally reassembles every material on every
+rank and compares each entire sparse operator before interface redistribution,
+including entries absent from either pattern. The tolerance is
+`maxAbsDifference <= 1e-14 + 1e-11*maxReference`. Audit cost is charged to
+`diagnostics and interface splitting`; keep this option off for timings.
+
+After rebuilding **only the application**, run these commands manually in the
+MPI-enabled container, in this order:
+
+```bash
+# Serial codec tests + real MPI tests at 1, 2, 8 ranks; then one-step
+# material matrix audits and true-residual solves at 1 and 8 ranks.
+bash tests/run_emi_material_comparison.sh audit
+
+# Ten-step VTK runs at 1/8 ranks, compared against the saved direct and
+# replicated-material BDDC results from the previous validated experiment.
+bash tests/run_emi_material_comparison.sh accuracy
+
+# Ten-step direct run and both material modes at 1/8 ranks. Every run
+# disables VTK, diagnostics and matrix audits; all use one thread per rank.
+bash tests/run_emi_material_comparison.sh benchmark
+```
+
+The script uses the Pepe mesh, `C_m=1`, `R=0.1`, `dt=0.01`, shared interface
+assembly mode `2`, unchanged coarse constraints and true relative tolerance
+`1e-7`. It does not depend on a pre-existing shell argument array. Accuracy
+mode requires these previously validated files:
+
+- `output/pepe-direct-interface-check-10steps/emiLast.vtu`
+- `output/pepe-bddc-interface-check-np1-10steps/emiBDDCLast.vtu`
+- `output/pepe-bddc-interface-check-np8-10steps/emiBDDCLast.vtu`
+
+Each case records its full output under its own `output/pepe-material-...`
+directory as `run.log`, and accuracy mode records both solution comparisons.
+`unit` runs only the standalone tests. The test matrix fixture matches the
+scalar-block/proxy and prefix-only iterator API of `NumaBCRSMatrix`; the
+production-size audit in the full executable remains necessary.
+
+The Pepe container validation passed the standalone tests at 1, 2 and 8 MPI
+ranks. Full material-matrix audits at 1 and 8 ranks reported zero maximum
+absolute and relative L2 differences from replicated assembly. After ten
+steps, the exported final solutions matched the previous same-rank BDDC
+outputs exactly. Relative L2 errors against the direct solution were
+`1.53019e-8` (1 rank) and `1.52973e-8` (8 ranks), with maximum absolute error
+approximately `1e-7`. Both BDDC modes required 41 iterations per step and met
+the unchanged true relative residual tolerance `1e-7` at every step. These
+checks establish numerical agreement for this case, rather than increased
+accuracy or a discretization-error estimate.
+
+The matched ten-step benchmark disabled VTK, diagnostics and matrix audits:
+
+| Solver / material mode | MPI ranks | Wall time (s) |
+| --- | ---: | ---: |
+| Direct | 1 | 147.70 |
+| BDDC, replicated material assembly (`0`) | 1 | 233.16 |
+| BDDC, owner material assembly (`1`) | 1 | 235.69 |
+| BDDC, replicated material assembly (`0`) | 8 | 277.40 |
+| BDDC, owner material assembly (`1`) | 8 | 268.05 |
+
+At eight ranks, mean material assembly plus exchange decreased from
+`15.724453` to `2.902863 + 0.913891 = 3.816754` seconds, about 76% less time
+for these phases. Overall wall time decreased by 3.4%; the solver wrapper
+still took about 227 seconds. At one rank, owner mode was 1.1% slower in this
+measurement. These are single measurements, so repeated runs are needed to
+quantify timing variability. Keep owner assembly as an optional MPI setup
+optimization: it preserves the tested solutions, but does not reduce iteration
+counts, remove replicated matrix storage, or make BDDC faster than the direct
+solver on this benchmark. Material mode `0` remains the default.
 
 Interface assembly modes `1` and `2` replace one full assembler call per
 material-interface direction with a single grid traversal. Each directed face
@@ -542,7 +638,7 @@ make -C /kaskade7 TESTMODULES= TUTORIALMODULES= kasklib
 With `--profile 1`, the final `EMI end-to-end phases` table separates mesh/grid
 loading, material tags/refinement, FE spaces/initial state/DOF support, initial
 VTK output, global assembly, BDDC partition metadata, material-local assembly,
-interface-neighbor discovery, interface mass-block assembly, mass redistribution,
+material matrix exchange, interface-neighbor discovery, interface mass-block assembly, mass redistribution,
 local matrix extraction, weights, diagnostics/splitting, the solver wrapper and
 timestep/final output.
 
