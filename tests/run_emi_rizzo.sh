@@ -3,6 +3,11 @@
 set -euo pipefail
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_dir"
+quiet=${QUIET:-0}
+if [[ "$quiet" != 0 && "$quiet" != 1 ]]; then
+  printf 'QUIET must be 0 or 1.\n' >&2
+  exit 2
+fi
 
 steps=${1:-1}
 if [[ ! "$steps" =~ ^[1-9][0-9]*$ ]]; then
@@ -49,10 +54,10 @@ for ranks in "${rank_counts[@]}"; do
     --excited "${mesh}_excited.txt" \
     --sigma_i 3 --sigma_e 20 --C_m 1 --R 0.1 \
     --dt 0.01 --finalTime "$final_time" --maximumNumberOfTimeSteps "$steps" \
-    --nThreads 1 --profile 1 --diagnostics 0 --vtk "$vtk" \
+    --nThreads 1 --profile 1 --diagnostics 0 --vtk "$vtk" --quiet "$quiet" \
     --bddc 1 --direct 0 --bddcCompression 0 --masterWorker 0 \
     --bddcSplitInterfaces 0 --bddcInterfaceTypes 7 \
-    --bddcUseCg 1 --bddcRelativeTolerance 1e-7 --bddcVerbose 0 \
+    --bddcUseCg 1 --bddcRelativeTolerance 1e-7 --bddcVerbose 1 \
     --bddcConditionEstimate 1 \
     --bddcInterfaceAssembly 2 --bddcInterfaceAssemblyCheck 0 \
     --bddcMaterialAssembly 1 --bddcMaterialAssemblyCheck 0 \
