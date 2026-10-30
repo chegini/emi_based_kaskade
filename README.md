@@ -196,10 +196,10 @@ list. The defaults below are defined in `EMI_model.cpp`.
 | `--dir` | `output` | Output directory |
 | `--refine` | `0` | Number of uniform mesh refinements |
 | `--order` | `1` | Finite-element polynomial order |
-| `--nThreads` | `2` | Shared-memory assembly and BDDC setup threads |
+| `--nThreads` | `2` | Assembly/setup task limit and Kaskade global worker limit per rank; `1` means sequential Kaskade tasks, `0` means automatic |
 | `--vtk` | `1` | Write VTK output: `0` no, `1` yes |
 | `--diagnostics` | `0` | Print per-step vector diagnostics |
-| `--profile` | `0` | Print cumulative SDC/BDDC wall-time data |
+| `--profile` | `0` | Print solver timings plus an end-to-end phase table with MPI min/mean/max |
 
 ### Time integration
 
@@ -432,11 +432,88 @@ make -f steps_to_run.mk build-mpi MPICXX=mpicxx
 mpirun --allow-run-as-root -np 2 ./emiModel --mpi 1
 ```
 
-In the current EMI scratch driver, the MPI target verifies MPI initialization
-and communication. It does not yet provide the fully distributed owner-only
-BDDC exchange validated by the Poisson BDDC executable. Therefore, EMI MPI
-runs should currently be reported as MPI-enabled diagnostic runs, rather than
-as distributed EMI-BDDC scaling experiments.
+The current BDDC path distributes local factorizations and iterative subdomain
+work by ownership. Mesh data, global operators and material/interface assembly
+are still replicated, as is the coarse factorization. Consequently, faster
+iterations do not guarantee a shorter full run. Compare total wall time and
+individual phases when reporting MPI performance.
+
+The driver initializes Kaskade's global thread pool from `--nThreads` before
+grid/FE allocation. The first initialization fixes its configuration for the
+run. With `--nThreads 1`, global and node-local Kaskade tasks execute inline;
+the matching library change also avoids creating unused workers in this mode.
+Pool initialization remains inside the reported wall-time interval. For
+values greater than one, the value limits global workers; NUMA node workers
+retain the library's separate sizing policy. BLAS/OpenMP threading is controlled
+separately, not by this application option.
+
+For an MPI benchmark with one computational thread per rank, set the BLAS
+environment before launching the executable:
+
+```bash
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+mpirun --allow-run-as-root -np 8 \
+  -x OPENBLAS_NUM_THREADS -x OMP_NUM_THREADS \
+  ./emiModel --mpi 1 --nThreads 1
+```
+
+OpenBLAS uses `OPENBLAS_NUM_THREADS` in pthread builds and `OMP_NUM_THREADS`
+in OpenMP builds; see its
+[runtime variable documentation](https://www.openmathlib.org/OpenBLAS/docs/runtime_variables/).
+The startup log prints the requested Kaskade setting, actual sequential mode,
+and these environment values. Environment values describe the request rather
+than measuring the BLAS runtime's actual thread count.
+
+Use the same environment, mesh, solver settings and VTK settings for both
+`-np 1` and `-np 8`. Check solution agreement and the true global residual
+target before interpreting timing changes.
+
+The threading change includes a compiled library source file. Rebuild the
+library before relinking the application; skipping the archive rebuild would
+retain the old worker-creation behavior. A library-only build can omit the
+test/tutorial makefile modules and their generated dependency files:
+
+```bash
+make -C /kaskade7 TESTMODULES= TUTORIALMODULES= kasklib
+```
+
+With `--profile 1`, the final `EMI end-to-end phases` table separates mesh/grid
+loading, material tags/refinement, FE spaces/initial state/DOF support, initial
+VTK output, global assembly, BDDC partition metadata, material-local assembly,
+interface-neighbor discovery, interface mass-block assembly, mass redistribution,
+local matrix extraction, weights, diagnostics/splitting, the solver wrapper and
+timestep/final output.
+
+The intervals are exclusive within each rank. Phase switches do not add MPI
+barriers; three vector reductions at the end collect minimum, mean and maximum
+wall seconds, and rank zero prints one summary. Waiting is included in the phase
+where it occurs. Different phases can have different slowest ranks, so do not
+add their maximum column: use `accounted total`, reduced from each rank's sum.
+The accounted interval starts just inside the existing total timer, before
+thread-pool initialization, and ends before reporting collectives/printing.
+
+The solver-wrapper row includes the setup and solve phases already reported
+inside BDDC; those inner timings are a breakdown, not additional time to add.
+SDC wrappers also include any intermediate VTK writes performed internally.
+Direct semi-implicit Euler timestep output is separated explicitly. With
+`--profile 0`, the new profiler performs no clock queries, MPI reductions or
+output. This instrumentation changes no numerical operators or stopping rules.
+
+The timing-accounting test is independent of Dune:
+
+```bash
+c++ -std=c++20 -Wall -Wextra -pedantic tests/test_emi_phase_profile.cpp -o /tmp/test_emi_phase_profile
+/tmp/test_emi_phase_profile
+```
+
+It can also check real MPI min/mean/max accounting with deterministic synthetic
+rank times:
+
+```bash
+mpicxx -std=c++20 -DKASKADE_HAVE_MPI tests/test_emi_phase_profile.cpp -o /tmp/test_emi_phase_profile_mpi
+mpirun --allow-run-as-root -np 8 /tmp/test_emi_phase_profile_mpi
+```
 
 ### Physical parameters
 
@@ -483,7 +560,8 @@ as distributed EMI-BDDC scaling experiments.
   --dir output/emi_sdc_bddc_aa_compression
 
 The helper defaults to two threads and one time step for quick checks. `--nThreads`
-limits parallel assembly and BDDC subdomain construction. Override the thread
+limits parallel assembly, BDDC subdomain construction and global Kaskade workers.
+Override the thread
 count with `NTHREADS`, for example `make -f steps_to_run.mk run-sdc-bddc
 NTHREADS=4`. The one-step limit is a test setting in
 `steps_to_run.mk`; increase `TIME_ARGS` there for longer runs. For direct
