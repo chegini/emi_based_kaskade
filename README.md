@@ -266,10 +266,122 @@ Example:
 | --- | ---: | --- |
 | `--bddc` | `0` | Enable BDDC |
 | `--bddcIterations` | `3000` | Maximum BDDC iterations per time step |
-| `--bddcTolerance` | `1e-8` | BDDC residual tolerance |
+| `--bddcTolerance` | `1e-8` | Legacy internal search-direction energy-norm tolerance |
+| `--bddcRelativeTolerance` | `0` | True global relative residual target for non-SDC BDDC; `0` keeps the legacy stopping rule |
 | `--bddcInterfaceTypes` | `7` | Interface flags: `1` corner, `2` edge, `4` face, `7` all |
 | `--bddcVerbose` | `0` | Print BDDC iteration information |
 | `--bddcUseCg` | `1` | Use CG in the BDDC coarse-solve path |
+| `--bddcAudit` | `0` | Audit the constant mode and coarse interface groups; requires `--bddc 1 --sdc 0` |
+| `--bddcSplitInterfaces` | `0` | Separate coarse averages by connected electrical component; requires `--bddc 1 --sdc 0` |
+| `--bddcOperatorAudit` | `0` | Diagnose uncompressed BDDC operators, then exit without timestep solves; requires `--bddc 1 --sdc 0 --bddcCompression 0` |
+
+With `--bddcRelativeTolerance 1e-7`, the non-SDC BDDC solve stops when the
+assembled, unpreconditioned correction residual satisfies
+`||b-A*du||_2 / ||b||_2 <= 1e-7`. The denominator is the original global RHS norm,
+corresponding to a zero initial global correction, even though the solver first
+eliminates interior residuals locally. It is not normalized by the remaining
+residual after that elimination. For a zero RHS, the criterion uses the absolute
+residual instead. The initial accepted correction and every accepted update are
+checked; an already solved system needs no CG calls.
+
+This option overrides `bddcTolerance`. It does not change the matrix, physical
+BCs, scaling or coarse constraints. Each check assembles the global correction
+and performs a matrix-vector product on rank zero. The two norms are broadcast
+so all MPI ranks make the same stopping decision; replicated norms are not
+summed. Profiling reports checking and correction-assembly costs separately.
+These extra checking collectives are outside the BDDC transfer compression
+report; total wall time includes them.
+The global residual and convergence status are printed even with diagnostics
+disabled. If the iteration limit, stagnation or breakdown prevents meeting the
+target, the run fails before advancing that timestep or writing a final
+solution. The option requires `--bddc 1 --sdc 0 --bddcOperatorAudit 0`.
+
+Using a true residual can change iteration counts and the final solution within
+iterative-solver accuracy. The legacy rule remains the default. Comparing to
+other solvers still requires matching the mesh, physical BCs, coefficients,
+discretization, initial-guess policy and norm reference. In particular, this
+application solves for a timestep correction; a solver working on the full
+potential can have a different RHS and reference norm even for equivalent
+physical equations.
+
+The stopping-policy regression check has no Dune dependencies:
+
+```bash
+c++ -std=c++20 -Wall -Wextra -pedantic tests/test_bddc_stopping.cpp -o /tmp/test_bddc_stopping
+/tmp/test_bddc_stopping
+```
+
+With `--bddcAudit 1`, rank zero reports the current LHS applied to the nodal
+constant field, its normalized residual and Rayleigh quotient, and the initial
+RHS constant component. The Robin boundary term remains active. A small
+`||A*1||_inf / ||A||_inf` identifies a candidate near-null mode; it does not by
+itself establish poor BDDC conditioning. The RHS compatibility ratio is
+informational for the current Robin problem, not a pure-Neumann solvability test.
+
+The audit writes `bddc_audit/interface_groups.csv` and
+`bddc_audit/interface_components.csv` below the output directory. Groups match
+the subdomain-ID grouping in `InterfaceAverages`. Cell-connected components join
+only DOFs sharing an original volume element within the group, so duplicated
+membrane traces remain separate. Electrical label `0` is the shared extracellular
+space; other labels are intracellular material tags, matching the mapper.
+Multiple components or labels identify candidates for additional constraints,
+not proven errors. The hypothetical constraint count does not change the solver.
+The `C*1` check verifies agreement of the actual constraint row sums across
+subdomains; it does not test near-null-mode reproduction by the coarse basis.
+
+With `--bddcSplitInterfaces 1`, each owner group is partitioned using that same
+original-cell graph. Each connected component receives its own coarse average.
+The mapper must give each shared DOF exactly one electrical label; ambiguous
+labels cause an error. Shared extracellular potentials keep label `0`, and
+duplicated membrane traces stay separate. The global matrix, RHS, Robin boundary
+term, diagonal scaling and convergence tolerance are unchanged. Only the coarse
+preconditioner changes. This requires the Kaskade `InterfaceAverages` overload
+accepting partition labels.
+
+Use `--bddcInterfaceTypes 7` for the experiment: each component is classified
+individually, so splitting an edge can produce corners. The audit CSV groups still
+describe the original owner groups, while its enabled-constraint count and the
+local-data dump reflect the actual split constraints. For the audited Pepe case,
+expect 493 constraints instead of 202. Compare iterations, true global residual,
+solution error and total wall time; fewer iterations can come with more expensive
+coarse setup. Compare timings with the same audit and VTK settings.
+
+The component graph has a standalone regression check (no Dune dependencies):
+
+```bash
+c++ -std=c++20 -Wall -Wextra -pedantic tests/test_bddc_components.cpp -o /tmp/test_bddc_components
+/tmp/test_bddc_components
+```
+
+`--bddcOperatorAudit 1` constructs the fixed local and coarse factors once and
+checks the actual uncompressed transfer and local-solve kernels. It reports:
+
+- The external diagonal weights' signs, partition of unity and agreement with
+  the normalized local diagonals used by the internal transfer.
+- Global and local matrix symmetry, measured by maximum entrywise skew relative
+  to the maximum absolute matrix entry.
+- Transfer adjointness on shared DOFs and preservation of a constant trace.
+- Local constrained-basis reconstruction of a constant from `C_i*1`, including
+  its constraint defect. Weak Robin terms can prevent exact reconstruction.
+- Sampled reciprocity and quadratic forms (positivity checks) of the complete
+  linear preconditioner, its additivity and repeatability after reset.
+- The response `B*A*1` of a fresh preconditioner application to the nearly
+  constant mode. No assertion that this must equal `1` is imposed.
+
+Here `B` includes the initial interior Dirichlet solve and one unscaled BDDC
+correction, before any CG step length is applied. The two deterministic probes
+have unit Euclidean norm and zero mean to reduce domination by the near-null
+constant mode. Their responses' means are also printed. Norm-scaled and
+pair-scaled reciprocity defects use different normalizations; near-zero cross
+products can make the latter misleading. A few sampled checks cannot prove
+positive definiteness or establish spectral bounds.
+
+The audit exits before timestep solves and final solution VTK output. Use
+`--vtk 0` and a separate output directory. It can also be used with split coarse
+interfaces or MPI ownership. The inexpensive transfer check simulates message
+delivery on rank zero using replicated metadata; the complete preconditioner
+probes use the actual configured MPI exchange. This is a diagnostic run, not a
+timing benchmark. Ordinary solves are unchanged when the option is zero.
 
 ### BDDC compression
 

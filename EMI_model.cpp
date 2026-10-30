@@ -46,6 +46,8 @@
 #include "fem/diffops/membraneModels.hh"
 
 #include "EMI_bddc.hh"
+#include "EMI_bddc_audit.hh"
+#include "EMI_bddc_operator_audit.hh"
 #include "EMI_model.hh"
 
 using namespace Kaskade;
@@ -70,6 +72,9 @@ struct EmiOptions
   int writeVTK = 1;
   int diagnostics = 0;
   int bddcDumpLocalData = 0;
+  int bddcAudit = 0;
+  int bddcOperatorAudit = 0;
+  int bddcSplitInterfaces = 0;
   int profile = 0;
   int sdc = 0;
   int sdcCollocationPoints = 3;
@@ -106,6 +111,7 @@ struct EmiOptions
   double sdcInitialContraction = 0.2;
   double algebraicAdaptivityTolerance = 0.0;
   double bddcTolerance = 1e-8;
+  double bddcRelativeTolerance = 0.0;
   double penalty = 1e6;
   double sigmaI = 3.0;
   double sigmaE = 20.0;
@@ -876,6 +882,9 @@ int main(int argc, char* argv[])
     ("vtk", options.writeVTK, options.writeVTK, "write VTK output: 0=no, 1=yes")
     ("diagnostics", options.diagnostics, options.diagnostics, "print per-step vector diagnostics: 0=no, 1=yes")
     ("bddcDumpLocalData", options.bddcDumpLocalData, options.bddcDumpLocalData, "dump global LHS/RHS and BDDC local data: 0=no, 1=yes")
+    ("bddcAudit", options.bddcAudit, options.bddcAudit, "audit constant mode and coarse interface groups (requires bddc=1, sdc=0)")
+    ("bddcOperatorAudit", options.bddcOperatorAudit, options.bddcOperatorAudit, "audit uncompressed BDDC weights and operators, then exit without timesteps")
+    ("bddcSplitInterfaces", options.bddcSplitInterfaces, options.bddcSplitInterfaces, "split coarse interface averages by cell-connected electrical component (requires bddc=1, sdc=0)")
     ("profile", options.profile, options.profile, "print cumulative BDDC phase wall times: 0=no, 1=yes")
     ("sdc", options.sdc, options.sdc, "use SDC time integrator: 0=no, 1=yes")
     ("sdcCollocationPoints", options.sdcCollocationPoints, options.sdcCollocationPoints, "target number of SDC collocation points")
@@ -906,7 +915,8 @@ int main(int argc, char* argv[])
     ("bddcHistogram", options.bddcHistogram, options.bddcHistogram, "write compressed BDDC symbol histograms below the output directory: 0=no, 1=yes")
     ("bddcCompressionReport", options.bddcCompressionReport, options.bddcCompressionReport, "print aggregate BDDC transfer volume report: 0=no, 1=yes")
     ("bddcIterations", options.bddcIterations, options.bddcIterations, "maximum BDDC iterations per time step")
-    ("bddcTolerance", options.bddcTolerance, options.bddcTolerance, "BDDC residual tolerance")
+    ("bddcTolerance", options.bddcTolerance, options.bddcTolerance, "legacy BDDC internal search-direction energy-norm tolerance")
+    ("bddcRelativeTolerance", options.bddcRelativeTolerance, options.bddcRelativeTolerance, "true global relative residual tolerance; 0 keeps the legacy stopping rule")
     ("bddcInterfaceTypes", options.bddcInterfaceTypes, options.bddcInterfaceTypes, "BDDC interface flags: 1=corner, 2=edge, 4=face, 7=all")
     ("bddcVerbose", options.bddcVerbose, options.bddcVerbose, "print BDDC iteration residuals: 0=no, 1=yes")
     ("bddcUseCg", options.bddcUseCg, options.bddcUseCg, "use CG in BDDC coarse solve path: 0=no, 1=yes")
@@ -934,6 +944,21 @@ int main(int argc, char* argv[])
     throw std::runtime_error("bddcIterations must be at least 1");
   if (options.bddcTolerance <= 0.0)
     throw std::runtime_error("bddcTolerance must be positive");
+  if (!std::isfinite(options.bddcRelativeTolerance) || options.bddcRelativeTolerance < 0.0)
+    throw std::runtime_error("bddcRelativeTolerance must be finite and nonnegative");
+  if (options.bddcRelativeTolerance > 0.0
+      && (!options.bddc || options.sdc || options.bddcOperatorAudit))
+    throw std::runtime_error("bddcRelativeTolerance requires --bddc 1 --sdc 0 --bddcOperatorAudit 0");
+  if (options.bddcAudit && (!options.bddc || options.sdc))
+    throw std::runtime_error("bddcAudit requires --bddc 1 --sdc 0");
+  if (options.bddcOperatorAudit != 0 && options.bddcOperatorAudit != 1)
+    throw std::runtime_error("bddcOperatorAudit must be 0 or 1");
+  if (options.bddcOperatorAudit && (!options.bddc || options.sdc || options.bddcCompression))
+    throw std::runtime_error("bddcOperatorAudit requires --bddc 1 --sdc 0 --bddcCompression 0");
+  if (options.bddcSplitInterfaces != 0 && options.bddcSplitInterfaces != 1)
+    throw std::runtime_error("bddcSplitInterfaces must be 0 or 1");
+  if (options.bddcSplitInterfaces && (!options.bddc || options.sdc))
+    throw std::runtime_error("bddcSplitInterfaces requires --bddc 1 --sdc 0");
 
   OptionalMpiSession mpiSession(argc,argv,options.mpi != 0);
   bool const outputRankZero = EmiBddc::mpiRankZero(options.mpi != 0);
@@ -1138,6 +1163,8 @@ int main(int argc, char* argv[])
   Matrix lhs = assembler.template get<Matrix>(false);
   Vector assembledSystemRhs(nDofs);
   assembler.rhs().write(assembledSystemRhs.begin());
+  if (options.bddcAudit)
+    EmiBddc::auditConstantMode(lhs,assembledSystemRhs,options.mpi != 0);
   if (options.bddcDumpLocalData && outputRankZero)
   {
     dumpGlobalSystem(lhs,assembledSystemRhs,options.outputDir + "/global_system");
@@ -1259,6 +1286,19 @@ int main(int argc, char* argv[])
     // those weights after material-local operators have been finalized.
     EmiBddc::buildDiagonalWeights(bddcData,bddcData.localMatrices,lhs,
                                   options.mpi != 0);
+    if (options.bddcSplitInterfaces)
+      EmiBddc::splitInterfaceGroups(
+        bddcData,gridManager.grid(),uSpace,material,extraTags,options.mpi != 0);
+    if (options.bddcAudit)
+      EmiBddc::auditInterfaceGroups(
+        bddcData,gridManager.grid(),uSpace,material,extraTags,
+        options.bddcInterfaceTypes,options.outputDir + "/bddc_audit",options.mpi != 0);
+    if (options.bddcOperatorAudit)
+    {
+      EmiBddc::auditBddcOperator(bddcData,lhs,options);
+      printTotalCpuTime(totalTimer,options.mpi != 0);
+      return 0;
+    }
     if (options.bddcDumpLocalData && outputRankZero)
       EmiBddc::dumpLocalBddcData(bddcData,options.outputDir + "/bddc_local_data",
                                  assembledSystemRhs,

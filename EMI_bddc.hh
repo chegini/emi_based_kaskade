@@ -17,6 +17,7 @@
 #include <numeric>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -35,6 +36,8 @@
 #include "timestepping/semieuler.hh"
 #include "timestepping/sdc.hh"
 #include "utilities/threading.hh"
+
+#include "EMI_bddc_stopping.hh"
 
 namespace EmiBddc
 {
@@ -195,6 +198,7 @@ namespace EmiBddc
     double rhsSetup = 0.0;
     double bddcSolve = 0.0;
     double correctionAssembly = 0.0;
+    double trueResidualChecks = 0.0;
     double sdcUpdate = 0.0;
     double adaptivity = 0.0;
     double localOperatorExtraction = 0.0;
@@ -202,6 +206,7 @@ namespace EmiBddc
     size_t bddcSolverConstructions = 0;
     size_t bddcSubdomainConstructions = 0;
     size_t bddcSolveCalls = 0;
+    size_t trueResidualCheckCalls = 0;
 
     static double seconds(Clock::time_point start)
     {
@@ -227,6 +232,8 @@ namespace EmiBddc
                 << (bddcSystems > 0 ? static_cast<double>(bddcSolveCalls)/bddcSystems : 0.0)
                 << ")\n"
                 << "  correction assembly/reduction: " << correctionAssembly << "\n"
+                << "  true global residual checks: " << trueResidualCheckCalls
+                << " (wall seconds, excluding correction assembly: " << trueResidualChecks << ")\n"
                 << "  SDC update/bookkeeping: " << sdcUpdate << "\n"
                 << "  algebraic adaptivity: " << adaptivity << "\n";
     }
@@ -241,6 +248,8 @@ namespace EmiBddc
     std::vector<std::vector<int>> dofSubdomains;  // Inverse map: global DOF to owning subdomains.
     std::vector<std::vector<size_t>> dofCells;  // Inverse map: global DOF to incident leaf-cell indices.
     std::vector<int> subdomainSizes;  // Number of local DOFs per subdomain.
+    // Optional labels per sharedDofs entry; empty retains owner-only coarse groups.
+    std::vector<int> interfaceComponents;
     // Combined local LHS for non-SDC BDDC; SDC+BDDC instead restricts mass and stiffness separately.
     std::vector<Matrix> localMatrices;
     // Weights for global-to-local residuals and local-to-global corrections; copies of a DOF sum to one.
@@ -841,22 +850,12 @@ namespace EmiBddc
                      << (*col)[0][0] << '\n';
     }
 
-    // Mirror InterfaceAverages: each shared global DOF contributes to the
-    // coarse group identified by its complete set of subdomain appearances.
-    std::map<std::vector<int>,std::vector<size_t>> dofsBySubdomainGroup;
     for (auto const& occurrences : data.sharedDofs)
     {
       if (occurrences.empty())
         continue;
       size_t const global = data.localDofs[static_cast<size_t>(occurrences.front().s)]
                                            [static_cast<size_t>(occurrences.front().i)];
-      std::vector<int> subdomains;
-      subdomains.reserve(occurrences.size());
-      for (auto const& occurrence : occurrences)
-        subdomains.push_back(occurrence.s);
-      std::sort(subdomains.begin(),subdomains.end());
-      dofsBySubdomainGroup[subdomains].push_back(global);
-
       for (auto const& occurrence : occurrences)
       {
         size_t const subdomain = static_cast<size_t>(occurrence.s);
@@ -867,32 +866,34 @@ namespace EmiBddc
     }
 
     Kaskade::BDDC::InterfaceAverages<1,int> interfaceAverages(
-      data.sharedDofs,data.subdomainSizes,interfaceTypes);
+      data.sharedDofs,data.subdomainSizes,interfaceTypes,data.interfaceComponents);
     auto const& actualConstraints = interfaceAverages.coarseConstraints();
     auto const actualCounts = interfaceAverages.interfaceCount();
-    for (size_t constraintId = 0; constraintId < actualConstraints.size(); ++constraintId)
+    // Read the actual C rows: several constraints can share the same owners
+    // when disconnected components have separate averages.
+    std::vector<std::vector<size_t>> rowsBySubdomain(data.tags.size());
+    for (size_t id = 0; id < actualConstraints.size(); ++id)
+      for (int subdomain : actualConstraints[id].first)
+        rowsBySubdomain.at(subdomain).push_back(id);
+    for (size_t subdomain = 0; subdomain < data.tags.size(); ++subdomain)
     {
-      auto const& subdomains = actualConstraints[constraintId].first;
-      auto const group = dofsBySubdomainGroup.find(subdomains);
-      if (group == dofsBySubdomainGroup.end())
-        throw std::runtime_error("Kaskade coarse constraint has no matching shared-DOF group");
-      auto const& globalDofs = group->second;
-
-      // Match the interface classification used by InterfaceAverages.
-      char const* type = subdomains.size() == 2 ? "face"
-                       : globalDofs.size() == 1 ? "corner"
-                       : "edge";
-      for (size_t global : globalDofs)
-        for (int subdomainId : subdomains)
-        {
-          auto const& localDofs = data.localDofs[static_cast<size_t>(subdomainId)];
-          auto const local = std::lower_bound(localDofs.begin(),localDofs.end(),global);
-          if (local == localDofs.end() || *local != global)
-            throw std::runtime_error("shared BDDC DOF is absent from its listed subdomain");
-          coarseConstraints << constraintId << ',' << type << ',' << subdomainId << ','
-                            << data.tags[static_cast<size_t>(subdomainId)] << ',' << global << ','
-                            << std::distance(localDofs.begin(),local) << '\n';
-        }
+      auto const C = interfaceAverages.template coarseConstraint<double>(subdomain);
+      if (C.N() != rowsBySubdomain[subdomain].size())
+        throw std::runtime_error("BDDC dump: constraint row mapping mismatch");
+      for (auto row = C.begin(); row != C.end(); ++row)
+      {
+        size_t const id = rowsBySubdomain[subdomain][row.index()];
+        size_t count = 0;
+        for (auto col = row->begin(); col != row->end(); ++col)
+          ++count;
+        char const* type = actualConstraints[id].first.size() == 2 ? "face"
+                         : count == 1 ? "corner" : "edge";
+        for (auto col = row->begin(); col != row->end(); ++col)
+          coarseConstraints << id << ',' << type << ',' << subdomain << ','
+                            << data.tags[subdomain] << ','
+                            << data.localDofs[subdomain][col.index()] << ','
+                            << col.index() << '\n';
+      }
     }
 
     std::ofstream summary(directory + "/coarse_summary.txt");
@@ -1572,7 +1573,8 @@ void computeBddcSdcResiduals(Functional& F,
     auto const interfaceSetupStart = profile ? ProfileTimes::Clock::now() : ProfileTimes::Clock::time_point{};
     Kaskade::BDDC::InterfaceAverages<1,int> interfaceAverages(data.sharedDofs,
                                                               data.subdomainSizes,
-                                                              options.bddcInterfaceTypes);
+                                                              options.bddcInterfaceTypes,
+                                                              data.interfaceComponents);
     if (profile)
       profile->interfaceSetup += ProfileTimes::seconds(interfaceSetupStart);
 
@@ -1910,7 +1912,8 @@ State runBddcSdc(Functional& F,
 
     Kaskade::BDDC::InterfaceAverages<1,int> interfaceAverages(data.sharedDofs,
                                                               data.subdomainSizes,
-                                                              options.bddcInterfaceTypes);
+                                                              options.bddcInterfaceTypes,
+                                                              data.interfaceComponents);
     auto const interfaceCount = interfaceAverages.interfaceCount();
     if (mpiRankZero(options.mpi != 0))
       std::cout << "BDDC coarse interfaces: corners=" << interfaceCount[0]
@@ -2033,8 +2036,46 @@ State runBddcSdc(Functional& F,
         subdomainSolutions[id].resize(data.localDofs[id].size());
     std::vector<double> localStep(nDofs, 0.0);
     std::vector<double> globalStep(nDofs, 0.0);
-    bool const computeDiagnostics = options.diagnostics && mpiRankZero(options.mpi != 0);
-    Vector diagnosticResidual(computeDiagnostics ? nDofs : 0);
+    bool const rankZero = mpiRankZero(options.mpi != 0);
+    bool const relativeStopping = options.bddcRelativeTolerance > 0.0;
+    bool const computeDiagnostics = options.diagnostics && rankZero;
+    Vector diagnosticResidual((computeDiagnostics || (relativeStopping && rankZero)) ? nDofs : 0);
+
+    // Assemble the actual accepted correction, not the CG search direction.
+    // This is needed after every accepted update in true-residual mode.
+    auto assembleCurrentStep = [&]()
+    {
+      auto const start = options.profile ? ProfileTimes::Clock::now()
+                                         : ProfileTimes::Clock::time_point{};
+      std::fill(localStep.begin(),localStep.end(),0.0);
+      for (size_t subdomain = 0; subdomain < subdomains.size(); ++subdomain)
+      {
+        if (!subdomains.has(subdomain))
+          continue;
+        auto& localSolution = subdomainSolutions[subdomain];
+        subdomains[subdomain].getSolution(localSolution);
+        for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
+        {
+          size_t const global = data.localDofs[subdomain][local];
+          localStep[global] += data.weights[subdomain][local][0] * localSolution[local];
+        }
+      }
+#ifdef KASKADE_HAVE_MPI
+      if (options.mpi != 0)
+        MPI_Allreduce(localStep.data(),globalStep.data(),static_cast<int>(nDofs),
+                      MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+      else
+#endif
+        globalStep = localStep;
+      for (size_t i = 0; i < nDofs; ++i)
+        stepVector[i] = globalStep[i];
+      if (options.profile)
+        profile.correctionAssembly += ProfileTimes::seconds(start);
+    };
+    if (relativeStopping && rankZero)
+      std::cout << "BDDC stopping rule: ||b-A*du||_2 / ||b||_2 <= "
+                << options.bddcRelativeTolerance
+                << " (zero RHS: absolute residual; legacy internal tolerance is inactive)\n";
 
     for (int step = 0; step < steps; ++step)
     {
@@ -2081,83 +2122,132 @@ State runBddcSdc(Functional& F,
         ++profile.bddcSystems;
       }
 
-      double residual = std::numeric_limits<double>::infinity();
-      int iteration = 0;
-      auto const solveStart = options.profile
-                            ? ProfileTimes::Clock::now()
-                            : ProfileTimes::Clock::time_point{};
-      for (; iteration < options.bddcIterations; ++iteration)
+      double const rhsNorm = rankZero && (computeDiagnostics || relativeStopping)
+                           ? std::sqrt(rhs.dot(rhs)) : 0.0;
+      auto measureCurrentResidual = [&]()
       {
-        if (options.profile)
-          ++profile.bddcSolveCalls;
-        residual = solver.solve();
-        if (solver.stopped())
+        auto const start = options.profile ? ProfileTimes::Clock::now()
+                                           : ProfileTimes::Clock::time_point{};
+        TrueResidual measured;
+        if (rankZero)
         {
-          if (verbose)
-            std::cout << "  BDDC stopped before applying the current correction: "
-                      << (solver.stagnated() ? "stagnation" : "breakdown") << "\n";
-          break;
+          diagnosticResidual = rhs;
+          diagnosticResidual *= -1.0;
+          globalMatrix.umv(stepVector,diagnosticResidual);
+          measured = {std::sqrt(diagnosticResidual.dot(diagnosticResidual)),rhsNorm};
         }
-        if (residual < options.bddcTolerance)
-          break;
-      }
-      if (options.profile)
-        profile.bddcSolve += ProfileTimes::seconds(solveStart);
-
-      auto const correctionStart = options.profile
-                                 ? ProfileTimes::Clock::now()
-                                 : ProfileTimes::Clock::time_point{};
-      // Owned subdomains contribute locally; reduce the assembled global
-      // correction so every rank advances the same EMI state.
-      std::fill(localStep.begin(),localStep.end(),0.0);
-      for (size_t subdomain = 0; subdomain < subdomains.size(); ++subdomain)
-      {
-        if (!subdomains.has(subdomain))
-          continue;
-        auto& localSolution = subdomainSolutions[subdomain];
-        subdomains[subdomain].getSolution(localSolution);
-        for (size_t local = 0; local < data.localDofs[subdomain].size(); ++local)
-        {
-          size_t const global = data.localDofs[subdomain][local];
-          localStep[global] += data.weights[subdomain][local][0] * localSolution[local];
-        }
-      }
-
 #ifdef KASKADE_HAVE_MPI
-      if (options.mpi != 0)
-        MPI_Allreduce(localStep.data(), globalStep.data(), static_cast<int>(nDofs),
-                      MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-      else
+        // The global matrix, RHS and correction are replicated. Evaluate their
+        // norm once on root; summing replicated norms would overcount them.
+        // Broadcast the measurement so every rank makes the same stop decision.
+        if (relativeStopping && options.mpi != 0)
+        {
+          double norms[2] = {measured.absolute,measured.rhsNorm};
+          MPI_Bcast(norms,2,MPI_DOUBLE,0,MPI_COMM_WORLD);
+          measured = {norms[0],norms[1]};
+        }
 #endif
-        globalStep = localStep;
+        if (options.profile)
+        {
+          profile.trueResidualChecks += ProfileTimes::seconds(start);
+          ++profile.trueResidualCheckCalls;
+        }
+        return measured;
+      };
 
-      for (size_t i = 0; i < nDofs; ++i)
-        stepVector[i] = globalStep[i];
-      if (options.profile)
-        profile.correctionAssembly += ProfileTimes::seconds(correctionStart);
-
-      if (computeDiagnostics)
+      double residual = std::numeric_limits<double>::infinity();
+      int solveCalls = 0;
+      TrueResidualResult trueResult;
+      if (relativeStopping)
       {
-        diagnosticResidual = rhs;
-        diagnosticResidual *= -1.0;
-        globalMatrix.umv(stepVector,diagnosticResidual);
-        double const residualNorm = std::sqrt(
-          std::max(0.0,diagnosticResidual.dot(diagnosticResidual)));
-        double const rhsNorm = std::sqrt(std::max(0.0,rhs.dot(rhs)));
-        std::cout << "BDDC global residual step " << step+1
-                  << ": abs=" << residualNorm
-                  << " rel=" << (rhsNorm > 0.0 ? residualNorm/rhsNorm : residualNorm)
-                  << "\n";
+        trueResult = solveToTrueResidual(options.bddcIterations,options.bddcRelativeTolerance,
+          [&]()
+          {
+            auto const start = options.profile ? ProfileTimes::Clock::now()
+                                               : ProfileTimes::Clock::time_point{};
+            double const internalNorm = solver.solve();
+            if (options.profile)
+            {
+              profile.bddcSolve += ProfileTimes::seconds(start);
+              ++profile.bddcSolveCalls;
+            }
+            return internalNorm;
+          },
+          [&]() { return solver.stopped(); },
+          [&]()
+          {
+            assembleCurrentStep();
+            return measureCurrentResidual();
+          });
+        solveCalls = trueResult.calls;
+        residual = trueResult.internalNorm;
+      }
+      else
+      {
+        auto const solveStart = options.profile
+                              ? ProfileTimes::Clock::now()
+                              : ProfileTimes::Clock::time_point{};
+        for (int iteration = 0; iteration < options.bddcIterations; ++iteration)
+        {
+          if (options.profile)
+            ++profile.bddcSolveCalls;
+          ++solveCalls;
+          residual = solver.solve();
+          if (solver.stopped())
+          {
+            if (verbose)
+              std::cout << "  BDDC stopped before applying the current correction: "
+                        << (solver.stagnated() ? "stagnation" : "breakdown") << "\n";
+            break;
+          }
+          if (residual < options.bddcTolerance)
+            break;
+        }
+        if (options.profile)
+          profile.bddcSolve += ProfileTimes::seconds(solveStart);
+        assembleCurrentStep();
+      }
+      if (relativeStopping || computeDiagnostics)
+      {
+        TrueResidual const measured = relativeStopping ? trueResult.measured
+                                                        : measureCurrentResidual();
+        if (rankZero)
+        {
+          std::cout << "BDDC global residual step " << step+1
+                    << ": abs=" << measured.absolute << " rel=" << measured.relative();
+          if (relativeStopping)
+            std::cout << " target=" << options.bddcRelativeTolerance
+                      << " status=" << (trueResult.converged() ? "converged" : "not-converged");
+          std::cout << "\n";
+        }
+      }
+      if (relativeStopping && !trueResult.converged())
+      {
+        char const* reason = trueResult.status == TrueResidualStatus::iterationLimit
+                           ? "iteration limit"
+                           : trueResult.status == TrueResidualStatus::nonfiniteResidual
+                           ? "nonfinite true residual or RHS norm"
+                           : solver.stagnated() ? "solver stagnation" : "solver breakdown";
+        if (rankZero)
+          std::cout << "BDDC step " << step+1 << " failed after " << solveCalls
+                    << " solver calls: " << reason << ". State was not advanced.\n" << std::flush;
+        throw std::runtime_error(std::string("BDDC true relative residual target not reached: ")
+                                 + reason);
       }
 
       for (size_t i = 0; i < nDofs; ++i)
         boost::fusion::at_c<0>(stepState.data).coefficients()[i] = stepVector[i];
 
       Kaskade::component<0>(state) += Kaskade::component<0>(stepState);
-      if (verbose && mpiRankZero(options.mpi != 0))
+      if (verbose && rankZero)
+      {
         std::cout << "BDDC step " << step+1 << "/" << steps
-                  << ": iterations=" << std::min(iteration+1,options.bddcIterations)
-                  << ", residual=" << residual << "\n";
+                  << ": iterations=" << solveCalls;
+        if (relativeStopping)
+          std::cout << ", true relative residual=" << trueResult.measured.relative() << "\n";
+        else
+          std::cout << ", residual=" << residual << "\n";
+      }
     }
 
     // The retained solver reports cumulative traffic. Add it once at the end.
