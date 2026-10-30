@@ -1923,7 +1923,7 @@ State runBddcSdc(Functional& F,
                                                               options.bddcInterfaceTypes,
                                                               data.interfaceComponents);
     auto const interfaceCount = interfaceAverages.interfaceCount();
-    if (!options.quiet && mpiRankZero(options.mpi != 0))
+    if (mpiRankZero(options.mpi != 0))
       std::cout << "BDDC coarse interfaces: corners=" << interfaceCount[0]
                 << ", edges=" << interfaceCount[1]
                 << ", faces=" << interfaceCount[2] << "\n";
