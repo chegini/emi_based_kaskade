@@ -53,6 +53,7 @@
 #include "EMI_phase_profile.hh"
 #include "EMI_interface_assembly.hh"
 #include "EMI_material_assembly.hh"
+#include "EMI_direct_matrix.hh"
 #include "EMI_model.hh"
 
 using namespace Kaskade;
@@ -68,6 +69,7 @@ struct EmiOptions
   std::string intraSet = "./input/10Cells3d_10extra_list_intracellular.txt";
   std::string excitedSet = "./input/10Cells3d_10extra_early_excited.txt";
   std::string outputDir = "output";
+  std::string directBackend = "umfpack";
 
   int refinements = 0;
   int order = 1;
@@ -109,6 +111,7 @@ struct EmiOptions
   int bddcInterfaceTypes = 7;
   int bddcVerbose = 0;
   int bddcUseCg = 1;
+  int bddcConditionEstimate = 0;
   int masterWorker = 0;
   int mpi = 0;
 
@@ -887,6 +890,8 @@ int main(int argc, char* argv[])
     ("cgTol", options.cgTol, options.cgTol, "PCG tolerance")
     ("maxCGIter", options.maxCGIter, options.maxCGIter, "maximum PCG iterations")
     ("direct", options.direct, options.direct, "use direct solver instead of PCG")
+    ("directBackend", options.directBackend, options.directBackend,
+     "global direct backend: umfpack (default), or mumps-spd (single-rank non-SDC)")
     ("CG_shift", options.cgShift, options.cgShift, "apply constant shift correction after PCG")
     ("vtk", options.writeVTK, options.writeVTK, "write VTK output: 0=no, 1=yes")
     ("diagnostics", options.diagnostics, options.diagnostics, "print per-step vector diagnostics: 0=no, 1=yes")
@@ -933,6 +938,8 @@ int main(int argc, char* argv[])
     ("bddcInterfaceTypes", options.bddcInterfaceTypes, options.bddcInterfaceTypes, "BDDC interface flags: 1=corner, 2=edge, 4=face, 7=all")
     ("bddcVerbose", options.bddcVerbose, options.bddcVerbose, "print BDDC iteration residuals: 0=no, 1=yes")
     ("bddcUseCg", options.bddcUseCg, options.bddcUseCg, "use CG in BDDC coarse solve path: 0=no, 1=yes")
+    ("bddcConditionEstimate", options.bddcConditionEstimate, options.bddcConditionEstimate,
+     "print a CG/Lanczos Ritz estimate of the BDDC-preconditioned spectral condition number")
     ("masterWorker", options.masterWorker, options.masterWorker, "dedicated rank-0 coarse master: 0=existing path, 1=master-worker")
     ("mpi", options.mpi, options.mpi, "initialize MPI and run a startup communication check: 0=no, 1=yes")
     ("nThreads", options.assemblyThreads, options.assemblyThreads, "assembly/setup tasks and Kaskade global worker limit per rank; 1=sequential, 0=automatic")
@@ -945,6 +952,10 @@ int main(int argc, char* argv[])
 
   if (options.dt <= 0.0)
     throw std::runtime_error("dt must be positive");
+  if (options.directBackend != "umfpack" && options.directBackend != "mumps-spd")
+    throw std::runtime_error("directBackend must be umfpack or mumps-spd");
+  if (options.directBackend == "mumps-spd" && (!options.direct || options.bddc || options.sdc))
+    throw std::runtime_error("mumps-spd requires --direct 1 --bddc 0 --sdc 0");
   if (options.finalTime < 0.0)
     throw std::runtime_error("finalTime must be nonnegative");
   if (options.assemblyThreads < 0)
@@ -964,6 +975,13 @@ int main(int argc, char* argv[])
   if (options.bddcRelativeTolerance > 0.0
       && (!options.bddc || options.sdc || options.bddcOperatorAudit))
     throw std::runtime_error("bddcRelativeTolerance requires --bddc 1 --sdc 0 --bddcOperatorAudit 0");
+  if (options.bddcConditionEstimate != 0 && options.bddcConditionEstimate != 1)
+    throw std::runtime_error("bddcConditionEstimate must be 0 or 1");
+  if (options.bddcConditionEstimate &&
+      (!options.bddc || options.sdc || !options.bddcUseCg
+       || options.bddcCompression || options.bddcOperatorAudit))
+    throw std::runtime_error("bddcConditionEstimate requires --bddc 1 --sdc 0 --bddcUseCg 1 "
+                             "--bddcCompression 0 --bddcOperatorAudit 0");
   if (options.bddcAudit && (!options.bddc || options.sdc))
     throw std::runtime_error("bddcAudit requires --bddc 1 --sdc 0");
   if (options.bddcOperatorAudit != 0 && options.bddcOperatorAudit != 1)
@@ -997,6 +1015,16 @@ int main(int argc, char* argv[])
 
   OptionalMpiSession mpiSession(argc,argv,options.mpi != 0);
   bool const outputRankZero = EmiBddc::mpiRankZero(options.mpi != 0);
+#ifdef KASKADE_HAVE_MPI
+  if (options.directBackend == "mumps-spd")
+  {
+    int initialized = 0, ranks = 1;
+    MPI_Initialized(&initialized);
+    if (initialized) MPI_Comm_size(MPI_COMM_WORLD,&ranks);
+    if (ranks != 1)
+      throw std::runtime_error("mumps-spd uses sequential MUMPS; launch with -np 1");
+  }
+#endif
 
   std::filesystem::create_directories(options.outputDir);
 
@@ -1555,8 +1583,28 @@ int main(int argc, char* argv[])
   if (options.direct && steps > 0)
   {
     if (outputRankZero)
-      std::cout << "Factoring fixed EMI matrix once for " << steps << " time steps\n";
-    directSolver.emplace(lhs);
+      std::cout << "Factoring fixed EMI matrix once for " << steps
+                << " time steps, backend=" << options.directBackend << "\n";
+    if (options.directBackend == "mumps-spd")
+    {
+      auto const check = EmiBddc::checkSpdDirectInput(lhs);
+      if (outputRankZero)
+        std::cout << "SPD direct input: maxAbsSkew=" << check.maxAbsSkew
+                  << " symmetryTolerance=" << check.symmetryTolerance
+                  << " lowerNonzeros=" << check.lowerNonzeros << "\n";
+      // A single lower triangle without structural zeros reduces input storage.
+      // This changes the factorization backend only, not the EMI operator.
+      MatrixAsTriplet<double> lower;
+      lower.reserve(check.lowerNonzeros);
+      EmiBddc::visitDirectLowerNonzeros(lhs,[&](int row, int col, double value)
+      {
+        lower.addEntry(row,col,value);
+      });
+      directSolver.emplace(lower,DirectType::MUMPS,
+                           FactorizationOptions(MatrixProperties::POSITIVEDEFINITE,1));
+    }
+    else
+      directSolver.emplace(lhs);
   }
 
   // The mesh and operator dimensions are fixed throughout this timestep loop.
@@ -1578,6 +1626,20 @@ int main(int argc, char* argv[])
     {
       stepVector = 0.0;
       directSolver->apply(stepVector,rhsVector);
+      if (options.directBackend == "mumps-spd")
+      {
+        Vector residual(rhsVector);
+        residual *= -1.0;
+        lhs.umv(stepVector,residual);
+        double const absolute = std::sqrt(residual.dot(residual));
+        double const rhsNorm = std::sqrt(rhsVector.dot(rhsVector));
+        double const relative = rhsNorm > 0 ? absolute/rhsNorm : absolute;
+        if (outputRankZero)
+          std::cout << "Direct global residual step " << step+1
+                    << ": abs=" << absolute << " rel=" << relative << "\n";
+        if (!std::isfinite(absolute) || !std::isfinite(relative))
+          throw std::runtime_error("Nonfinite MUMPS direct solution residual; state not advanced");
+      }
     }
     else
       solveLinearSystem(lhs,stepVector,rhsVector,options);
