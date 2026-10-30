@@ -9,6 +9,12 @@ if [[ "$quiet" != 0 && "$quiet" != 1 ]]; then
   exit 2
 fi
 
+convergence_report=${CONVERGENCE_REPORT:-1}
+if [[ "$convergence_report" != 0 && "$convergence_report" != 1 ]]; then
+  printf 'CONVERGENCE_REPORT must be 0 or 1.\n' >&2
+  exit 2
+fi
+
 steps=${1:-1}
 if [[ ! "$steps" =~ ^[1-9][0-9]*$ ]]; then
   printf 'Usage: bash tests/run_emi_rizzo.sh [positive number of steps]\n' >&2
@@ -58,7 +64,7 @@ for ranks in "${rank_counts[@]}"; do
     --bddc 1 --direct 0 --bddcCompression 0 --masterWorker 0 \
     --bddcSplitInterfaces 0 --bddcInterfaceTypes 7 \
     --bddcUseCg 1 --bddcRelativeTolerance 1e-7 --bddcVerbose 1 \
-    --bddcConditionEstimate 1 \
+    --bddcConditionEstimate 1 --bddcConvergenceReport "$convergence_report" \
     --bddcInterfaceAssembly 2 --bddcInterfaceAssemblyCheck 0 \
     --bddcMaterialAssembly 1 --bddcMaterialAssemblyCheck 0 \
     --dir "$out" 2>&1 | tee "$out/run.log"

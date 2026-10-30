@@ -113,6 +113,7 @@ struct EmiOptions
   int bddcVerbose = 0;
   int bddcUseCg = 1;
   int bddcConditionEstimate = 0;
+  int bddcConvergenceReport = -1; // Automatic for CG with true-residual stopping.
   int masterWorker = 0;
   int mpi = 0;
 
@@ -950,8 +951,10 @@ int main(int argc, char* argv[])
     ("bddcTolerance", options.bddcTolerance, options.bddcTolerance, "legacy BDDC internal search-direction energy-norm tolerance")
     ("bddcRelativeTolerance", options.bddcRelativeTolerance, options.bddcRelativeTolerance, "true global relative residual tolerance; 0 keeps the legacy stopping rule")
     ("bddcInterfaceTypes", options.bddcInterfaceTypes, options.bddcInterfaceTypes, "BDDC interface flags: 1=corner, 2=edge, 4=face, 7=all")
-    ("bddcVerbose", options.bddcVerbose, options.bddcVerbose, "print BDDC iteration residuals: 0=no, 1=yes")
+    ("bddcVerbose", options.bddcVerbose, options.bddcVerbose, "internal BDDC iteration table when convergence report is off: 0=no, 1=yes")
     ("bddcUseCg", options.bddcUseCg, options.bddcUseCg, "use CG in BDDC coarse solve path: 0=no, 1=yes")
+    ("bddcConvergenceReport", options.bddcConvergenceReport, options.bddcConvergenceReport,
+     "true-residual table and CSV: -1=automatic (default), 0=off, 1=on")
     ("bddcConditionEstimate", options.bddcConditionEstimate, options.bddcConditionEstimate,
      "print a CG/Lanczos Ritz estimate of the BDDC-preconditioned spectral condition number")
     ("masterWorker", options.masterWorker, options.masterWorker, "dedicated rank-0 coarse master: 0=existing path, 1=master-worker")
@@ -991,6 +994,16 @@ int main(int argc, char* argv[])
   if (options.bddcRelativeTolerance > 0.0
       && (!options.bddc || options.sdc || options.bddcOperatorAudit))
     throw std::runtime_error("bddcRelativeTolerance requires --bddc 1 --sdc 0 --bddcOperatorAudit 0");
+  if (options.bddcConvergenceReport < -1 || options.bddcConvergenceReport > 1)
+    throw std::runtime_error("bddcConvergenceReport must be -1 (automatic), 0 or 1");
+  bool const supportsConvergenceReport = options.bddc && !options.sdc && options.bddcUseCg
+                                     && options.bddcRelativeTolerance > 0.0
+                                     && !options.bddcOperatorAudit;
+  if (options.bddcConvergenceReport == -1)
+    options.bddcConvergenceReport = supportsConvergenceReport ? 1 : 0;
+  if (options.bddcConvergenceReport && !supportsConvergenceReport)
+    throw std::runtime_error("bddcConvergenceReport requires --bddc 1 --sdc 0 --bddcUseCg 1 "
+                             "--bddcRelativeTolerance > 0 --bddcOperatorAudit 0");
   if (options.bddcConditionEstimate != 0 && options.bddcConditionEstimate != 1)
     throw std::runtime_error("bddcConditionEstimate must be 0 or 1");
   if (options.bddcConditionEstimate &&

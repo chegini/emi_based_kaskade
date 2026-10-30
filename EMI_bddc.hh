@@ -39,6 +39,7 @@
 
 #include "EMI_bddc_stopping.hh"
 #include "EMI_bddc_condition.hh"
+#include "EMI_bddc_convergence.hh"
 
 namespace EmiBddc
 {
@@ -2010,7 +2011,8 @@ State runBddcSdc(Functional& F,
     std::iota(activeIds.begin(),activeIds.end(),0);
     bool useCgSolver = options.bddcUseCg != 0;
     // Explicit iteration verbosity also applies in quiet mode.
-    bool verbose = options.bddcVerbose != 0;
+    // Select one table; the report uses the same accepted updates and stopping checks.
+    bool verbose = options.bddcVerbose != 0 && !options.bddcConvergenceReport;
 
     auto const solverStart = options.profile
                            ? ProfileTimes::Clock::now()
@@ -2046,6 +2048,18 @@ State runBddcSdc(Functional& F,
     std::vector<double> globalStep(nDofs, 0.0);
     bool const rankZero = mpiRankZero(options.mpi != 0);
     bool const relativeStopping = options.bddcRelativeTolerance > 0.0;
+    auto checkConvergenceOutput = [&](bool success)
+    {
+      if (!options.bddcConvergenceReport)
+        return;
+      int ready = success ? 1 : 0;
+#ifdef KASKADE_HAVE_MPI
+      if (options.mpi != 0)
+        MPI_Bcast(&ready,1,MPI_INT,0,MPI_COMM_WORLD);
+#endif
+      if (!ready)
+        throw std::runtime_error("Cannot write BDDC convergence CSV in " + options.outputDir);
+    };
     bool const computeDiagnostics = options.diagnostics && rankZero;
     Vector diagnosticResidual((computeDiagnostics || (relativeStopping && rankZero)) ? nDofs : 0);
 
@@ -2084,6 +2098,11 @@ State runBddcSdc(Functional& F,
       std::cout << "BDDC stopping rule: ||b-A*du||_2 / ||b||_2 <= "
                 << options.bddcRelativeTolerance
                 << " (zero RHS: absolute residual; legacy internal tolerance is inactive)\n";
+    if (verbose && rankZero)
+      std::cout << "BDDC table legend: step length=alpha; ||du||_A=energy norm of the unscaled search direction.\n"
+                << "  p[0]=internal residual dot BDDC-preconditioned residual; not ||b||_2.\n"
+                << "  Table values are evaluated before each update; du in the stopping rule is the accumulated correction.\n"
+                << "  rel uses the assembled global residual and fixed timestep RHS norm (absolute residual for zero RHS).\n";
     if (options.bddcConditionEstimate && rankZero && !options.quiet)
       std::cout << "BDDC condition diagnostic: RHS-dependent CG/Lanczos Ritz estimate "
                 << "after interior elimination; fixed SPD preconditioner assumed, "
@@ -2167,6 +2186,16 @@ State runBddcSdc(Functional& F,
         return measured;
       };
 
+      ConvergenceReport convergenceReport;
+      std::string const convergencePath = options.bddcConvergenceReport
+        ? options.outputDir + "/bddc-convergence-step" + std::to_string(step+1) + ".csv"
+        : std::string{};
+      if (options.bddcConvergenceReport)
+        checkConvergenceOutput(!rankZero || convergenceReport.open(
+          convergencePath,step+1,options.bddcRelativeTolerance,std::cout));
+      int reportedUpdates = 0;
+      std::optional<double> reportedAlpha;
+
       double residual = std::numeric_limits<double>::infinity();
       int solveCalls = 0;
       CgConditionEstimator conditionEstimator;
@@ -2189,6 +2218,15 @@ State runBddcSdc(Functional& F,
                                                : ProfileTimes::Clock::time_point{};
             double const internalNorm = solver.solve();
             recordCgStep();
+            if (options.bddcConvergenceReport)
+            {
+              auto const& cgStep = solver.lastCgStep();
+              if (cgStep.applied)
+              {
+                ++reportedUpdates;
+                reportedAlpha = cgStep.alpha;
+              }
+            }
             if (options.profile)
             {
               profile.bddcSolve += ProfileTimes::seconds(start);
@@ -2200,7 +2238,10 @@ State runBddcSdc(Functional& F,
           [&]()
           {
             assembleCurrentStep();
-            return measureCurrentResidual();
+            TrueResidual const measured = measureCurrentResidual();
+            if (options.bddcConvergenceReport && rankZero)
+              convergenceReport.record(reportedUpdates,reportedAlpha,measured);
+            return measured;
           });
         solveCalls = trueResult.calls;
         residual = trueResult.internalNorm;
@@ -2230,6 +2271,12 @@ State runBddcSdc(Functional& F,
         if (options.profile)
           profile.bddcSolve += ProfileTimes::seconds(solveStart);
         assembleCurrentStep();
+      }
+      if (options.bddcConvergenceReport)
+      {
+        checkConvergenceOutput(!rankZero || convergenceReport.close());
+        if (rankZero)
+          std::cout << "BDDC convergence data: " << convergencePath << "\n";
       }
       if (relativeStopping || computeDiagnostics)
       {

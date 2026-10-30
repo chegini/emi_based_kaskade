@@ -214,13 +214,22 @@ list. The defaults below are defined in `EMI_model.cpp`.
 Add `--quiet 1` to a non-SDC BDDC or direct run for compact console output.
 The default, `--quiet 0`, retains the existing output. Quiet mode hides routine
 assembly messages, timing/compression tables and MUMPS informational output.
-`--bddcVerbose 1` enables the BDDC iteration table even in quiet mode;
-`--bddcVerbose 0` shows only the per-step summaries. The Rizzo BDDC runner enables
-`--bddcVerbose 1`. During BDDC setup, rank zero lists every local submatrix
+The true-residual iteration table is enabled by default for supported BDDC CG
+runs (see the convergence-report section below). When that report is disabled,
+`--bddcVerbose 1` enables the internal iteration table even in quiet mode;
+`--bddcVerbose 0` shows only per-step summaries. The Pepe and Rizzo runners set
+`--bddcVerbose 1` so the internal table remains available as an alternative.
+During BDDC setup, rank zero lists every local submatrix
 with its material tag and dimensions once material assembly/exchange and local
 matrix extraction have completed, including submatrices assembled by other MPI
 ranks. The true-residual stopping rule is printed once on rank zero before the
-first solve, including in quiet mode. It retains mesh information, per-step progress, failures,
+first solve, including in quiet mode. When the internal table is selected,
+a legend follows the stopping rule: `||du||_A` is the energy norm of the unscaled search
+direction, and `p[0]` is the internal residual/preconditioned-residual inner
+product. The table values precede the update; the stopping rule uses the
+accumulated correction and the separately measured global residual. The RHS
+norm is fixed during each timestep solve. Quiet mode retains mesh information,
+per-step progress, failures,
 explicitly requested diagnostics/audits, and final wall time. Solver settings,
 stopping checks, MPI reductions and VTK output are unchanged.
 
@@ -272,6 +281,56 @@ report is saved as `compare-bddc.log` in the direct output directory.
 Omit `QUIET=1` for the original output. The direct runner still prints its final
 VTU comparison when a BDDC reference file exists; its verbose memory/timing
 report is disabled in quiet mode. Both runners keep their existing log paths.
+
+### Optional true-residual convergence report
+
+The default report shows the accepted CG update count, step length,
+`||b-A*du||_2`, `||b||_2`, and their ratio for non-SDC BDDC CG runs with
+`--bddcRelativeTolerance` greater than zero. The application setting defaults
+to `--bddcConvergenceReport -1` (automatic): it enables the report for those
+runs and keeps it off for other solver modes. This changes reporting only;
+it does not enable CG or change any stopping tolerance.
+
+`--bddcConvergenceReport 1` explicitly enables the report and requires the
+supported settings above. `--bddcConvergenceReport 0` disables it and restores
+the original internal table when `--bddcVerbose 1` is selected. The final
+residual and requested condition estimate remain visible in both modes.
+
+Row zero measures the initial accepted correction after interior elimination
+and has no step length. Subsequent rows measure the accumulated correction
+AFTER applying the listed alpha. Rejected corrections produce no additional
+row. The RHS norm is fixed throughout a timestep's linear solve; for zero RHS,
+the `relative_residual` field uses the documented absolute-residual fallback.
+The report observes existing stopping checks: it adds no residual evaluations
+and changes no matrix, correction or convergence decision. It adds optional
+console/file I/O; file-open/write failure is propagated to all MPI ranks.
+
+Rank zero writes `bddc-convergence-step<N>.csv` in the run's output directory,
+with 17-digit values. A failing solve retains its available history. For Pepe:
+
+```bash
+QUIET=1 RANKS=8 VTK=1 bash tests/run_emi_pepe.sh 1
+```
+
+Both Pepe and Rizzo runners enable the report by default. Set
+`CONVERGENCE_REPORT=0` to select their original internal iteration table.
+For plotting, run the standalone helper on a machine with Matplotlib installed:
+
+```bash
+python3 plot_emi_bddc_convergence.py \
+  output/pepe-bddc-optimized-cond-np8-1steps/bddc-convergence-step1.csv
+```
+
+The saved PNG has two panels: true relative residual on a logarithmic axis
+with the stopping target, and CG step length. Use `--absolute` to plot the
+absolute residual, fixed RHS norm and corresponding absolute stopping target.
+`--format pdf` or `--format svg` provides vector output. Exact zero residuals
+are identified in a note rather than assigned artificial positive values on
+the logarithmic axis. Multiple CSV paths can be supplied to plot several steps.
+CSV generation has no Python dependency; the figure helper needs Matplotlib
+(`python3 -m pip install matplotlib` in your chosen plotting environment).
+The previously exported container image must be rebuilt to include these files,
+or compile the updated host checkout mounted into the development container.
 
 ### PCG and direct linear solvers
 
@@ -373,8 +432,9 @@ Example:
 | `--bddcTolerance` | `1e-8` | Legacy internal search-direction energy-norm tolerance |
 | `--bddcRelativeTolerance` | `0` | True global relative residual target for non-SDC BDDC; `0` keeps the legacy stopping rule |
 | `--bddcInterfaceTypes` | `7` | Interface flags: `1` corner, `2` edge, `4` face, `7` all |
-| `--bddcVerbose` | `0` | Print BDDC iteration information, including in quiet mode; enabled by the Rizzo BDDC runner |
+| `--bddcVerbose` | `0` | Show the internal iteration table when the convergence report is off, including in quiet mode; enabled by the Pepe/Rizzo runners |
 | `--bddcUseCg` | `1` | Use CG in the BDDC coarse-solve path |
+| `--bddcConvergenceReport` | `-1` | Automatic true-residual table/CSV for non-SDC CG with relative-residual stopping; `0` disables, `1` explicitly enables |
 | `--bddcConditionEstimate` | `0` | Print an RHS-dependent CG/Lanczos Ritz estimate of the BDDC-preconditioned spectral condition number; requires uncompressed, non-SDC CG |
 | `--bddcAudit` | `0` | Audit the constant mode and coarse interface groups; requires `--bddc 1 --sdc 0` |
 | `--bddcMaterialAssembly` | `0` | Non-SDC material matrix assembly: `0` replicated legacy path; `1` assemble on each subdomain's MPI owner, then exchange sparse nonzeros |
