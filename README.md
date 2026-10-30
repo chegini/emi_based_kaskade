@@ -272,6 +272,8 @@ Example:
 | `--bddcVerbose` | `0` | Print BDDC iteration information |
 | `--bddcUseCg` | `1` | Use CG in the BDDC coarse-solve path |
 | `--bddcAudit` | `0` | Audit the constant mode and coarse interface groups; requires `--bddc 1 --sdc 0` |
+| `--bddcInterfaceAssembly` | `0` | Non-SDC interface mass assembly: `0` legacy pair-by-pair, `1` shared traversal on every rank, `2` shared traversal on source MPI owners |
+| `--bddcInterfaceAssemblyCheck` | `0` | Compare optimized directed mass blocks against legacy pair assembly before redistribution; requires assembly mode `1` or `2` |
 | `--bddcSplitInterfaces` | `0` | Separate coarse averages by connected electrical component; requires `--bddc 1 --sdc 0` |
 | `--bddcOperatorAudit` | `0` | Diagnose uncompressed BDDC operators, then exit without timestep solves; requires `--bddc 1 --sdc 0 --bddcCompression 0` |
 
@@ -328,6 +330,65 @@ Multiple components or labels identify candidates for additional constraints,
 not proven errors. The hypothetical constraint count does not change the solver.
 The `C*1` check verifies agreement of the actual constraint row sums across
 subdomains; it does not test near-null-mode reproduction by the coarse basis.
+
+Interface assembly modes `1` and `2` replace one full assembler call per
+material-interface direction with a single grid traversal. Each directed face
+uses the existing face integration order, Kaskade basis evaluator (including
+mapper transformations), and linearized mass cache. Same-material and
+extracellular/extracellular faces contribute no interface mass. Intracellular
+interfaces retain their existing capacitance terms. Both face orientations are
+integrated independently using their own inside/outside coordinate maps.
+
+The legacy EMI assembler declares the scalar matrix block symmetric. It
+retains only global row >= column during scatter and mirrors those entries
+when extracting each directed pair matrix. The shared traversal follows this
+convention too; it does not replace a directed pair by an unsymmetrized jump
+block. Each assembled directed block is redistributed in the existing pair
+order, subtracting half from its source material and adding half to its
+neighbor. The global matrix, weak outer Robin term, material assembly, coarse
+constraints, weights formula, and solver stopping criterion are unchanged.
+Face-wise accumulation may produce floating-point roundoff differences.
+
+Mode `2` uses the same deterministic source-subdomain ownership as the BDDC
+solver, including `--masterWorker`. Each directed block is integrated once by
+its source owner. Sparse entries are exchanged using integer words carrying
+exact double bits, without a floating-point MPI reduction. The current
+`BddcData` still retains replicated local matrices for diagonal weights, dumps
+and audits, so the sparse setup blocks are gathered to all ranks, including
+both owners. This removes duplicated integration, while leaving the existing
+matrix storage and fine/coarse solver communication unchanged. With one rank
+or MPI disabled, mode `2` is the shared serial traversal. The traversal itself
+is sequential within each rank; `--nThreads` continues to control the existing
+assembler paths. Legacy mode `0` remains the default until the new path has
+been validated on the target meshes.
+
+Use `--bddcInterfaceAssemblyCheck 1` for numerical validation, not performance
+measurement: it additionally runs the old assembler for every directed pair,
+compares all nonzero entries (including missing or extra entries), and fails
+collectively before the solve if `maxAbsDifference > 1e-14 + 1e-11*maxReference`.
+It reports the maximum absolute difference and aggregate relative Frobenius
+error. Reference assembly is charged to the diagnostics phase. Then rerun
+with `--bddcInterfaceAssemblyCheck 0` for timings, using identical BCs,
+convergence tolerance, audit and VTK settings in the baseline and new runs.
+Compare the true global residual and exported solutions as well as timings.
+
+The sparse assembly/redistribution test needs only C++20:
+
+```bash
+c++ -std=c++20 -Wall -Wextra -pedantic tests/test_emi_interface_blocks.cpp -o /tmp/test_emi_interface_blocks
+/tmp/test_emi_interface_blocks
+```
+
+The real MPI transport test uses Kaskade's lightweight ownership header,
+without Dune or the Kaskade library:
+
+```bash
+mpicxx -std=c++20 -O2 -Wall -Wextra -pedantic -DKASKADE_HAVE_MPI -I/kaskade7 \
+  tests/test_emi_interface_exchange.cpp -o /tmp/test_emi_interface_exchange
+for ranks in 1 2 8; do
+  mpirun --allow-run-as-root -np "$ranks" /tmp/test_emi_interface_exchange || break
+done
+```
 
 With `--bddcSplitInterfaces 1`, each owner group is partitioned using that same
 original-cell graph. Each connected component receives its own coarse average.

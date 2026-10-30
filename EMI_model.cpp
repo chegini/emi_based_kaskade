@@ -51,6 +51,7 @@
 #include "EMI_bddc_audit.hh"
 #include "EMI_bddc_operator_audit.hh"
 #include "EMI_phase_profile.hh"
+#include "EMI_interface_assembly.hh"
 #include "EMI_model.hh"
 
 using namespace Kaskade;
@@ -78,6 +79,8 @@ struct EmiOptions
   int bddcAudit = 0;
   int bddcOperatorAudit = 0;
   int bddcSplitInterfaces = 0;
+  int bddcInterfaceAssembly = 0;
+  int bddcInterfaceAssemblyCheck = 0;
   int profile = 0;
   int sdc = 0;
   int sdcCollocationPoints = 3;
@@ -888,6 +891,8 @@ int main(int argc, char* argv[])
     ("bddcAudit", options.bddcAudit, options.bddcAudit, "audit constant mode and coarse interface groups (requires bddc=1, sdc=0)")
     ("bddcOperatorAudit", options.bddcOperatorAudit, options.bddcOperatorAudit, "audit uncompressed BDDC weights and operators, then exit without timesteps")
     ("bddcSplitInterfaces", options.bddcSplitInterfaces, options.bddcSplitInterfaces, "split coarse interface averages by cell-connected electrical component (requires bddc=1, sdc=0)")
+    ("bddcInterfaceAssembly", options.bddcInterfaceAssembly, options.bddcInterfaceAssembly, "interface mass assembly: 0=legacy pairs, 1=shared traversal, 2=MPI owner shared traversal")
+    ("bddcInterfaceAssemblyCheck", options.bddcInterfaceAssemblyCheck, options.bddcInterfaceAssemblyCheck, "compare shared directed blocks with legacy assembly before redistribution")
     ("profile", options.profile, options.profile, "print solver timings and end-to-end phase min/mean/max: 0=no, 1=yes")
     ("sdc", options.sdc, options.sdc, "use SDC time integrator: 0=no, 1=yes")
     ("sdcCollocationPoints", options.sdcCollocationPoints, options.sdcCollocationPoints, "target number of SDC collocation points")
@@ -964,6 +969,16 @@ int main(int argc, char* argv[])
     throw std::runtime_error("bddcSplitInterfaces must be 0 or 1");
   if (options.bddcSplitInterfaces && (!options.bddc || options.sdc))
     throw std::runtime_error("bddcSplitInterfaces requires --bddc 1 --sdc 0");
+
+  if (options.bddcInterfaceAssembly < 0 || options.bddcInterfaceAssembly > 2)
+    throw std::runtime_error("bddcInterfaceAssembly must be 0, 1 or 2");
+  if (options.bddcInterfaceAssemblyCheck != 0 && options.bddcInterfaceAssemblyCheck != 1)
+    throw std::runtime_error("bddcInterfaceAssemblyCheck must be 0 or 1");
+  if ((options.bddcInterfaceAssembly || options.bddcInterfaceAssemblyCheck) &&
+      (!options.bddc || options.sdc))
+    throw std::runtime_error("shared interface assembly requires --bddc 1 --sdc 0");
+  if (options.bddcInterfaceAssemblyCheck && !options.bddcInterfaceAssembly)
+    throw std::runtime_error("bddcInterfaceAssemblyCheck requires interface assembly mode 1 or 2");
 
   OptionalMpiSession mpiSession(argc,argv,options.mpi != 0);
   bool const outputRankZero = EmiBddc::mpiRankZero(options.mpi != 0);
@@ -1289,41 +1304,122 @@ int main(int argc, char* argv[])
     }
     if (outputRankZero)
       std::cout << "Redistributing interface mass blocks across material neighbors...\n";
-    phaseProfile.next(Phase::interfaceAssembly);
-    for (auto const& [tag,neighbors] : neighboringTags)
-      for (int neighborTag : neighbors)
-      {
-        if (tag >= neighborTag)
-          continue;
-        for (auto const [rowTag,colTag] :
-             {std::pair<int,int>{tag,neighborTag},std::pair<int,int>{neighborTag,tag}})
+    if (options.bddcInterfaceAssembly == 0)
+    {
+      phaseProfile.next(Phase::interfaceAssembly);
+      for (auto const& [tag,neighbors] : neighboringTags)
+        for (int neighborTag : neighbors)
         {
-          F.setRowColSubdomain(rowTag,colTag);
-          auto rowCellFilter = [&material,rowTag,zeroForTags](auto const& cell)
+          if (tag >= neighborTag)
+            continue;
+          for (auto const [rowTag,colTag] :
+               {std::pair<int,int>{tag,neighborTag},std::pair<int,int>{neighborTag,tag}})
           {
-            return material.value(cell,zeroForTags) == rowTag;
-          };
-          phaseProfile.next(Phase::interfaceAssembly);
-          assembler.template assemble<AssemblyDetail::TakeAllBlocks>(
-            SemiLinearization(equation,u,u,duState),rowCellFilter,Assembler::MATRIX,
-            options.assemblyThreads);
-          Matrix const massBlock = assembler.template get<Matrix>(false);
-          phaseProfile.next(Phase::interfaceRedistribution);
-          size_t const sourceSubdomain = tagToSubdomain.at(rowTag);
-          size_t const destinationSubdomain = tagToSubdomain.at(colTag);
-          for (auto row = massBlock.begin(); row != massBlock.end(); ++row)
-            for (auto col = row.begin(); col != row.end(); ++col)
-              if ((*col)[0][0] != 0.0)
-              {
-                double const transfer = 0.5*(*col)[0][0];
-                localContributions[sourceSubdomain][row.index()][col.index()] -= transfer;
-                localContributions[destinationSubdomain][row.index()][col.index()] += transfer;
-              }
+            F.setRowColSubdomain(rowTag,colTag);
+            auto rowCellFilter = [&material,rowTag,zeroForTags](auto const& cell)
+            {
+              return material.value(cell,zeroForTags) == rowTag;
+            };
+            phaseProfile.next(Phase::interfaceAssembly);
+            assembler.template assemble<AssemblyDetail::TakeAllBlocks>(
+              SemiLinearization(equation,u,u,duState),rowCellFilter,Assembler::MATRIX,
+              options.assemblyThreads);
+            Matrix const massBlock = assembler.template get<Matrix>(false);
+            phaseProfile.next(Phase::interfaceRedistribution);
+            size_t const sourceSubdomain = tagToSubdomain.at(rowTag);
+            size_t const destinationSubdomain = tagToSubdomain.at(colTag);
+            for (auto row = massBlock.begin(); row != massBlock.end(); ++row)
+              for (auto col = row.begin(); col != row.end(); ++col)
+                if ((*col)[0][0] != 0.0)
+                {
+                  double const transfer = 0.5*(*col)[0][0];
+                  localContributions[sourceSubdomain][row.index()][col.index()] -= transfer;
+                  localContributions[destinationSubdomain][row.index()][col.index()] += transfer;
+                }
+          }
+          if (outputRankZero)
+            std::cout << "  interface tags " << tag << " and " << neighborTag
+                      << ": done\n" << std::flush;
         }
+    }
+    else
+    {
+      Kaskade::BDDC::MpiDomainLayout interfaceLayout;
+      interfaceLayout.configure(options.mpi != 0,bddcData.tags.size(),options.masterWorker != 0);
+      F.setMassSubmatrix(false);
+      phaseProfile.next(Phase::interfaceAssembly);
+      auto blocks = EmiBddc::assembleInterfaceMassBlocks(
+        gridManager.grid(),spaces,material,SemiLinearization(equation,u,u,duState),
+        F,tagToSubdomain,interfaceLayout,options.bddcInterfaceAssembly == 2);
+      phaseProfile.next(Phase::interfaceRedistribution);
+      if (options.bddcInterfaceAssembly == 2)
+        blocks = EmiBddc::exchangeInterfaceBlocks(std::move(blocks),interfaceLayout,
+                                                  bddcData.tags.size(),nDofs);
+      if (outputRankZero)
+        std::cout << "BDDC interface mass assembly: shared traversal"
+                  << (options.bddcInterfaceAssembly == 2 ? ", source-owner MPI work" : ", replicated work")
+                  << ", directed blocks=" << blocks.size() << "\n";
+
+      if (options.bddcInterfaceAssemblyCheck)
+      {
+        phaseProfile.next(Phase::diagnostics);
+        EmiBddc::InterfaceBlockDifference difference;
+        EmiBddc::InterfaceBlock const empty;
+        std::exception_ptr auditError;
+        try
+        {
+          F.setMassSubmatrix(true);
+          for (auto const& [tag,neighbors] : neighboringTags)
+            for (int neighborTag : neighbors)
+            {
+              F.setRowColSubdomain(tag,neighborTag);
+              auto filter = [&material,tag,zeroForTags](auto const& cell)
+              {
+                return material.value(cell,zeroForTags) == tag;
+              };
+              assembler.template assemble<AssemblyDetail::TakeAllBlocks>(
+                SemiLinearization(equation,u,u,duState),filter,Assembler::MATRIX,
+                options.assemblyThreads);
+              Matrix const reference = assembler.template get<Matrix>(false);
+              EmiBddc::InterfaceBlock sparseReference;
+              for (auto row = reference.begin(); row != reference.end(); ++row)
+                for (auto col = row.begin(); col != row.end(); ++col)
+                  if ((*col)[0][0] != 0.0)
+                    sparseReference[{row.index(),col.index()}] = (*col)[0][0];
+              auto const found = blocks.find({tagToSubdomain.at(tag),tagToSubdomain.at(neighborTag)});
+              difference.compare(found == blocks.end() ? empty : found->second,sparseReference);
+            }
+        }
+        catch (...) { auditError = std::current_exception(); }
+        // The audit is collective, so no rank may proceed after a peer fails.
+        if (!auditError && !difference.acceptable())
+          auditError = std::make_exception_ptr(std::runtime_error(
+            "Shared interface mass blocks differ from legacy assembly"));
         if (outputRankZero)
-          std::cout << "  interface tags " << tag << " and " << neighborTag
-                    << ": done\n" << std::flush;
+          std::cout << "BDDC interface mass equivalence: maxAbsDifference=" << difference.maxAbs
+                    << " relativeL2=" << std::sqrt(difference.squaredError/
+                         std::max(difference.squaredReference,std::numeric_limits<double>::min()))
+                    << " tolerance=" << 1e-14+1e-11*difference.maxReference
+                    << " status=" << (auditError ? "failed" : "passed") << "\n";
+        EmiBddc::checkInterfaceAssemblyError(auditError,interfaceLayout);
       }
+      phaseProfile.next(Phase::interfaceRedistribution);
+      std::exception_ptr redistributionError;
+      try
+      {
+        EmiBddc::redistributeInterfaceBlocks(blocks,
+          [&](size_t subdomain, size_t row, size_t col, double value)
+          {
+            auto&& matrixRow = localContributions[subdomain][row];
+            auto entry = matrixRow.find(col);
+            if (entry == matrixRow.end())
+              throw std::runtime_error("Interface redistribution entry missing from material matrix pattern");
+            (*entry)[0][0] += value;
+          });
+      }
+      catch (...) { redistributionError = std::current_exception(); }
+      EmiBddc::checkInterfaceAssemblyError(redistributionError,interfaceLayout);
+    }
     if (outputRankZero)
       std::cout << "Interface mass redistribution complete\n";
     F.Mass_stiff(10);
