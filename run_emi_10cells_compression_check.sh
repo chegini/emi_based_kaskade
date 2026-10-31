@@ -3,6 +3,8 @@
 set -euo pipefail
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 bits=${BITS:-24}
+restrict_bits=${RESTRICT_BITS:-$bits}
+prolongate_bits=${PROLONGATE_BITS:-$bits}
 ranks=${RANKS:-1}
 tolerance=${TOLERANCE:-1e-7}
 use_cg=${USE_CG:-1}
@@ -23,14 +25,21 @@ except ValueError:
 if not valid:
     raise SystemExit("TOLERANCE must be finite and positive")
 CHECK_TOLERANCE
+for precision in "$bits" "$restrict_bits" "$prolongate_bits"; do
+  if [[ ! "$precision" =~ ^[1-9][0-9]*$ ]] || (( precision > 32 )); then
+    printf 'BITS, RESTRICT_BITS and PROLONGATE_BITS must be integers in 1..32\n' >&2
+    exit 2
+  fi
+done
 base=./input/10Cells3d_10extra
-root=output/10cells-compression-check-b${bits}-np${ranks}-cg${use_cg}-tol${tolerance}-$(date -u +%Y%m%dT%H%M%SZ)-$$
+root=output/10cells-compression-check-b${bits}-r${restrict_bits}-p${prolongate_bits}-np${ranks}-cg${use_cg}-tol${tolerance}-$(date -u +%Y%m%dT%H%M%SZ)-$$
 for file in "${base}_mesh.vtu" "${base}_list_extracellular.txt" \
             "${base}_list_intracellular.txt" "${base}_early_excited.txt"; do
   if [[ ! -r "$file" ]]; then printf 'Missing input: %s\n' "$file" >&2; exit 2; fi
 done
 mkdir -p "$root"
 printf 'Output: %s\nRelative tolerance: %s\nUse CG: %s\n' "$root" "$tolerance" "$use_cg"
+printf 'Restriction bits: %s; prolongation bits: %s\n' "$restrict_bits" "$prolongate_bits"
 failed=0
 for stage in uncompressed quantization full; do
   compression=1; graph=0; coding=0
@@ -51,6 +60,8 @@ for stage in uncompressed quantization full; do
     --bddcVerbose 0 --bddcConvergenceReport "$convergence_report" --bddcConditionEstimate 0
     --bddcMaterialAssembly 1 --bddcInterfaceAssembly 2
     --bddcCompression "$compression" --bddcCompressionBits "$bits"
+    --bddcRestrictCompressionBits "$restrict_bits"
+    --bddcProlongateCompressionBits "$prolongate_bits"
     --bddcGraphLifting "$graph" --bddcGraphLiftingAfterQuantization "$graph"
     --bddcZigzag "$coding" --bddcBitlength "$coding" --bddcHuffman "$coding"
     --bddcExcludeCornersFromCompression 1 --bddcCompressionMinInterfaceSize 0
@@ -65,11 +76,11 @@ for stage in uncompressed quantization full; do
     if [[ "$stage" != uncompressed ]]; then
       python3 compare_emi_vtu.py "$out/emiBDDCLastCompression.vtu" \
         "$root/uncompressed/emiBDDCLast.vtu" > "$out/comparison.log"
-      grep -E '^(same coordinates|relative L2 error|max absolute error):' "$out/comparison.log"
+      grep -E '^(same coordinates:|relative L2 error:|max absolute error:|mean signed offset|relative L2 after removing mean offset:)' "$out/comparison.log"
     fi
   else
     failed=$((failed+1))
-    grep -E 'BDDC global residual|failed after|target not reached' "$out/run.log" | head -6 || true
+    grep -E 'BDDC breakdown|BDDC global residual|failed after|target not reached' "$out/run.log" | head -6 || true
     if [[ "$stage" == uncompressed ]]; then
       printf 'Uncompressed baseline failed; stopping.\n' >&2
       exit 1

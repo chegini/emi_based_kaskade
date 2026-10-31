@@ -1207,3 +1207,137 @@ residuals, and byte counters. Container simulations remain the integration check
 All ranks must use a rebuilt executable after the Kaskade corner-transfer fix.
 The uncompressed MPI byte-reporting fix contributes globally aggregated domain
 traffic only once; it changes reported baseline bytes, not solver arithmetic.
+
+### Directional precision diagnostics for low-bit failures
+
+Optional `--bddcRestrictCompressionBits` and `--bddcProlongateCompressionBits`
+override `--bddcCompressionBits` in the corresponding transfer direction. Each
+option defaults to `-1` (inherit the common setting), preserving existing runs;
+explicit overrides must be in `1..32`, matching EMI's uint32 quantized symbols.
+The setters are used consistently in non-SDC and SDC transfer configuration.
+
+The 10-cell runner exposes these as `RESTRICT_BITS` and `PROLONGATE_BITS`.
+Unset values inherit `BITS`. Each effective precision is printed and recorded in
+the output path and exact command. For example:
+
+```bash
+USE_CG=0 BITS=8 RESTRICT_BITS=32 PROLONGATE_BITS=8 RANKS=1 TOLERANCE=1e-7 bash run_emi_10cells_compression_check.sh
+USE_CG=0 BITS=8 RESTRICT_BITS=8 PROLONGATE_BITS=32 RANKS=1 TOLERANCE=1e-7 bash run_emi_10cells_compression_check.sh
+```
+
+These are mixed-precision diagnostic experiments, not uniform 8-bit validation.
+32-bit quantization still differs from unquantized double transmission. This
+option does not fix or establish convergence of uniform 8-bit or 12-bit CG.
+Rebuild EMI after updating the options and precision helper. The helper itself
+can be checked without Dune or MPI:
+
+```bash
+c++ -std=c++20 -O2 -I. tests/test_bddc_precision.cpp -o /tmp/test_bddc_precision
+/tmp/test_bddc_precision
+```
+
+### One direct-reference and quantization-only sweep
+
+For a fixed 10-cell, one-timestep diagnostic, run:
+
+```bash
+python3 tests/run_emi_quantization_diagnostic.py
+```
+
+This runs sequential MUMPS once, uncompressed BDDC+CG once, then uniform
+quantization at 8, 12, 16, 24 and 32 bits. Both transfer directions use the listed
+bit depth; graph lifting, zigzag, bit-length and Huffman stages are disabled.
+The default is one MPI rank, one thread, 300 solver calls and true relative
+tolerance `1e-7`. Existing directional-precision environment variables do not
+override this uniform sweep. `--bits`, `--ranks`, `--iterations` and `--tolerance`
+provide explicit diagnostic overrides. No solver default or physics is changed.
+
+`--refine N` applies `N` uniform mesh refinement levels to every case, including
+the direct reference; the default is `0`. This changes the mesh resolution and
+is separate from `--restriction-passes`, which refines quantized residual updates.
+The selected mesh refinement level is saved in `environment.json` and each
+case's command. Mesh refinement increases assembly and factorization costs.
+
+All converged BDDC results are compared with the direct reference. Quantized
+results are additionally compared with the uncompressed BDDC baseline. The raw
+exported-u differences are the primary displayed comparison; offset-removed
+statistics remain separate diagnostics. PASS verifies residual/completion and
+successful comparisons, without silently imposing a new solution-error budget.
+
+A failed direct or uncompressed baseline stops the sweep. Failed quantized cases
+are recorded while later bit depths continue, with a nonzero final exit code if
+any case failed. One summary.txt/summary.json, exact commands, environment and
+binary hash, complete run logs and convergence CSVs are retained below a fresh
+output directory. This is a convergence diagnostic with VTK, not a timing study.
+The runner's launch/validation control can be checked without real EMI or MPI:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_emi_quantization_diagnostic.py' -v
+```
+
+### Experimental refinement of low-bit restriction updates
+
+`--bddcRestrictionPasses` defaults to `1`. Values `2..16` enable additional
+restriction exchanges before a compressed non-SDC BDDC update. Between these
+exchanges, the original local residual and solution stay fixed. The existing
+published-residual feedback sends the remaining communication error each time,
+so additional low-bit updates refine the restricted residual before the coarse
+solve. No matrix, boundary coefficient or stopping tolerance is changed.
+
+This is a separate communication/solver configuration: each exchange quantizes
+values at the configured bit depth, but additional messages carry additional
+information. The quantization-only diagnostic still uses its existing unencoded
+transport format; quantization bits do not specify the physical wire width.
+Traffic counters and restriction timing include every exchange. An 8-bit run
+with four passes must be reported as 8-bit restriction refinement, not as the
+original one-pass experiment. Neither speedup nor net byte savings is implied.
+The application currently enables extra passes only for compressed non-SDC runs.
+
+A focused experiment, after rebuilding the updated Kaskade/EMI code, is:
+
+```bash
+python3 tests/run_emi_quantization_diagnostic.py --bits 8 --restriction-passes 4
+```
+
+The direct and uncompressed CG baselines remain unchanged and are run once each.
+The quantized case uses 8 bits in BOTH transfer directions, with four restriction
+passes, and no graph or entropy coding. The summary explicitly records `Rpasses`.
+The default driver still uses one pass. Passing the transfer-kernel regression
+below does not establish EMI convergence; the container experiment is required:
+
+```bash
+mpicxx -std=c++20 -O2 -I/kaskade7 tests/test_bddc_restriction_refinement.cpp -o /tmp/test_bddc_restriction_refinement
+/tmp/test_bddc_restriction_refinement
+```
+
+The diagnostic driver can optionally add the full coding pipeline after each
+quantization-only case, reusing the same direct and uncompressed references:
+
+```bash
+python3 tests/run_emi_quantization_diagnostic.py --bits 8 --restriction-passes 4 --full-compression --ranks 8
+```
+
+`--full-compression` enables integer graph lifting after quantization, zigzag,
+bit-length/tail coding and Huffman in the `full-*` rows only. `quantization-*`
+rows keep all those stages disabled. The default remains quantization only.
+The full case is attempted even if its quantization-only counterpart fails.
+
+The `net bytes saved` column is `100*(1-case_bytes/uncompressed_CG_bytes)` using
+total logical transferred bytes over the entire solve. It includes changed
+iteration counts and every additional restriction pass. This differs from the
+codec's saving against its own equivalent raw stream; a positive per-message
+saving can coexist with negative net savings when refinement adds exchanges.
+These remain application counters including intra-rank transfers, not measured
+network traffic. Accuracy, net byte reduction and wall time are separate results.
+
+The one-timestep 10-cell validation of this four-pass 8-bit variant passed with
+CG on eight MPI ranks. Uncompressed CG used 10 iterations; quantization-only and
+full coding each used 11, with a true relative residual of `4.56e-8` and raw
+exported-u relative difference `1.04e-9` versus sequential MUMPS. Full coding
+transferred 268,112 logical bytes versus 442,240 for uncompressed CG: **39.37%
+net savings**, including all extra exchanges. The codec's 77.95% saving against
+its own raw stream is a different metric. This validates one timestep on this
+small mesh; larger meshes, multiple timesteps and speedup remain unverified for
+this variant. The original one-pass 8-bit failure is retained separately.
+Detailed provenance is in `docs/emi_8bit_refinement_validation_20261031.txt` and
+its companion JSON.

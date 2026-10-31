@@ -1,0 +1,223 @@
+{
+  "purpose": "One-step 10-cell validation of uniform 8-bit quantization with four restriction feedback passes",
+  "run_root": "output/10cells-quantization-diagnostic-20261031T204600Z-24",
+  "environment": {
+    "purpose": "10-cell direct reference, quantization and optional full-coding diagnostic",
+    "bits": [
+      8
+    ],
+    "bddc_ranks": 8,
+    "direct_ranks": 1,
+    "steps": 1,
+    "true_relative_tolerance": 1e-07,
+    "restriction_passes": 4,
+    "max_iterations": 300,
+    "executable_sha256": "93a2a91c18f16924b57ceb3ffb7034d327be3b2b38bb14731bde24d11c655ca5",
+    "hostname": "58edd57693a5",
+    "uniform_precision": true,
+    "full_encoding_enabled": true,
+    "byte_counter_scope": "logical application transfers including intra-rank exchanges"
+  },
+  "records": [
+    {
+      "case": "direct",
+      "restriction_bits": null,
+      "prolongation_bits": null,
+      "ranks": 1,
+      "return_code": 0,
+      "full_encoding": false,
+      "status": "PASS",
+      "reason": "",
+      "log": "/BDDC/emiModelBddcSdc_new_scratch/output/10cells-quantization-diagnostic-20261031T204600Z-24/direct/run.log",
+      "relative_residual": 3.84089e-16
+    },
+    {
+      "case": "uncompressed-cg",
+      "restriction_bits": null,
+      "prolongation_bits": null,
+      "ranks": 8,
+      "return_code": 0,
+      "full_encoding": false,
+      "status": "PASS",
+      "reason": "",
+      "log": "/BDDC/emiModelBddcSdc_new_scratch/output/10cells-quantization-diagnostic-20261031T204600Z-24/uncompressed-cg/run.log",
+      "restriction_passes": 1,
+      "solver_metrics": {
+        "status": "converged",
+        "errors": [],
+        "validation_only": true,
+        "exit_code": 0,
+        "requested_relative_tolerance": 1e-07,
+        "cells": 2560,
+        "dofs": 1156,
+        "subdomains": 20,
+        "partition_shared_dofs": 216,
+        "coarse_interfaces": {
+          "corners": 0,
+          "edges": 27,
+          "faces": 28
+        },
+        "mpi_ranks": 8,
+        "iterations_per_step": [
+          10
+        ],
+        "relative_residuals": [
+          6.79091e-08
+        ],
+        "raw_sent_bytes": 442240,
+        "transmitted_sent_bytes": 442240,
+        "reported_transfer_savings_percent": 0.0,
+        "wall_seconds": 1.47,
+        "solver_wrapper_max_seconds": 1.263201
+      },
+      "logical_transferred_bytes": 442240,
+      "net_logical_byte_savings_vs_uncompressed_percent": 0.0,
+      "accepted_updates": 10,
+      "iterations": 10,
+      "iterations_source": "solver calls in summary",
+      "relative_residual": 6.790908041591327e-08,
+      "comparison_to_direct": {
+        "relative L2 error": 2.371780253283537e-09,
+        "max absolute error": 1.0000000001241655e-09,
+        "mean signed offset (first - reference)": -1.9749999995981782e-11,
+        "relative L2 after removing mean offset": 2.3577893112244986e-09
+      }
+    },
+    {
+      "case": "quantization-8",
+      "restriction_bits": 8,
+      "prolongation_bits": 8,
+      "ranks": 8,
+      "return_code": 0,
+      "full_encoding": false,
+      "status": "PASS",
+      "reason": "",
+      "log": "/BDDC/emiModelBddcSdc_new_scratch/output/10cells-quantization-diagnostic-20261031T204600Z-24/quantization-8/run.log",
+      "restriction_passes": 4,
+      "solver_metrics": {
+        "status": "converged",
+        "errors": [],
+        "validation_only": true,
+        "exit_code": 0,
+        "requested_relative_tolerance": 1e-07,
+        "cells": 2560,
+        "dofs": 1156,
+        "subdomains": 20,
+        "partition_shared_dofs": 216,
+        "coarse_interfaces": {
+          "corners": 0,
+          "edges": 27,
+          "faces": 28
+        },
+        "mpi_ranks": 8,
+        "iterations_per_step": [
+          11
+        ],
+        "relative_residuals": [
+          4.55979e-08
+        ],
+        "raw_sent_bytes": 1216160,
+        "transmitted_sent_bytes": 1256640,
+        "reported_transfer_savings_percent": -3.32850940665701,
+        "wall_seconds": 2.9,
+        "solver_wrapper_max_seconds": 2.692766
+      },
+      "logical_transferred_bytes": 1256640,
+      "net_logical_byte_savings_vs_uncompressed_percent": -184.1534008683068,
+      "accepted_updates": 11,
+      "iterations": 11,
+      "iterations_source": "solver calls in summary",
+      "relative_residual": 4.559792750095109e-08,
+      "comparison_to_direct": {
+        "relative L2 error": 1.0353266776381502e-09,
+        "max absolute error": 1.0000000001241655e-09,
+        "mean signed offset (first - reference)": -3.621093750228963e-11,
+        "relative L2 after removing mean offset": 9.216619788655144e-10
+      },
+      "comparison_to_uncompressed": {
+        "relative L2 error": 2.1141992222814053e-09,
+        "max absolute error": 1.0000000001241655e-09,
+        "mean signed offset (first - reference)": -1.6460937506307842e-11,
+        "relative L2 after removing mean offset": 2.103300176449607e-09
+      }
+    },
+    {
+      "case": "full-8",
+      "restriction_bits": 8,
+      "prolongation_bits": 8,
+      "ranks": 8,
+      "return_code": 0,
+      "full_encoding": true,
+      "status": "PASS",
+      "reason": "",
+      "log": "/BDDC/emiModelBddcSdc_new_scratch/output/10cells-quantization-diagnostic-20261031T204600Z-24/full-8/run.log",
+      "restriction_passes": 4,
+      "solver_metrics": {
+        "status": "converged",
+        "errors": [],
+        "validation_only": true,
+        "exit_code": 0,
+        "requested_relative_tolerance": 1e-07,
+        "cells": 2560,
+        "dofs": 1156,
+        "subdomains": 20,
+        "partition_shared_dofs": 216,
+        "coarse_interfaces": {
+          "corners": 0,
+          "edges": 27,
+          "faces": 28
+        },
+        "mpi_ranks": 8,
+        "iterations_per_step": [
+          11
+        ],
+        "relative_residuals": [
+          4.55979e-08
+        ],
+        "raw_sent_bytes": 1216160,
+        "transmitted_sent_bytes": 268112,
+        "reported_transfer_savings_percent": 77.95421655045389,
+        "wall_seconds": 3.12,
+        "solver_wrapper_max_seconds": 2.909587
+      },
+      "logical_transferred_bytes": 268112,
+      "net_logical_byte_savings_vs_uncompressed_percent": 39.37409551374819,
+      "accepted_updates": 11,
+      "iterations": 11,
+      "iterations_source": "solver calls in summary",
+      "relative_residual": 4.559792750095109e-08,
+      "comparison_to_direct": {
+        "relative L2 error": 1.0353266776381502e-09,
+        "max absolute error": 1.0000000001241655e-09,
+        "mean signed offset (first - reference)": -3.621093750228963e-11,
+        "relative L2 after removing mean offset": 9.216619788655144e-10
+      },
+      "comparison_to_uncompressed": {
+        "relative L2 error": 2.1141992222814053e-09,
+        "max absolute error": 1.0000000001241655e-09,
+        "mean signed offset (first - reference)": -1.6460937506307842e-11,
+        "relative L2 after removing mean offset": 2.103300176449607e-09
+      }
+    }
+  ],
+  "source_sha256_at_collection": {
+    "EMI/EMI_model.cpp": "5d9fabf404c135028c3a950ea5268d933348ef1497cab716fc3c527a8fc5cf7e",
+    "EMI/EMI_bddc.hh": "d7ae0f20be800198b16c4193dcdebe1ff1baa0c7547aa4120a91240dc4cac954",
+    "EMI/EMI_bddc_precision.hh": "64ab00ed8f956cbf461f54ddf0e9f9366c7cc01bf5fc18d7898846306ea61de5",
+    "EMI/tests/run_emi_quantization_diagnostic.py": "7cbcc92ab474cc675130485c9ef79399906ed04c1bac9557b72c562ae8cc7c9c",
+    "EMI/tests/collect_emi_scaling_smoke.py": "bacc6f65ab9d2c7dbc58609842c54055e89800d957d438caf6e3799f70352bdc",
+    "EMI/compare_emi_vtu.py": "f18cb959e9ad492540040acb089a7e3b48e335092f74ca0b40d9a4fe2da33eab",
+    "Kaskade/mg/bddc.hh": "0bc429064782ecc106ca4e561ba982282a51e1262445fc333c34f60b9feb6f68",
+    "Kaskade/mg/bddc.hpp": "a5c5a1572a80696c1bbf2a5075e16f93a772d58eea0765151c7ee34819480663",
+    "Kaskade/mg/bddcSpaceTransfer.hh": "52a010548ffc318ea19622b7b571200d7b018e84d3bbd66e2810035733dbee4a",
+    "Kaskade/mg/bddcSpaceTransfer.hpp": "565a6bd24d1f4d8a31706426386c513c76b1a32eb232de703eb52219f622532a"
+  },
+  "scope": [
+    "Ten intracellular/extracellular material-region test; one timestep, dt=0.01, eight BDDC MPI ranks and one MUMPS direct rank.",
+    "Both transfer directions quantize to 8 bits. Four restriction exchanges precede each compressed update; one-pass uncompressed CG is the reference.",
+    "This is a distinct refinement algorithm, not evidence that the original one-pass 8-bit method converges.",
+    "Logical byte counters include every iteration and refinement exchange, including intra-rank delivery. They are not hardware network measurements.",
+    "Raw exported-u solution comparisons are primary; mean offsets are not removed from the reported errors.",
+    "VTK is enabled. Speedup, multiple-timestep robustness and larger-mesh convergence have not been established for this variant."
+  ]
+}

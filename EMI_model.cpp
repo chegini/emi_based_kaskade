@@ -98,6 +98,9 @@ struct EmiOptions
   int bddc = 0;
   int bddcCompression = 0;
   int bddcCompressionBits = 16;
+  int bddcRestrictCompressionBits = -1;
+  int bddcProlongateCompressionBits = -1;
+  int bddcRestrictionPasses = 1;
   int bddcCompressionMinInterfaceSize = 0;
   int bddcCompressionThresholdInterfaceTypes = Kaskade::BDDC::EDGE;
   int bddcGraphLifting = 1;
@@ -933,6 +936,12 @@ int main(int argc, char* argv[])
     ("bddc", options.bddc, options.bddc, "use BDDC solver for EMI: 0=no, 1=yes")
     ("bddcCompression", options.bddcCompression, options.bddcCompression, "use quantized BDDC transfer: 0=no, 1=yes")
     ("bddcCompressionBits", options.bddcCompressionBits, options.bddcCompressionBits, "quantization bits for compressed BDDC transfer")
+    ("bddcRestrictCompressionBits", options.bddcRestrictCompressionBits,
+     options.bddcRestrictCompressionBits, "restriction quantization bits: -1=inherit common, 1..32=override")
+    ("bddcProlongateCompressionBits", options.bddcProlongateCompressionBits,
+     options.bddcProlongateCompressionBits, "prolongation quantization bits: -1=inherit common, 1..32=override")
+    ("bddcRestrictionPasses", options.bddcRestrictionPasses, options.bddcRestrictionPasses,
+     "restriction communication passes per compressed BDDC update: 1..16 (default 1)")
     ("bddcCompressionMinInterfaceSize", options.bddcCompressionMinInterfaceSize,
      options.bddcCompressionMinInterfaceSize,
      "minimum scalar interface size for compressed BDDC transfer; 0=all")
@@ -1041,6 +1050,16 @@ int main(int argc, char* argv[])
     throw std::runtime_error("owner material assembly requires --bddc 1 --sdc 0");
   if (options.bddcMaterialAssemblyCheck && !options.bddcMaterialAssembly)
     throw std::runtime_error("bddcMaterialAssemblyCheck requires --bddcMaterialAssembly 1");
+
+  if (!EmiBddc::validDirectionalCompressionBits(options.bddcRestrictCompressionBits) ||
+      !EmiBddc::validDirectionalCompressionBits(options.bddcProlongateCompressionBits))
+    throw std::runtime_error("Directional compression bits must be -1 (inherit) or 1..32");
+
+  if (options.bddcRestrictionPasses < 1 || options.bddcRestrictionPasses > 16)
+    throw std::runtime_error("bddcRestrictionPasses must be in 1..16");
+  if (options.bddcRestrictionPasses != 1 &&
+      (!options.bddc || !options.bddcCompression || options.sdc))
+    throw std::runtime_error("Extra restriction passes require --bddc 1 --bddcCompression 1 --sdc 0");
 
   OptionalMpiSession mpiSession(argc,argv,options.mpi != 0,options.quiet == 0);
   bool const outputRankZero = EmiBddc::mpiRankZero(options.mpi != 0);
