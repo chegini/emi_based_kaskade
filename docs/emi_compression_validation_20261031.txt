@@ -1,0 +1,38 @@
+EMI BDDC compression validation, 31 October 2026
+
+Eight MPI ranks; ten timesteps; dt=0.01; CG; true global relative tolerance=1e-7.
+Same executable for both campaigns: d0f0c16ddb08e7a764dfee33da63b9bd67eca8a6da44d17e958dc799e0de4de3
+
+Mesh         bits  avg iters (raw/compressed)  max compressed rel  savings     exported-u rel L2 difference
+weak_8_h16    16   31.7 / 36.5                  9.985010e-08        67.87%      2.90987806e-06
+strong_h16    16   39.6 / 39.6                  9.737060e-08        63.75%      1.73283363e-06
+weak_8_h16    24   31.7 / 35.0                  8.233060e-08        55.35%      3.65107199e-08
+strong_h16    24   39.6 / 39.6                  9.705380e-08        51.61%      3.59305234e-08
+
+All 80 timestep solves in these eight paired runs passed the requested residual target.
+
+Interpretation and limitations:
+- 12-bit CG remains nonconverged in the tested configurations.
+- Savings compare transmitted bytes to the compressed run own equivalent raw payload. They are logical application counters including intra-rank transfers, not hardware network measurements.
+- Solution differences are Euclidean norms of exported u values, not FE mass-weighted L2 norms.
+- Single container timings with VTK are not cluster scaling measurements.
+- Uncompressed MPI reporting overcount was found during collection; see derived correction in each row.
+
+Run locations:
+- output/scaling-full-smoke-20261031T194945Z-240/environment.txt
+- output/scaling-full-smoke-20261031T195609Z-446/environment.txt
+
+Numerical corrections present: consistent transmitted-metadata reconstruction,
+original-system residual recomputation in compressed CG, and unquantized corner
+transport in both restriction and prolongation.
+
+Exact counters, per-step residuals/iterations, comparison offsets and source hashes
+are preserved in the accompanying JSON. Original logs were not modified.
+
+Reporting fix applied after collecting these results:
+EMI_bddc.hh now contributes globally summed uncompressed traffic on rank zero
+only before report reduction. Solver arithmetic is unchanged. The isolated
+production regression detects the old eightfold count and passes after the fix.
+The executable identified above predates this reporting-only edit. Rebuild
+before collecting new campaign logs; the old convergence results remain valid.
+Regression command: python3 tests/test_emi_compression_report.py
