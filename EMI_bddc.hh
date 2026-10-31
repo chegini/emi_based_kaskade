@@ -96,9 +96,14 @@ namespace EmiBddc
       codebookBits = std::max(codebookBits, traffic.codebookBits);
     }
 
-    void addUncompressed(std::array<int,6> const& traffic)
+    void addUncompressed(std::array<int,6> const& traffic, bool mpiEnabled = false)
     {
-      std::uint64_t const bytes = static_cast<std::uint64_t>(traffic[3] + traffic[4]);
+      // Domain::traffic() already holds MPI-global logical transfer counts.
+      // Contribute them once; printGlobal() reduces rank-local report fields.
+      if (!mpiRankZero(mpiEnabled))
+        return;
+      std::uint64_t const bytes = static_cast<std::uint64_t>(traffic[3])
+                                + static_cast<std::uint64_t>(traffic[4]);
       originalSentBytes += bytes;
       originalReceivedBytes += bytes;
       sentBytes += bytes;
@@ -1705,7 +1710,7 @@ void computeBddcSdcResiduals(Functional& F,
         if (options.bddcCompression)
           compressionReport->add(solver.compressionTraffic());
         else
-          compressionReport->addUncompressed(solver.traffic());
+          compressionReport->addUncompressed(solver.traffic(),options.mpi != 0);
       }
       if (profile)
         profile->bddcSolve += ProfileTimes::seconds(solveStart);
@@ -2368,7 +2373,7 @@ State runBddcSdc(Functional& F,
       if (options.bddcCompression)
         compressionReport.add(solver.compressionTraffic());
       else
-        compressionReport.addUncompressed(solver.traffic());
+        compressionReport.addUncompressed(solver.traffic(),options.mpi != 0);
     }
 
     if (options.profile && !options.quiet)

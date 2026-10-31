@@ -1118,3 +1118,92 @@ symbol distributions for restriction and prolongation. For example:
   --bddcHistogram 1 \
   --dir output/emi-histogram
 ```
+
+### Container checks before full-compression EMI scaling
+
+Run the corrected uncompressed solver and full compression on the weak-8 and
+fixed strong meshes before submitting a new scaling campaign:
+
+```bash
+CASES=weak_8_h16 BITS=16 RANKS=8 STEPS=1 bash tests/run_emi_scaling_smoke.sh
+CASES=strong_h16 BITS=16 RANKS=8 STEPS=1 bash tests/run_emi_scaling_smoke.sh
+```
+
+The corrected CG path has passed ten-step checks at 16 and 24 bits on both
+meshes at eight ranks and a true relative tolerance of `1e-7`. The iteration,
+comparison and provenance records are in
+`docs/emi_compression_validation_20261031.txt` and its companion JSON.
+The 12-bit CG configuration remains nonconverged in the tested cases; use an
+explicit `BITS=16` or `BITS=24` for these validated checks. The runner's
+`BITS=12` default remains available as a diagnostic, not a validated setting.
+
+For the small 10-cell mesh, run the three-stage uncompressed, quantization-only,
+and full-compression check inside the container:
+
+```bash
+USE_CG=1 TOLERANCE=1e-7 BITS=16 RANKS=8 bash run_emi_10cells_compression_check.sh
+```
+
+This small-case runner defaults to `USE_CG=1`, `TOLERANCE=1e-7`, `BITS=24`, and
+`RANKS=1`. `USE_CG=0` selects the existing steepest-descent iteration as a
+separate diagnostic; it disables the CG-only convergence CSV but retains the
+same true-residual acceptance check. `TOLERANCE` is forwarded to both the solver
+and log validator. Alternative tolerances are separate experiments and are not
+mixed into the `1e-7` campaign.
+
+Each invocation creates a fresh output directory. The runner enables
+quantization, integer graph lifting after quantization, zigzag mapping,
+bit-length/tail coding and Huffman coding; corner DOFs remain exact.
+It uses the same coefficients, diagonal weights, constraints and true global
+relative residual target of `1e-7` in the paired runs. It records exact commands,
+executable SHA256, source revisions, transfer counters, iterations, residuals,
+phase timings and final exported-solution comparisons. Full logs stay in files;
+the console prints short summaries. A failed MPI run or an unmet residual target
+stops the test and writes a failed `metrics.json`; it is not treated as a timing
+success. Lower precision is not made to converge by relaxing the tolerance.
+
+`CASES` defaults to `weak_8_h16 strong_h16`, `RANKS=8`, `STEPS=1`, `BITS=12`, and
+`MAX_ITERATIONS=300`. These are VTK-enabled validation runs, not paper-quality
+timing measurements. The condition estimator is disabled because the compressed
+path does not satisfy its fixed-SPD-preconditioner assumption. All profiler and
+compression output is retained in `run.log` (`quiet=0`), while the legacy CG
+table and per-update CSV are off in both runs. `STEPS=10` performs the follow-up
+ten-step validation, with final time `0.1`; it still includes VTK output.
+
+After validating, use controlled allocations, VTK off, repeated timings, and
+paired uncompressed/full runs for the scaling tables. The report's existing weak
+mesh/rank pairing is 8/8, 16/16, 32/32, 64/64 and 128/128. That family has two
+material subdomains per rank, not one. Strong scaling keeps `strong_h16` fixed.
+Changing only the rank count on weak-8 is not a weak-scaling experiment.
+The existing historical Slurm scaling launcher uses the legacy internal
+`bddcTolerance`; it needs a separate update to the current true-residual protocol
+before launching this new campaign. Keep old measurements separate from new
+runs made with the corrected material assembly and empty-interior handling.
+
+Reported transfer bytes are the solver's aggregate counters; they are not a
+hardware measurement of network traffic. `cgroup-memory-events-before/after.txt`
+are cumulative OOM-counter snapshots, not per-run peak-memory measurements.
+Review solution differences before deciding the precision for the final campaign.
+
+The runner and log-validation checks can be tested without running EMI:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_emi_scaling_smoke.py' -v
+```
+
+Regression checks for the numerical and reporting corrections:
+
+```bash
+python3 tests/test_bddc_residual_update.py
+python3 tests/test_emi_compression_report.py
+mpicxx -std=c++20 -O2 -I/kaskade7 tests/test_bddc_transfer_consistency.cpp -o /tmp/test_bddc_transfer_consistency
+/tmp/test_bddc_transfer_consistency
+```
+
+The Python residual/report checks compile isolated production methods against
+small matrix or MPI-rank stand-ins. The C++ transfer check uses the actual
+Kaskade/Dune headers and checks shared-value consistency, unquantized corner
+residuals, and byte counters. Container simulations remain the integration checks.
+All ranks must use a rebuilt executable after the Kaskade corner-transfer fix.
+The uncompressed MPI byte-reporting fix contributes globally aggregated domain
+traffic only once; it changes reported baseline bytes, not solver arithmetic.
