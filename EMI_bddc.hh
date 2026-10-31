@@ -40,6 +40,7 @@
 #include "EMI_bddc_stopping.hh"
 #include "EMI_bddc_condition.hh"
 #include "EMI_bddc_convergence.hh"
+#include "EMI_bddc_precision.hh"
 
 namespace EmiBddc
 {
@@ -1309,7 +1310,7 @@ namespace EmiBddc
                     candidate.setProlongateZigzagEncoding(true);
                   })
     {
-      transfer.setQuantizationBits(options.bddcCompressionBits);
+      configureTransferPrecision(transfer,options);
       if constexpr (requires(Transfer& candidate) { candidate.setCompressionMinInterfaceSize(0); }) {
         transfer.setCompressionMinInterfaceSize(static_cast<std::size_t>(std::max(0, options.bddcCompressionMinInterfaceSize)));
       }
@@ -1976,7 +1977,7 @@ State runBddcSdc(Functional& F,
         if (!subdomains.has(id))
           continue;
         auto& subdomain = subdomains[id];
-        subdomain.transfer().setQuantizationBits(options.bddcCompressionBits);
+        configureTransferPrecision(subdomain.transfer(),options);
         subdomain.transfer().setCompressionMinInterfaceSize(
             static_cast<std::size_t>(
                 std::max(0, options.bddcCompressionMinInterfaceSize)));
@@ -2029,6 +2030,8 @@ State runBddcSdc(Functional& F,
                                                     verbose,
                                                     options.mpi != 0,
                                                     options.masterWorker != 0);
+    if constexpr (requires { options.bddcRestrictionPasses; })
+      solver.setRestrictionPasses(options.bddcRestrictionPasses);
     if (options.profile)
     {
       profile.solverConstruction += ProfileTimes::seconds(solverStart);

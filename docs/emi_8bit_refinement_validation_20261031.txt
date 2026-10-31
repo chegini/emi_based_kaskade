@@ -1,0 +1,27 @@
+Eight-bit restriction-refinement validation, 31 October 2026
+
+10-cell mesh; one timestep (dt=0.01); eight BDDC MPI ranks; one MUMPS direct rank.
+CG; true relative tolerance 1e-7; 8-bit quantization in restriction AND prolongation.
+Four restriction passes per compressed update; one pass for uncompressed CG.
+
+case                 iterations   true relative residual   rel L2 vs direct   logical sent bytes
+direct                  --        3.84089000e-16                       --      --
+uncompressed-cg         10        6.79090804e-08           2.37178025e-09      442240
+quantization-8          11        4.55979275e-08           1.03532668e-09      1256640
+full-8                  11        4.55979275e-08           1.03532668e-09      268112
+
+Full encoding net logical byte saving versus uncompressed CG: 39.37409551%.
+That net figure includes all extra restriction exchanges and changed iteration counts.
+Quantization-only uses unencoded transport and increases total logical bytes.
+
+Scope and interpretation:
+- Ten intracellular/extracellular material-region test; one timestep, dt=0.01, eight BDDC MPI ranks and one MUMPS direct rank.
+- Both transfer directions quantize to 8 bits. Four restriction exchanges precede each compressed update; one-pass uncompressed CG is the reference.
+- This is a distinct refinement algorithm, not evidence that the original one-pass 8-bit method converges.
+- Logical byte counters include every iteration and refinement exchange, including intra-rank delivery. They are not hardware network measurements.
+- Raw exported-u solution comparisons are primary; mean offsets are not removed from the reported errors.
+- VTK is enabled. Speedup, multiple-timestep robustness and larger-mesh convergence have not been established for this variant.
+
+Run: output/10cells-quantization-diagnostic-20261031T204600Z-24
+Executable SHA256: 93a2a91c18f16924b57ceb3ffb7034d327be3b2b38bb14731bde24d11c655ca5
+Detailed per-case metrics, offsets, exact commands and source hashes are retained in the companion JSON and original run directory.
