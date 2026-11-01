@@ -24,6 +24,27 @@ namespace EmiBddc
     if constexpr (requires { transfer.setQuantizationBits(options.bddcCompressionBits); })
     {
       transfer.setQuantizationBits(options.bddcCompressionBits);
+      if constexpr (requires { options.bddcProlongateConstantSplit; })
+      {
+        if constexpr (requires { transfer.setProlongateConstantSplit(false); })
+          transfer.setProlongateConstantSplit(options.bddcProlongateConstantSplit!=0);
+        else if (options.bddcProlongateConstantSplit)
+          throw std::runtime_error("Kaskade headers lack constant-split prolongation");
+      }
+      if constexpr (requires { options.bddcProlongateGroupSize; })
+      {
+        if constexpr (requires { transfer.setProlongateGroupSize(0); })
+          transfer.setProlongateGroupSize(options.bddcProlongateGroupSize);
+        else if (options.bddcProlongateGroupSize)
+          throw std::runtime_error("Kaskade headers lack grouped prolongation");
+      }
+      if constexpr (requires { options.bddcProlongateZeroPreserving; })
+      {
+        if constexpr (requires { transfer.setProlongateZeroPreserving(false); })
+          transfer.setProlongateZeroPreserving(options.bddcProlongateZeroPreserving!=0);
+        else if (options.bddcProlongateZeroPreserving)
+          throw std::runtime_error("Kaskade headers lack zero-preserving prolongation");
+      }
       if constexpr (requires { options.bddcRestrictGroupSize; })
       {
         if constexpr (requires { transfer.setRestrictGroupSize(0); })

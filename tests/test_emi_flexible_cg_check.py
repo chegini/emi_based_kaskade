@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 
-from run_emi_flexible_cg_check import make_command,MARKER
+from run_emi_flexible_cg_check import make_command,MARKER,ZERO_P_MARKER
 from run_emi_mixed_precision_validation import command
 
 
@@ -25,7 +25,17 @@ class FlexibleCheck(unittest.TestCase):
         self.assertEqual(eight[eight.index('--bddcRestrictCompressionBits')+1],'8')
         self.assertEqual(eight[eight.index('--bddcProlongateCompressionBits')+1],'8')
         self.assertEqual(eight[eight.index('--bddcRestrictionPasses')+1],'1')
-        with self.assertRaises(ValueError):make_command(seed,'flex-zero-r8-p12',Path('/bad'))
+        zero_p=make_command(seed,'flex-zero-r8-p8-zeroP',Path('/eight'))
+        i=zero_p.index('--bddcProlongateZeroPreserving')
+        self.assertEqual(zero_p[i:i+2],['--bddcProlongateZeroPreserving','1'])
+        self.assertEqual(zero_p[:i]+zero_p[i+2:],eight)
+        for mode,changed_flag in [('flex-zero-r8-p16','--bddcProlongateCompressionBits'),
+                                  ('flex-zero-r16-p8','--bddcRestrictCompressionBits')]:
+            mixed=make_command(seed,mode,Path('/eight'))
+            differences={eight[i-1] for i,(a,b) in enumerate(zip(eight,mixed)) if a!=b}
+            self.assertEqual(differences,{changed_flag})
+            self.assertEqual(mixed[mixed.index('--bddcRestrictZeroPreserving')+1],'1')
+        with self.assertRaises(ValueError):make_command(seed,'flex-zero-r1-p8',Path('/bad'))
         with self.assertRaises(ValueError):make_command(new,'flex-zero-r12-p12',Path('/again'))
 
     def test_controls_parity_and_failure_continuation(self):
@@ -42,6 +52,7 @@ def v(k):return a[a.index(k)+1]
 out=Path(v('--dir'));flex=v('--bddcFlexibleCg')=='1';bits=v('--bddcRestrictCompressionBits')
 with open('calls','a') as f:f.write(out.name+'\\n')
 if flex:print('''+repr(MARKER)+''')
+if '--bddcProlongateZeroPreserving' in a:print('''+repr(ZERO_P_MARKER)+''')
 if flex and bits=='16':print('Synthetic flexible-control failure');sys.exit(134)
 print('cells: 100\\ndofs: 2\\nBDDC subdomains: 2, shared dofs: 1')
 print('BDDC coarse interfaces: corners=0, edges=1, faces=0')
@@ -106,6 +117,34 @@ for name in ['emiBDDCLast.vtu','emiBDDCLastCompression.vtu']:(out/name).touch()
             self.assertFalse(rejected.exists())
             self.assertEqual((repo/'calls').read_text(),before+'flex-zero-r8-p8\n')
             model.write_text('new executable')
+            # Directional mode launches BOTH candidates and retains the first failure.
+            fake.write_text(fake.read_text().replace('if False:',"if flex and bits=='8':"))
+            directional_args=args[:-1]+[str(repo/'directional'),'--directional-check',
+                                       '--reuse-controls-from',str(repo/'passing')]
+            before=(repo/'calls').read_text()
+            result=subprocess.run(directional_args,capture_output=True,text=True)
+            self.assertEqual(result.returncode,1,result.stdout+result.stderr)
+            directional=json.loads((repo/'directional/summary.json').read_text())['10cells']
+            self.assertEqual(directional['flex-zero-r8-p16']['status'],'FAIL')
+            self.assertEqual(directional['flex-zero-r16-p8']['status'],'PASS')
+            self.assertEqual((repo/'calls').read_text(),before+'flex-zero-r8-p16\nflex-zero-r16-p8\n')
+            denv=json.loads((repo/'directional/environment.json').read_text())
+            self.assertTrue(denv['directional_check'])
+            self.assertIsNone(denv['candidate_bits'])
+            self.assertEqual(denv['candidate_modes'],['flex-zero-r8-p16','flex-zero-r16-p8'])
+            # A failed original 8/8 run must not prevent the new quantizer experiment.
+            fake.write_text(fake.read_text().replace("if flex and bits=='8':",
+                "if flex and bits=='8' and '--bddcProlongateZeroPreserving' not in a:"))
+            before=(repo/'calls').read_text()
+            qargs=args[:-1]+[str(repo/'zeroP'),'--prolongation-quantizer-check',
+                            '--reuse-controls-from',str(repo/'passing')]
+            result=subprocess.run(qargs,capture_output=True,text=True)
+            self.assertEqual(result.returncode,1,result.stdout+result.stderr)
+            qrows=json.loads((repo/'zeroP/summary.json').read_text())['10cells']
+            self.assertEqual(qrows['flex-zero-r8-p8']['status'],'FAIL')
+            self.assertEqual(qrows['flex-zero-r8-p8-zeroP']['status'],'PASS')
+            self.assertTrue(qrows['flex-zero-r8-p8-zeroP']['zero_preserving_prolongation'])
+            self.assertEqual((repo/'calls').read_text(),before+'flex-zero-r8-p8\nflex-zero-r8-p8-zeroP\n')
             # A standard-CG regression must stop experimental runs, not pass silently.
             (ref/'10cells/full-r16-p16/bddc-convergence-step1.csv').write_text('different history\n')
             result=subprocess.run(args[:-1]+[str(repo/'changed')],capture_output=True,text=True)

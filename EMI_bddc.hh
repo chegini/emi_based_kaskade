@@ -43,8 +43,11 @@
 #include "EMI_bddc_convergence.hh"
 #include "EMI_bddc_precision.hh"
 #include "EMI_bddc_cg_diagnostics.hh"
+#include "EMI_bddc_prolongation_diagnostics.hh"
 #include "EMI_potential_diagnostics.hh"
 #include "EMI_constant_correction.hh"
+#include "EMI_fgmres_mpi.hh"
+#include "EMI_preconditioner_probe.hh"
 
 namespace EmiBddc
 {
@@ -2074,6 +2077,17 @@ State runBddcSdc(Functional& F,
     std::vector<double> globalStep(nDofs, 0.0);
     bool const rankZero = mpiRankZero(options.mpi != 0);
     bool const relativeStopping = options.bddcRelativeTolerance > 0.0;
+    OuterSolverTraffic outerTraffic;
+    int outerRanks=1;
+#ifdef KASKADE_HAVE_MPI
+    if (options.mpi != 0) MPI_Comm_size(MPI_COMM_WORLD,&outerRanks);
+#endif
+    if (options.bddcFgmres && rankZero)
+      std::cout << "BDDC FGMRES: root-owned right preconditioning; restart="
+                << options.bddcFgmresRestart
+                << "; one restriction pass; fresh RHS feedback per application; no CG update\n";
+    if (options.bddcProlongateConstantSplit && rankZero)
+      std::cout << "BDDC constant-split prolongation: float32 c; 8-byte header included; existing setup weights\n";
     auto checkConvergenceOutput = [&](bool success)
     {
       if (!options.bddcConvergenceReport)
@@ -2088,7 +2102,7 @@ State runBddcSdc(Functional& F,
     };
     auto checkCgDiagnosticOutput = [&](bool success)
     {
-      if (!options.bddcCgDiagnostics) return;
+      if (!options.bddcCgDiagnostics && !options.bddcProlongationDiagnostics) return;
       int ready = success ? 1 : 0;
 #ifdef KASKADE_HAVE_MPI
       if (options.mpi != 0)
@@ -2100,6 +2114,8 @@ State runBddcSdc(Functional& F,
     if (options.bddcCgDiagnostics && rankZero)
       std::cout << "BDDC CG diagnostics enabled: extra reductions/operator applications; "
                    "validation timings are not performance measurements.\n";
+    if (options.bddcProlongationDiagnostics && rankZero)
+      std::cout << "BDDC prolongation diagnostics enabled: shadow only; extra Dirichlet solves and reductions; not a timing benchmark.\n";
     bool const computeDiagnostics = options.diagnostics && rankZero;
     Vector diagnosticResidual((computeDiagnostics || (relativeStopping && rankZero)) ? nDofs : 0);
 
@@ -2129,6 +2145,7 @@ State runBddcSdc(Functional& F,
       else
 #endif
         globalStep = localStep;
+      if (options.mpi != 0) outerTraffic.add(nDofs*sizeof(double),outerRanks,true);
       for (size_t i = 0; i < nDofs; ++i)
         stepVector[i] = globalStep[i];
       if (options.profile)
@@ -2186,7 +2203,8 @@ State runBddcSdc(Functional& F,
       auto const solverRhsStart = options.profile
                                 ? ProfileTimes::Clock::now()
                                 : ProfileTimes::Clock::time_point{};
-      solver.restartRhs(subdomainRhs);
+      // FGMRES starts a fresh BDDC RHS for each Arnoldi vector below.
+      if (!options.bddcFgmres) solver.restartRhs(subdomainRhs);
       if (options.profile)
       {
         profile.rhsSetup += ProfileTimes::seconds(solverRhsStart);
@@ -2215,6 +2233,7 @@ State runBddcSdc(Functional& F,
         {
           double norms[2] = {measured.absolute,measured.rhsNorm};
           MPI_Bcast(norms,2,MPI_DOUBLE,0,MPI_COMM_WORLD);
+          outerTraffic.add(sizeof(norms),outerRanks);
           measured = {norms[0],norms[1]};
         }
 #endif
@@ -2238,12 +2257,31 @@ State runBddcSdc(Functional& F,
 #endif
       };
       CgDiagnosticReport cgDiagnostics(globalMatrix,rhs,subdomains,data,rankZero,diagnosticSum);
+      ProlongationDiagnosticReport prolongationDiagnostics(
+          globalMatrix,rhs,subdomains,data,rankZero,diagnosticSum);
+      if (step==0 && options.bddcProlongationGroupingCall>0)
+        prolongationDiagnostics.groupingProbe(options.bddcProlongationGroupingCall,
+          options.bddcProlongateCompressionBits>0 ? options.bddcProlongateCompressionBits
+                                                : options.bddcCompressionBits,
+          options.outputDir+"/bddc-prolongation-grouping.csv");
+      if (step==0 && options.bddcProlongationConstraintCall>0)
+        prolongationDiagnostics.constraintProbe(
+          prolongationConstraintGroups(interfaceAverages,data),
+          options.bddcProlongationConstraintCall,options.outputDir+"/bddc-prolongation-constraints");
       if (options.bddcCgDiagnostics)
       {
         checkCgDiagnosticOutput(cgDiagnostics.open(options.outputDir
           + "/bddc-cg-diagnostics-step" + std::to_string(step+1) + ".csv"));
-        solver.setDiagnosticObserver([&](auto const& event) { cgDiagnostics.observe(event); });
       }
+      if (options.bddcProlongationDiagnostics)
+        checkCgDiagnosticOutput(prolongationDiagnostics.open(options.outputDir
+          + "/bddc-prolongation-diagnostics-step" + std::to_string(step+1) + ".csv"));
+      if (options.bddcCgDiagnostics || options.bddcProlongationDiagnostics)
+        solver.setDiagnosticObserver([&](auto const& event)
+        {
+          if (options.bddcCgDiagnostics) cgDiagnostics.observe(event);
+          if (options.bddcProlongationDiagnostics) prolongationDiagnostics.observe(event);
+        });
       std::string const convergencePath = options.bddcConvergenceReport
         ? options.outputDir + "/bddc-convergence-step" + std::to_string(step+1) + ".csv"
         : std::string{};
@@ -2266,7 +2304,107 @@ State runBddcSdc(Functional& F,
         }
       };
       TrueResidualResult trueResult;
-      if (relativeStopping)
+      if (options.bddcFgmres)
+      {
+        auto const solveStart=ProfileTimes::Clock::now();
+        Fgmres::Vector b(nDofs);
+        for (size_t i=0;i<nDofs;++i) b[i]=rhs[i][0];
+        Vector ax(nDofs),input(nDofs);
+        std::ofstream trace;
+        bool traceGood=true;
+        if (rankZero && !options.bddcPreconditionerProbe)
+        {
+          trace.open(options.outputDir+"/bddc-fgmres-step"+std::to_string(step+1)+".csv");
+          trace << "iteration,cycle,estimated_absolute_residual,true_absolute_residual,true_relative_residual\n";
+          trace << std::setprecision(17);
+        }
+        auto applyGlobal=[&](Fgmres::Vector const& x)
+          {
+            for (size_t i=0;i<nDofs;++i) input[i][0]=x[i];
+            globalMatrix.mv(input,ax);
+            Fgmres::Vector y(nDofs);
+            for (size_t i=0;i<nDofs;++i) y[i]=ax[i][0];
+            return y;
+          };
+        auto applyLocal=[&](Fgmres::Vector const& v)
+          {
+            for (size_t s=0;s<data.localDofs.size();++s)
+              for (size_t i=0;i<data.localDofs[s].size();++i)
+                subdomainRhs[s][i][0]=data.weights[s][i][0]*v[data.localDofs[s][i]];
+            solver.applyPreconditioner(subdomainRhs,subdomainSolutions);
+            Fgmres::Vector local(nDofs,0);
+            for (size_t s=0;s<subdomains.size();++s)
+            {
+              if (!subdomains.has(s)) continue;
+              for (size_t i=0;i<data.localDofs[s].size();++i)
+                local[data.localDofs[s][i]]+=data.weights[s][i][0]*subdomainSolutions[s][i][0];
+            }
+            return local;
+          };
+        if (options.bddcPreconditionerProbe)
+        {
+          probeFirstPreconditioner(b,options.mpi!=0,applyGlobal,applyLocal,
+                                  options.outputDir+"/bddc-frozen-probe.csv");
+          // Count actual compressed packet deliveries, including the new header.
+          // The reduction below is diagnostic traffic, not a production exchange.
+          unsigned long long traffic[3]={0,0,0};
+          if constexpr (requires(Transfer const& t) {
+                          t.restrictStats(); t.prolongateStats(); t.prolongateConstantHeaderBytes();
+                        })
+            for (size_t s=0;s<subdomains.size();++s)
+              if (subdomains.has(s))
+              {
+                auto const& t=subdomains[s].transfer();
+                traffic[0]+=t.restrictStats().total_sent_bytes;
+                traffic[1]+=t.prolongateStats().total_sent_bytes;
+                traffic[2]+=t.prolongateConstantHeaderBytes();
+              }
+#ifdef KASKADE_HAVE_MPI
+          if (options.mpi) MPI_Allreduce(MPI_IN_PLACE,traffic,3,MPI_UNSIGNED_LONG_LONG,
+                                        MPI_SUM,MPI_COMM_WORLD);
+#endif
+          if (rankZero && options.bddcCompression)
+            std::cout << "BDDC frozen probe traffic: restriction=" << traffic[0]
+                      << " prolongation=" << traffic[1] << " constant_header=" << traffic[2] << '\n';
+          if (rankZero)
+            std::cout << "BDDC frozen probe completed: first normalized RHS; applications=1; no state advance\n";
+          return state;
+        }
+        auto result=rootFgmres(b,options.mpi!=0,options.bddcFgmresRestart,
+          options.bddcIterations,options.bddcRelativeTolerance,applyGlobal,applyLocal,
+          [&](int iteration,int cycle,double estimated,double measured)
+          {
+            trace << iteration << ',' << cycle << ',' << estimated << ',' << measured
+                  << ',' << (rhsNorm>0 ? measured/rhsNorm : measured) << '\n';
+            if (!trace) throw std::runtime_error("Cannot write FGMRES residual CSV");
+          },outerTraffic);
+        if (rankZero)
+        {
+          trace.close(); traceGood=!trace.fail();
+          std::cout << "BDDC FGMRES statistics step " << step+1 << ": applications="
+                    << result.iterations << " cycles=" << result.cycles
+                    << " root_matvecs=" << result.matvecs
+                    << " root_peak_basis_bytes=" << result.peakBasisBytes << '\n';
+        }
+        // Convergence is always rechecked through the same global-matrix norm
+        // as the CG controls after broadcasting the accepted root solution.
+        for (size_t i=0;i<nDofs;++i) stepVector[i][0]=result.x[i];
+        solveCalls=result.iterations; residual=result.residual;
+        trueResult.calls=solveCalls; trueResult.internalNorm=residual;
+        trueResult.measured=measureCurrentResidual();
+        trueResult.status=result.status==Fgmres::Status::converged && trueResult.measured.meets(options.bddcRelativeTolerance)
+          ? TrueResidualStatus::converged
+          : result.status==Fgmres::Status::iterationLimit ? TrueResidualStatus::iterationLimit
+          : result.status==Fgmres::Status::nonfinite ? TrueResidualStatus::nonfiniteResidual
+          : TrueResidualStatus::solverStopped;
+        if (!traceGood) throw std::runtime_error("Cannot close FGMRES residual CSV");
+        if (options.profile)
+        {
+          profile.bddcSolve+=ProfileTimes::seconds(solveStart);
+          profile.bddcSolveCalls+=solveCalls;
+        }
+      }
+      else if (relativeStopping)
       {
         trueResult = solveToTrueResidual(options.bddcIterations,options.bddcRelativeTolerance,
           [&]()
@@ -2274,6 +2412,8 @@ State runBddcSdc(Functional& F,
             auto const start = options.profile ? ProfileTimes::Clock::now()
                                                : ProfileTimes::Clock::time_point{};
             double const internalNorm = solver.solve();
+            if (options.bddcProlongationDiagnostics)
+              checkCgDiagnosticOutput(prolongationDiagnostics.good());
             if (options.bddcCgDiagnostics)
             {
               cgDiagnostics.finishCall(solver.lastCgStep().applied);
@@ -2347,6 +2487,11 @@ State runBddcSdc(Functional& F,
         if (rankZero)
           std::cout << "BDDC CG diagnostic data: " << options.outputDir
                     << "/bddc-cg-diagnostics-step" << step+1 << ".csv\n";
+      }
+      if (options.bddcProlongationDiagnostics)
+      {
+        solver.setDiagnosticObserver({});
+        checkCgDiagnosticOutput(prolongationDiagnostics.close());
       }
       // This is a post-solve correction, not part of the CG recurrence. Local
       // solver iterates are no longer used in this step and restartRhs clears
@@ -2437,6 +2582,9 @@ State runBddcSdc(Functional& F,
         std::cout << std::flush;
       if (relativeStopping && !trueResult.converged())
       {
+        if (rankZero)
+          std::cout << "BDDC outer solver logical payload bytes: " << outerTraffic.bytes
+                    << " collectives=" << outerTraffic.collectives << '\n';
         char const* reason = trueResult.status == TrueResidualStatus::iterationLimit
                            ? "iteration limit"
                            : trueResult.status == TrueResidualStatus::nonfiniteResidual
@@ -2480,6 +2628,9 @@ State runBddcSdc(Functional& F,
                      *static_cast<unsigned long long>(steps) << "\n";
     }
     // The retained solver reports cumulative traffic. Add it once at the end.
+    if (rankZero)
+      std::cout << "BDDC outer solver logical payload bytes: " << outerTraffic.bytes
+                << " collectives=" << outerTraffic.collectives << '\n';
     if (options.bddcCompressionReport)
     {
       if (options.bddcCompression)

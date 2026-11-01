@@ -103,10 +103,19 @@ struct EmiOptions
   int bddcProlongateCompressionBits = -1;
   int bddcRestrictionPasses = 1;
   int bddcRestrictZeroPreserving = 0;
+  int bddcProlongateZeroPreserving = 0;
   int bddcRestrictGroupSize = 0;
+  int bddcProlongateGroupSize = 0;
   int bddcCgDiagnostics = 0;
+  int bddcProlongationDiagnostics = 0;
+  int bddcProlongationConstraintCall = 0;
+  int bddcProlongationGroupingCall = 0;
   int bddcCgOriginalResidual = 0;
   int bddcFlexibleCg = 0;
+  int bddcFgmres = 0;
+  int bddcFgmresRestart = 30;
+  int bddcPreconditionerProbe = 0;
+  int bddcProlongateConstantSplit = 0;
   int bddcConstantCorrection = 0;
   int bddcCompressionMinInterfaceSize = 0;
   int bddcCompressionThresholdInterfaceTypes = Kaskade::BDDC::EDGE;
@@ -951,10 +960,20 @@ int main(int argc, char* argv[])
      options.bddcProlongateCompressionBits, "prolongation quantization bits: -1=inherit common, 1..32=override")
     ("bddcRestrictZeroPreserving", options.bddcRestrictZeroPreserving,
      options.bddcRestrictZeroPreserving, "experimental exact-zero symmetric restriction quantizer (0/1); prolongation unchanged")
+    ("bddcProlongateZeroPreserving", options.bddcProlongateZeroPreserving,
+     options.bddcProlongateZeroPreserving, "experimental exact-zero symmetric prolongation quantizer (0/1)")
     ("bddcRestrictGroupSize", options.bddcRestrictGroupSize, options.bddcRestrictGroupSize,
      "experimental producer restriction group size; 0 disables, requires exact-zero restriction")
+    ("bddcProlongateGroupSize", options.bddcProlongateGroupSize, options.bddcProlongateGroupSize,
+     "experimental affine producer prolongation group size; 0 keeps legacy packets")
     ("bddcRestrictionPasses", options.bddcRestrictionPasses, options.bddcRestrictionPasses,
      "restriction communication passes per compressed BDDC update: 1..16 (default 1)")
+    ("bddcProlongationDiagnostics", options.bddcProlongationDiagnostics,
+     options.bddcProlongationDiagnostics, "read-only exact-prolongation shadow diagnostic (extra solves/reductions)")
+    ("bddcProlongationConstraintCall", options.bddcProlongationConstraintCall,
+     options.bddcProlongationConstraintCall, "diagnostic coarse-mean shadow at this call of step 1 (0 disables)")
+    ("bddcProlongationGroupingCall", options.bddcProlongationGroupingCall,
+     options.bddcProlongationGroupingCall, "read-only producer-group screening at this call of step 1 (0 disables)")
     ("bddcCgDiagnostics", options.bddcCgDiagnostics, options.bddcCgDiagnostics,
      "read-only restriction/scalar/conjugacy CSV diagnostics for non-SDC CG: 0=no, 1=yes")
     ("bddcCgOriginalResidual", options.bddcCgOriginalResidual, options.bddcCgOriginalResidual,
@@ -982,6 +1001,14 @@ int main(int argc, char* argv[])
     ("bddcRelativeTolerance", options.bddcRelativeTolerance, options.bddcRelativeTolerance, "true global relative residual tolerance; 0 keeps the legacy stopping rule")
     ("bddcInterfaceTypes", options.bddcInterfaceTypes, options.bddcInterfaceTypes, "BDDC interface flags: 1=corner, 2=edge, 4=face, 7=all")
     ("bddcVerbose", options.bddcVerbose, options.bddcVerbose, "internal BDDC iteration table when convergence report is off: 0=no, 1=yes")
+    ("bddcFgmres", options.bddcFgmres, options.bddcFgmres,
+     "experimental root-owned right FGMRES with distributed BDDC; requires bddcUseCg=0")
+    ("bddcFgmresRestart", options.bddcFgmresRestart, options.bddcFgmresRestart,
+     "FGMRES restart dimension (default 30)")
+    ("bddcPreconditionerProbe", options.bddcPreconditionerProbe, options.bddcPreconditionerProbe,
+     "diagnostic only: apply BDDC once to the first normalized RHS, write v/z/Az, do not advance state; requires FGMRES")
+    ("bddcProlongateConstantSplit", options.bddcProlongateConstantSplit, options.bddcProlongateConstantSplit,
+     "experimental float32 producer constant split; frozen probe or FGMRES validation (up to 10 steps) only")
     ("bddcUseCg", options.bddcUseCg, options.bddcUseCg, "use CG in BDDC coarse solve path: 0=no, 1=yes")
     ("bddcConvergenceReport", options.bddcConvergenceReport, options.bddcConvergenceReport,
      "true-residual table and CSV: -1=automatic (default), 0=off, 1=on")
@@ -1032,6 +1059,17 @@ int main(int argc, char* argv[])
   bool const supportsConvergenceReport = options.bddc && !options.sdc && options.bddcUseCg
                                      && options.bddcRelativeTolerance > 0.0
                                      && !options.bddcOperatorAudit;
+  if (options.bddcProlongationDiagnostics < 0 || options.bddcProlongationDiagnostics > 1 ||
+      (options.bddcProlongationDiagnostics && (!options.bddc || options.sdc ||
+       options.bddcRelativeTolerance<=0 || options.bddcOperatorAudit)))
+    throw std::runtime_error("bddcProlongationDiagnostics requires non-SDC BDDC with positive true tolerance and no operator audit");
+  if (options.bddcProlongationConstraintCall<0 ||
+      (options.bddcProlongationConstraintCall && !options.bddcProlongationDiagnostics))
+    throw std::runtime_error("bddcProlongationConstraintCall requires prolongation diagnostics");
+  if (options.bddcProlongationGroupingCall<0 ||
+      (options.bddcProlongationGroupingCall && (!options.bddcProlongationDiagnostics ||
+       !options.bddcCompression || options.bddcProlongateZeroPreserving || options.bddcProlongateGroupSize)))
+    throw std::runtime_error("Grouped P probe requires compressed affine prolongation and diagnostics");
   if (options.bddcConvergenceReport == -1)
     options.bddcConvergenceReport = supportsConvergenceReport ? 1 : 0;
   if (options.bddcConvergenceReport && !supportsConvergenceReport)
@@ -1055,6 +1093,28 @@ int main(int argc, char* argv[])
                                    || options.bddcConditionEstimate)))
     throw std::runtime_error("bddcFlexibleCg requires non-SDC BDDC CG, original-residual rho, "
                              "positive true tolerance, no operator audit and no fixed-PCG condition estimate");
+  if (options.bddcFgmres<0 || options.bddcFgmres>1 || options.bddcFgmresRestart<1 ||
+      options.bddcFgmresRestart>300 ||
+      (options.bddcFgmres && (!options.bddc || options.sdc || options.direct ||
+       options.bddcUseCg || options.bddcFlexibleCg || options.bddcCgOriginalResidual ||
+       options.bddcRelativeTolerance<=0 || options.bddcRestrictionPasses!=1 ||
+       options.bddcCgDiagnostics || options.bddcProlongationDiagnostics ||
+       options.bddcConvergenceReport || options.bddcConditionEstimate ||
+       options.bddcOperatorAudit || options.bddcConstantCorrection || options.masterWorker)))
+    throw std::runtime_error("FGMRES requires non-SDC BDDC, bddcUseCg=0, positive true tolerance, "
+      "one restriction pass, masterWorker=0 and CG/constant-correction/observer options disabled; restart 1..300");
+  if (options.bddcPreconditionerProbe<0 || options.bddcPreconditionerProbe>1 ||
+      (options.bddcPreconditionerProbe && (!options.bddcFgmres || options.writeVTK)))
+    throw std::runtime_error("bddcPreconditionerProbe requires FGMRES and writeVTK=0; this is not a time-step solve");
+  if (options.bddcProlongateConstantSplit<0 || options.bddcProlongateConstantSplit>1 ||
+      (options.bddcProlongateConstantSplit && (!options.bddcFgmres ||
+       (!options.bddcPreconditionerProbe && (options.maximumNumberOfTimeSteps<1 ||
+        options.maximumNumberOfTimeSteps>10)) ||
+       !options.bddcCompression || options.bddcProlongateGroupSize ||
+       options.bddcProlongateZeroPreserving ||
+       (options.bddcGraphLifting && !options.bddcGraphLiftingAfterQuantization))))
+    throw std::runtime_error("Constant split requires a compressed frozen probe or FGMRES validation (1..10 steps) "
+                             "with ungrouped affine nodal prolongation");
   if (options.bddcConditionEstimate != 0 && options.bddcConditionEstimate != 1)
     throw std::runtime_error("bddcConditionEstimate must be 0 or 1");
   if (options.bddcConditionEstimate &&
@@ -1099,9 +1159,25 @@ int main(int argc, char* argv[])
 
   if (options.bddcRestrictZeroPreserving!=0 && options.bddcRestrictZeroPreserving!=1)
     throw std::runtime_error("bddcRestrictZeroPreserving must be 0 or 1");
+  if (options.bddcProlongateZeroPreserving!=0 && options.bddcProlongateZeroPreserving!=1)
+    throw std::runtime_error("bddcProlongateZeroPreserving must be 0 or 1");
+  if (options.bddcProlongateZeroPreserving)
+  {
+    int const bits = options.bddcProlongateCompressionBits>0
+                   ? options.bddcProlongateCompressionBits : options.bddcCompressionBits;
+    if (!options.bddc || !options.bddcCompression || options.sdc || bits<2 || bits>32)
+      throw std::runtime_error("Zero-preserving prolongation requires EMI compressed BDDC and 2..32 prolongation bits");
+    if (options.bddcGraphLifting && !options.bddcGraphLiftingAfterQuantization)
+      throw std::runtime_error("Zero-preserving prolongation requires lifting AFTER quantization");
+  }
   if (options.bddcRestrictGroupSize<0 ||
       (options.bddcRestrictGroupSize && !options.bddcRestrictZeroPreserving))
     throw std::runtime_error("bddcRestrictGroupSize must be nonnegative and requires exact-zero restriction");
+  if (options.bddcProlongateGroupSize<0 ||
+      (options.bddcProlongateGroupSize && (!options.bddc || !options.bddcCompression ||
+       options.sdc || options.bddcProlongateZeroPreserving ||
+       (options.bddcGraphLifting && !options.bddcGraphLiftingAfterQuantization))))
+    throw std::runtime_error("Grouped prolongation requires compressed non-SDC BDDC, affine nodal quantization before lifting");
   if (options.bddcRestrictZeroPreserving)
   {
     int const bits = options.bddcRestrictCompressionBits>0
@@ -1121,14 +1197,19 @@ int main(int argc, char* argv[])
   OptionalMpiSession mpiSession(argc,argv,options.mpi != 0,options.quiet == 0);
   bool const outputRankZero = EmiBddc::mpiRankZero(options.mpi != 0);
   bool const detailedOutput = outputRankZero && !options.quiet;
+  if (outputRankZero && options.bddcProlongateGroupSize)
+    std::cout << "BDDC prolongation groups: producer-order size=" << options.bddcProlongateGroupSize
+              << "; float32 scale/minimum; descriptors included in byte counters\n";
   if (outputRankZero && options.bddcRestrictGroupSize)
     std::cout << "BDDC restriction groups: producer-order size="
               << options.bddcRestrictGroupSize
               << "; shared scales; descriptors included in byte counters\n";
   if (outputRankZero && options.bddcRestrictZeroPreserving)
     std::cout << "BDDC restriction quantizer: symmetric exact-zero (experimental); "
-              << "prolongation quantizer unchanged; restriction passes="
+              << "restriction passes="
               << options.bddcRestrictionPasses << "\n";
+  if (outputRankZero && options.bddcProlongateZeroPreserving)
+    std::cout << "BDDC prolongation quantizer: symmetric exact-zero; float32 scale and zero offset; no extra exchange\n";
 #ifdef KASKADE_HAVE_MPI
   if (options.directBackend == "mumps-spd")
   {
@@ -1699,6 +1780,7 @@ int main(int argc, char* argv[])
     }
     else
       u = EmiBddc::runBddc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,lhs,nDofs,steps,options);
+    if (options.bddcPreconditionerProbe) return 0;
     phaseProfile.next(Phase::vtkOutput);
     if (writeVtkOnThisRank(options.writeVTK))
       writeState(u,uAll,options.order,

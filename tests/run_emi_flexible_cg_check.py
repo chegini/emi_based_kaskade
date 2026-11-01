@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare one-pass flexible CG at equal low bit depths against validated 16/16 controls."""
+"""Compare one-pass flexible CG at low or directional bit depths against validated 16/16 controls."""
 import argparse
 from datetime import datetime,timezone
 import json
@@ -16,6 +16,7 @@ from run_emi_quantization_diagnostic import comparison
 from analyze_emi_potential_diagnostics import read,error_metrics
 
 MARKER='BDDC flexible CG: one-term Polak-Ribiere; original residual; existing two-scalar reduction; no extra transfer pass'
+ZERO_P_MARKER='BDDC prolongation quantizer: symmetric exact-zero; float32 scale and zero offset; no extra exchange'
 MODES=['uncompressed-cg','full-r16-p16','flex-r16-p16','flex-zero-r12-p12']
 
 
@@ -28,10 +29,15 @@ def make_command(saved,mode,out):
     """Candidate differs from the saved seed only in bits, solver and output."""
     cmd=list(saved)
     if '--bddcFlexibleCg' in cmd: raise ValueError('Reference must predate the flexible-CG experiment')
-    match=re.fullmatch(r'flex-zero-r(\d+)-p\1',mode)
+    match=re.fullmatch(r'flex-zero-r(\d+)-p(\d+)(-zeroP)?',mode)
     if match:
-        bits=int(match[1]);modes_for(bits)
-        cmd=candidate_command(cmd,bits,out,bits)
+        rb,pb=map(int,match.groups()[:2])
+        if not (2<=rb<=32 and 2<=pb<=32):raise ValueError('Directional precision must be in 2..32')
+        cmd=candidate_command(cmd,rb,out,pb)
+        if match.group(3):
+            if '--bddcProlongateZeroPreserving' in cmd:
+                raise ValueError('Reference must use the original prolongation quantizer')
+            cmd+=['--bddcProlongateZeroPreserving','1']
     else:
         if mode not in MODES[:3]:raise ValueError('Unknown mode '+mode)
         value(cmd,'--dir');cmd[cmd.index('--dir')+1]=str(out)
@@ -67,6 +73,7 @@ def save(root,records):
             'Controls marked reused_from were not rerun or retimed; their executable and commands were checked.',
             'Flexible CG uses one prior direction (Polak-Ribiere), not full-history orthogonalization.',
             'No precision fallback, extra restriction pass or tolerance relaxation. Float32 metadata is unchanged.',
+            'Suffix -zeroP enables exact-zero prolongation; other modes keep the original prolongation quantizer.',
             'Logical byte totals include post-CG correction deliveries and intra-rank transfers.',
             'Flexible CG reuses the existing two-double reduction; no additional solver message or payload.',
             'Timing includes diagnostics and output, so this is not a performance benchmark.']
@@ -79,13 +86,21 @@ def main():
     p.add_argument('--repo',type=Path,default=Path(__file__).resolve().parents[1])
     p.add_argument('--reference-campaign',type=Path,required=True)
     p.add_argument('--cases',nargs='+',default=['10cells','strong_h16'])
-    p.add_argument('--bits',type=int,default=12,choices=range(2,16),
+    experiment=p.add_mutually_exclusive_group()
+    experiment.add_argument('--bits',type=int,default=12,choices=range(2,16),
                    help='Candidate precision in BOTH directions; default 12')
+    experiment.add_argument('--directional-check',action='store_true',
+                   help='Test R8/P16 and R16/P8 with the same zero-preserving restriction policy as failed R8/P8')
+    experiment.add_argument('--prolongation-quantizer-check',action='store_true',
+                   help='Compare original and exact-zero prolongation at fixed R8/P8; rerun controls after rebuilding')
     p.add_argument('--reuse-controls-from',type=Path,
                    help='Reuse passing standard and flexible 16/16 controls from the same executable')
     p.add_argument('--output',type=Path)
     args=p.parse_args()
-    modes=modes_for(args.bits)
+    modes=(MODES[:3]+['flex-zero-r8-p16','flex-zero-r16-p8']
+           if args.directional_check else modes_for(args.bits))
+    if args.prolongation_quantizer_check:
+        modes=MODES[:3]+['flex-zero-r8-p8','flex-zero-r8-p8-zeroP']
     repo=args.repo.resolve();ref=args.reference_campaign.resolve();model=repo/'emiModel'
     oldenv=json.loads((ref/'environment.json').read_text())
     old=json.loads((ref/'summary.json').read_text())
@@ -98,7 +113,7 @@ def main():
         for mode in ['direct','uncompressed-cg','full-r16-p16',seed_mode]:
             if old[case]['runs'][mode]['status']!='PASS':p.error('Reference solver failed: '+case+'/'+mode)
         for mode in modes:
-            source='full-r16-p16' if mode=='flex-r16-p16' else seed_mode if mode==modes[-1] else mode
+            source='full-r16-p16' if mode=='flex-r16-p16' else seed_mode if mode.startswith('flex-zero-') else mode
             saved=shlex.split((ref/case/source/'command.sh').read_text())
             cmd=make_command(saved,mode,Path('validation-only'))
             if str(model) not in cmd:p.error('Reference command uses another executable path')
@@ -140,7 +155,10 @@ def main():
     (root/'environment.json').write_text(json.dumps(dict(executable_sha256=sha,
         reference_campaign=str(ref),reference_environment=oldenv,preserved_reference_summary=old,
         cases=args.cases,steps=steps,ranks=ranks,tolerance=1e-7,restriction_passes=1,
-        candidate_bits=args.bits,reuse_controls_from=str(args.reuse_controls_from.resolve()) if args.reuse_controls_from else None,
+        candidate_bits=None if args.directional_check else 8 if args.prolongation_quantizer_check else args.bits,
+        prolongation_quantizer_check=args.prolongation_quantizer_check,
+        directional_check=args.directional_check,candidate_modes=modes[3:],
+        reuse_controls_from=str(args.reuse_controls_from.resolve()) if args.reuse_controls_from else None,
         solver='one-term truncated flexible CG, Polak-Ribiere'),indent=2)+'\n')
     env=dict(os.environ,OPENBLAS_NUM_THREADS='1',OMP_NUM_THREADS='1')
     env.pop('KASKADE_RESTRICTION_CAPTURE',None)
@@ -164,6 +182,9 @@ def main():
             r['errors'][:0]=list(dict.fromkeys(re.findall(r'what\(\):\s*([^\r\n]+)',text)))
             if mode.startswith('flex-') and text.count(MARKER)!=1:
                 r['errors'].append('Missing/duplicate flexible-CG mode marker; rebuild the executable')
+            r['zero_preserving_prolongation']=mode.endswith('-zeroP')
+            if text.count(ZERO_P_MARKER)!=int(r['zero_preserving_prolongation']):
+                r['errors'].append('Unexpected/missing exact-zero prolongation marker; check executable and mode')
             if mode!='uncompressed-cg':
                 corrections,extra,errors=correction_metrics(text,steps,ranks)
                 r['constant_corrections']=corrections;r['errors']+=errors

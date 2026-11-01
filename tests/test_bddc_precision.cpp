@@ -78,9 +78,52 @@ int main()
   catch (std::runtime_error const&) { rejected=true; }
   if (!rejected) return 8;
   struct LegacyOptions { int bddcCompressionBits = 24; } legacy;
+  struct ProlongateOptions : Options { int bddcProlongateZeroPreserving = 1; } pOptions;
+  struct ProlongateTransfer : Transfer {
+    bool zero = false;
+    void setProlongateZeroPreserving(bool b) { zero=b; }
+  } pTransfer;
+  EmiBddc::configureTransferPrecision(pTransfer,pOptions);
+  if (!pTransfer.zero) return 9;
+  pOptions.bddcProlongateZeroPreserving=0;
+  EmiBddc::configureTransferPrecision(pTransfer,pOptions);
+  if (pTransfer.zero) return 10;
+  pOptions.bddcProlongateZeroPreserving=1;
+  rejected=false;
+  try { EmiBddc::configureTransferPrecision(transfer,pOptions); }
+  catch (std::runtime_error const&) { rejected=true; }
+  if (!rejected) return 11;
   EmiBddc::configureTransferPrecision(transfer,legacy);
   check(transfer,24,24);
+  struct PGroupOptions : Options { int bddcProlongateGroupSize=32; } pgOptions;
+  struct PGroupTransfer : Transfer {
+    int group=-1;
+    void setProlongateGroupSize(int n) { group=n; }
+  } pgTransfer;
+  EmiBddc::configureTransferPrecision(pgTransfer,pgOptions);
+  if (pgTransfer.group!=32) return 12;
+  rejected=false;
+  try { EmiBddc::configureTransferPrecision(transfer,pgOptions); }
+  catch (std::runtime_error const&) { rejected=true; }
+  if (!rejected) return 13;
+  pgOptions.bddcProlongateGroupSize=0;
+  EmiBddc::configureTransferPrecision(pgTransfer,pgOptions);
+  if (pgTransfer.group!=0) return 14;
   struct UncompressedTransfer {} uncompressed;
+  struct SplitOptions : Options { int bddcProlongateConstantSplit=1; } splitOptions;
+  struct SplitTransfer : Transfer {
+    bool split=false;
+    void setProlongateConstantSplit(bool enable) { split=enable; }
+  } splitTransfer;
+  EmiBddc::configureTransferPrecision(splitTransfer,splitOptions);
+  if (!splitTransfer.split) return 15;
+  rejected=false;
+  try { EmiBddc::configureTransferPrecision(transfer,splitOptions); }
+  catch (std::runtime_error const&) { rejected=true; }
+  if (!rejected) return 16;
+  splitOptions.bddcProlongateConstantSplit=0;
+  EmiBddc::configureTransferPrecision(splitTransfer,splitOptions);
+  if (splitTransfer.split) return 17;
   EmiBddc::configureTransferPrecision(uncompressed,options);
   for (int bits : {-1,1,8,12,16,24,32})
     if (!EmiBddc::validDirectionalCompressionBits(bits)) return 1;

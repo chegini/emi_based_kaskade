@@ -1,5 +1,50 @@
 # EMI model with Kaskade7
 
+## Controlled one-step grouped prolongation experiment
+
+`tests/run_emi_grouped_prolongation_check.py` runs **10cells, one time step**
+with fresh direct, CG16/16 and FCG16/16 controls, followed by FCG8/8 with
+`--bddcProlongateGroupSize 32`. It preserves the saved physical problem,
+eight BDDC ranks, refinement level 2, one restriction pass and true tolerance
+`1e-7`. Restriction uses the existing exact-zero quantizer. Prolongation uses
+the original affine quantizer on consecutive groups of 32 non-corner values in
+each producer's union interface order. A group has the same grid for its local
+copy and every destination; exact corners retain their existing representation.
+
+Scale and minimum remain **float32**. Packets carry a uint32 run count and a
+uint32 scalar count plus float32 scale/minimum for each contiguous group run.
+All descriptors, padding and exact-corner trailers are counted. Integer lifting
+and Huffman coding remain enabled. Grouping is optional (default zero), and
+does not change the CG/FCG recurrence, number of restriction passes or MPI
+exchange schedule. Metadata and packing work increase; smaller groups can
+therefore cost more despite using fewer bits per quantized value.
+
+After syncing both repositories and rebuilding `emiModel`, run in the container:
+
+```bash
+python3 tests/run_emi_grouped_prolongation_check.py \
+  --reference-campaign output/emi-sd-cg8-20261101T121744Z-9497
+```
+
+For the controlled follow-up with **16-value groups**, add `--group-size 16`.
+The default remains 32. This changes only the candidate's prolongation group
+size; precision remains 8/8 and restriction remains one pass. No rebuilding is
+needed when changing this runtime setting. The fresh controls and actual-byte
+accounting are identical, and the chosen size is recorded in the output.
+
+The source campaign is read only. Each invocation creates a new output folder
+and saves exact commands, executable digest, logs, metrics and full-precision
+raw/centered errors against the fresh direct solve. The fresh CG16 first-step
+residual and iteration count must match the saved control. A failed control
+stops the experiment. Candidate convergence and total-byte savings against
+both CG16 and FCG16 are reported separately. No hidden solution-error threshold
+is applied. Byte totals include intra-rank deliveries but exclude MPI framing
+and codebook training; validation timings are not benchmark timings.
+
+Positive `r.z` in the earlier frozen-buffer screen is **not** a convergence
+guarantee. This runner does not launch a ten-step campaign, add refinement
+passes, raise precision, relax tolerance or apply post-solve constant correction.
+
 This project is the clean EMI implementation based on `kaskade7_new`. It
 supports EMI time integration, SDC, algebraic adaptivity (AA), BDDC, and
 optional compressed BDDC interface transfer.
@@ -2109,7 +2154,7 @@ Further saved container checks, using the same controls and executable:
 | 14/14 | 26 / 225 | 42 / 421 | 7.21% / 4.59% |
 | 13/13 | 36 / 283 | 68 / 562 | -9.05% / -21.75% |
 | 12/12 | 36 / 329 | 83 / 717 | -16.91% / -47.28% |
-| 8/8 | failed; summary count unavailable | breakdown at call 14 of step 1 | unavailable |
+| 8/8 | breakdown at call 7 of step 1 | breakdown at call 14 of step 1 | unavailable |
 
 The additional campaigns are `emi-flexible-cg-20261101T111850Z-8325` (8/8),
 `emi-flexible-cg-20261101T112121Z-8438` (14/14) and
@@ -2125,3 +2170,713 @@ Among the tested equal-bit candidates, 14/14 is the best for total logical
 communication on these two problems. This does not establish runtime speedup,
 global optimality or robustness on other meshes. Failed cases remain part of
 the record.
+
+Read-only diagnosis of the saved flexible 8/8 campaign identifies negative
+`rho=r^T*z` as the rejection trigger, before the next beta/direction is formed:
+
+| Problem | Rejected solver call | Accepted updates | Independently computed rho | True relative residual at failure |
+| --- | ---: | ---: | ---: | ---: |
+| 10cells | 7 | 6 | -2.6993465407952456e-5 | 0.434570 |
+| strong_h16 | 14 | 13 | -3.9770263935861021e-5 | 0.540453 |
+
+The malformed/interleaved MPI log caused the collector to report zero calls
+for 10cells; its diagnostic CSV and original log both identify call 7. The
+internal/global rho relative discrepancies at rejection are 7.54e-12 and
+3.54e-14, respectively, so both calculations confirm the sign. Maximum recorded
+adjacent-direction conjugacy defects on accepted updates are only 3.01e-12
+and 7.40e-13. Shared correction copies agree to about 1e-16. Curvature is not
+evaluated for the rejected directions; blank CSV entries must not be interpreted
+as zero or negative curvature.
+
+For the quadratic energy, the derivative along z is `-r^T*z`; these corrections
+therefore increase energy for a sufficiently small positive step. Changing beta
+or restarting alone does not repair this negative scalar. The evidence does
+not isolate which transfer stage causes it. A controlled next diagnostic is
+flexible R8/P16 and flexible R16/P8 against the failed R8/P8, retaining the
+same quantizer policies, physics, one pass and tolerance. Such mixed-precision
+runs would isolate sensitivity; they would not establish successful 8/8.
+No solver or compression change was made for this diagnosis.
+
+Run both directional isolation tests with the existing flexible-CG binary:
+
+```bash
+python3 tests/run_emi_flexible_cg_check.py \
+  --reference-campaign output/emi-mixed-validation-20261101T101620Z-6974 \
+  --reuse-controls-from output/emi-flexible-cg-20261101T105600Z-7824 \
+  --cases 10cells strong_h16 \
+  --directional-check
+```
+
+This launches four new runs: R8/P16 and R16/P8 on each problem. Both retain
+zero-preserving restriction, the original prolongation quantizer, flexible CG,
+one restriction pass, ten timesteps, eight ranks and tolerance `1e-7`. Relative
+to failed R8/P8, only one directional precision changes in each candidate.
+In particular, R16/P8 still uses **zero-preserving** restriction; it does not
+switch to the original restriction quantizer used by the 16/16 controls.
+Float32 scale/minimum metadata and post-CG correction are unchanged.
+
+`--directional-check` and `--bits` are mutually exclusive. Controls are reused
+only after the existing hash/settings checks; all new logs and commands go to a
+fresh directory. Failure of one candidate does not prevent the other from
+running. No compilation is needed because this extends only the Python driver.
+Convergence would identify sensitivity to a transfer direction, not demonstrate
+successful equal-bit 8/8 communication or prove a unique causal mechanism.
+
+The directional campaign `emi-flexible-cg-20261101T113952Z-8669` passed all ten
+steps for both mixed configurations. R8/P16 took 285 / 561 iterations and
+24,935,216 / 155,751,168 logical bytes on 10cells / strong_h16. R16/P8 took
+322 / 706 iterations and 28,336,640 / 198,009,200 bytes. None beats flexible
+16/16 in total bytes. This supports investigating combined transfer error;
+it does not prove that either quantizer alone is defective.
+
+### Controlled exact-zero prolongation experiment
+
+`--bddcProlongateZeroPreserving 1` is a new opt-in numerical experiment.
+The original prolongation quantizer uses an offset grid, which need not contain
+zero. The experimental mode applies the existing symmetric exact-zero grid to
+the **weighted local correction values**, before optional integer graph lifting:
+`Z=2^(b-1)`, `L=Z-1`, `q=Z+round(s*x)`, `x_hat=(q-Z)/s`, where the float32
+scale is rounded down from `L/max(abs(x))`. For an all-zero buffer the scale is
+one. The scale and reserved zero offset still occupy two float32 values.
+No new per-value data, group descriptors, exchange, reduction or restriction
+pass is added. Sender-local and receiver contributions use the same wire grid;
+excluded corners remain exact. All ranks must enable the same mode.
+
+This removes spurious corrections at exact zeros and makes the grid symmetric
+under sign reversal. It does **not** guarantee positive `r^T*z` or convergence;
+on asymmetric ranges it can coarsen the grid. It changes neither FCG nor the
+restriction feedback. Encoded byte counts may increase or decrease because
+the symbols change. Single-pass 8/8 success remains unverified until the PDE
+experiment is run; the existing 14/14 results remain the validated choice.
+
+Run in the container after syncing both repositories:
+
+```bash
+(
+set -e
+cd /BDDC/emiModelBddcSdc_new_scratch
+mpicxx -std=c++20 -O2 -I/kaskade7 \
+  tests/test_bddc_transfer_consistency.cpp -o /tmp/test_bddc_transfer_consistency
+/tmp/test_bddc_transfer_consistency
+make -W EMI_model.cpp -o /kaskade7/libs/libkaskade.a \
+  MPI=1 MPICXX=mpicxx \
+  MPI_INCLUDE_FLAGS="-include /usr/lib64/mpi/gcc/openmpi4/include/mpi.h -DMUMPS_MPI_H"
+python3 tests/run_emi_flexible_cg_check.py \
+  --reference-campaign output/emi-mixed-validation-20261101T101620Z-6974 \
+  --cases 10cells strong_h16 \
+  --prolongation-quantizer-check
+)
+```
+
+This reruns uncompressed CG, standard 16/16, flexible 16/16, the original failed
+flexible 8/8 and the new `flex-zero-r8-p8-zeroP` for each case. Only prolongation
+quantization differs between the two 8/8 runs. Physics, ten steps, eight ranks,
+`1e-7`, zero-preserving restriction, post-CG correction and one pass are fixed.
+Standard control histories and bytes must reproduce the reference. Do not reuse
+the old executable's controls after rebuilding. The expected failure of the old
+8/8 run is retained and does not stop the new candidate; it makes the overall
+driver exit nonzero even if the new candidate passes. Read each row separately.
+All outputs go to a new directory. Assess both all-step convergence and total
+logical bytes against flexible 16/16, with final full-precision error against
+the saved direct solution. No precision fallback or relaxed tolerance is used.
+
+Local verification covers the quantizer bound and zero/sign symmetry, option
+forwarding, actual transfer/codec methods with minimal Dune container stubs,
+and mocked driver continuation/parity checks. It is not an MPI/PDE validation.
+
+### Existing steepest descent versus CG at 8/8
+
+To test whether the existing BDDC steepest-descent path converges with 8-bit
+compression, without changing any numerical implementation:
+
+```bash
+python3 tests/run_emi_sd_cg_comparison.py \
+  --reference-campaign output/emi-mixed-validation-20261101T101620Z-6974 \
+  --cases 10cells
+```
+
+This Python-only driver needs no rebuild of the current executable. It inherits
+the saved problem (10cells with refinement 2, ten steps, eight ranks, unchanged
+physical parameters), uses one restriction pass and tolerance `1e-7`, and writes
+fresh commands, logs, metrics and full-precision comparisons. Six runs compare
+uncompressed CG/SD, full-coded CG16/16, and full-coded CG8/8, FCG8/8 and SD8/8.
+All three 8/8 modes use symmetric exact-zero restriction, original prolongation,
+float32 metadata and the same coding options. The unsuccessful experimental
+exact-zero prolongation mode is disabled. Failed 8-bit runs do not stop later
+candidates. Failed uncompressed or 16-bit controls stop that case's experiments.
+
+The current application supports post-solve constant correction and CG
+diagnostics only with CG. Both are therefore disabled for **all** these runs,
+including fresh controls; these results must not be directly substituted for
+the older constant-corrected campaigns. Full-precision raw and centered final
+coefficient errors versus the saved direct solution are both reported, without
+a hidden accuracy threshold. The global true residual must pass at every step.
+The SD implementation uses the restricted residual for its step numerator;
+CG/FCG use the original-residual rho option. This tests the existing solver
+paths and does not claim that only the beta recurrence differs.
+
+The table compares **total logical bytes** against the fresh compressed CG16
+baseline; an increased iteration count is acceptable if the total is smaller.
+The default cap is 300 calls per step. `--iterations N` applies the same cap to
+every run, without changing tolerance or precision. Calls on failed rows refer
+to the failed step; missing failure counts are shown as unavailable, not zero.
+Timings include setup and output and are retained in JSON, not used as a scaling
+benchmark. The driver returns nonzero if any case fails, while keeping all data.
+Use `--cases 10cells strong_h16` to include the second saved problem.
+
+The saved `emi-sd-cg8-20261101T121744Z-9497` comparison passed uncompressed
+CG/SD and full-coded CG16. All 8/8 modes failed in step 1: CG reached 300 calls
+at relative residual 1.11486, FCG broke down at call 7 (0.43457), and SD broke
+down at call 7 (1.06960). SD's step numerator was -4.25612e-5 while curvature
+was positive (0.00613837). Its numerator uses the restricted residual, not an
+independent true-residual dot product. No completed-solve byte saving is claimed.
+
+### Read-only prolongation error isolation
+
+The optional `--bddcProlongationDiagnostics 1` observes each proposed correction
+before the solver accepts/rejects it, for CG, FCG or SD. The raw local/coarse
+correction is already saved by BDDC. The observer reconstructs a separate
+correction using **the actual transfer averaging weights** with unquantized
+prolongation, including the interior Dirichlet/harmonic extension. It does not
+replace the actual correction, call encoding routines, alter published residual
+feedback, change alpha/beta, or advance the solution.
+
+The resulting CSV has:
+
+- `rho_before_p`: true global `(b-A*x)^T*z_shadow`, where only prolongation is exact.
+- `rho_after_p`: the same product with the actual compressed correction.
+- `rho_change_p`: `(b-A*x)^T*(z_actual-z_shadow)`, with a closure-error check.
+- `rho_internal`: the solver's own numerator, which can differ from true rho in SD.
+- Correction error norm/energy, restriction error, actual shared-copy jump and
+  transfer-weight partition defect.
+
+The shadow keeps the **actual quantized restriction and local/coarse-solve
+results**. A negative shadow rho therefore means the problem already exists
+without prolongation quantization at that iterate; it does not isolate an
+implementation bug in restriction or prove how an exact-restriction trajectory
+would evolve. Positive shadow rho and nonpositive actual rho identifies a sign
+change caused by prolongation error at that iterate. Positive values in both
+columns do not establish full convergence.
+
+Replay the saved experiment after syncing and rebuilding both headers/application:
+
+```bash
+(
+set -e
+python3 tests/test_emi_prolongation_diagnostics.py --kaskade-root /kaskade7
+make -W EMI_model.cpp -o /kaskade7/libs/libkaskade.a \
+  MPI=1 MPICXX=mpicxx \
+  MPI_INCLUDE_FLAGS="-include /usr/lib64/mpi/gcc/openmpi4/include/mpi.h -DMUMPS_MPI_H"
+python3 tests/replay_emi_prolongation_diagnostics.py \
+  --campaign output/emi-sd-cg8-20261101T121744Z-9497 \
+  --case 10cells
+)
+```
+
+The replay defaults to uncompressed CG, full CG16, full FCG8 and full SD8, each
+with the observer off/on using the same rebuilt executable. Only the diagnostic
+flag and fresh output directory change. It checks printed step/failure outcomes
+against the saved run and compares all full-precision potential snapshots off/on.
+This is outcome/snapshot parity, not a claim that SD exports every iteration.
+Expected 8-bit solver failures are retained and are not failures of the replay.
+The run stops if parity fails or the diagnostic is invalid. An uncompressed
+relative shadow discrepancy above 1e-8 or weight-partition defect above 1e-10
+invalidates interpretation; these are diagnostic sanity checks, not changed
+solver tolerances. Every original result is preserved.
+
+The observer adds two global sum reductions per observed proposal, local
+Dirichlet solves, root matrix products, I/O, and output-status broadcasts.
+These are diagnostic overhead, excluded from logical compression counters;
+these runs must not be used for performance claims. Local tests exercise the
+production shadow method/report on a known two-subdomain matrix, including a
+positive-to-negative rho example, actual versus projection weights, inactive
+DOFs and unchanged input vectors. A mocked replay verifies failure continuation
+and detection of observer side effects. Full MPI/PDE validation remains required.
+
+
+### Coarse-mean probe at the 8-bit failing correction
+
+The replay `emi-prolongation-replay-20261101T123228Z-9906` preserved observer/source
+parity. At step 1, call 7, FCG8 had true rho 5.86147e-6 with exact prolongation and
+-2.69935e-5 with actual prolongation; SD8 changed from 5.97726e-5 to -4.69861e-5.
+The corresponding relative correction errors were 0.003775 and 0.003878.
+These are observed sign changes, not a proof that a replacement codec converges.
+
+`--bddcProlongationConstraintCall 7` extends the observer at **step 1, call 7 only**.
+It reads the actual scalar coarse constraint matrix rows (ones on disjoint
+supports), verifies matching supports across owners, and rejects unsupported
+weighted/overlapping rows. It does not use overlapping pairwise transfer lists
+as coarse constraints. All numerical flags and float32 scale/minimum metadata
+remain unchanged.
+
+For each coarse group G it measures the interface error e between the actual
+and exact-prolongation shadows, and its mean m_G. It lifts e restricted to G
+through the existing interior Dirichlet solve, then measures r^T H(e_G).
+Thus the group attribution includes interior effects, not only interface terms.
+The sum is checked against the total rho change through an explicit
+`unattributed_rho_error` column: a sizeable remainder requires investigation of
+uncovered interfaces, shared-copy jumps, masking, or numerical cancellation.
+
+The hypothetical corrected vector is z_actual - sum_G H(m_G 1_G). It removes
+only coarse group means; within-group errors remain. A second shadow uses
+float32-rounded means. Neither vector is passed to the solver. Positivity of
+these shadow products is a necessary screening result, not convergence or
+communication savings. The float32 test rounds the **globally known** mean;
+it does not reproduce rounding of independently computed producer contributions.
+
+Files `bddc-prolongation-constraints-{summary,groups,dofs}.csv` give the corrected
+rho, remaining mean defects, individual group contributions, global DOF mapping,
+and scalar-payload estimates. For a group with k owners the estimate is
+k*(k-1)*4 bytes for one float32 contribution per directed owner delivery (8 bytes
+for float64). It counts logical deliveries even within a rank and includes all
+groups, even zero-error/exact corners. It assumes known topology and piggybacking;
+headers, IDs, alignment, codebooks, possible additional messages/reductions and
+any changed iteration count are excluded. This is a hypothetical payload model,
+not measured traffic or an implemented one-pass correction protocol. A successful
+future solver run must still beat matched CG16 total bytes.
+
+After syncing, run inside the container:
+
+```bash
+(
+set -e
+cd /BDDC/emiModelBddcSdc_new_scratch
+python3 tests/test_emi_prolongation_diagnostics.py --kaskade-root /kaskade7
+python3 tests/test_emi_prolongation_replay.py
+make -W EMI_model.cpp -o /kaskade7/libs/libkaskade.a \
+  MPI=1 MPICXX=mpicxx \
+  MPI_INCLUDE_FLAGS="-include /usr/lib64/mpi/gcc/openmpi4/include/mpi.h -DMUMPS_MPI_H"
+python3 tests/replay_emi_prolongation_diagnostics.py \
+  --campaign output/emi-sd-cg8-20261101T121744Z-9497 \
+  --case 10cells --constraint-call 7
+)
+```
+
+The off run disables both observers; the on run enables the prolongation observer
+and this selected-call probe. Saved commands, PDE parameters, tolerance, ten
+steps, iteration limits, 8/8 quantizers and solver updates are unchanged. Expected
+8-bit failures remain expected. Missing target-call data or failed outcome/snapshot
+parity invalidates the diagnostic. Fresh output directories preserve all earlier
+results. The extra probe adds two reductions, root residual evaluation and two
+harmonic solves per incident group plus one exact shadow solve per owned subdomain.
+Do not use these heavily instrumented runs as timing benchmarks.
+
+Local tests compile the production shadow/report with small known matrices;
+they verify actual C-row extraction, complete interior rho attribution, restoration
+of positive rho, float32 rounding, retention of within-group error, unsupported
+constraint rejection and unchanged input state. Mocked replay tests check flag
+isolation, target-call output validation and parity failure handling. A full
+MPI application build and container replay are still required.
+
+### Smaller prolongation groups: frozen-correction screening
+
+The call-7 coarse-mean experiment (`emi-prolongation-replay-20261101T125121Z-10482`)
+left FCG8 rho negative (-1.16919e-5), as well as SD8 (-2.14526e-5), despite
+near-exact removal of group averages. The unexplained rho contributions were
+about 1e-17. Float32 rounding of those mean corrections did not change this
+conclusion. Mean preservation alone is therefore not implemented as a fix.
+
+The optional `--bddcProlongationGroupingCall 7` instead screens quantization of
+the **actual producer weighted buffers**, at step 1 call 7. It evaluates the
+original affine quantizer with one grid per contiguous 8, 16, 32, 64, 128, 256 or
+512 non-excluded values in producer-union order. These are quantization groups,
+not coarse-constraint groups. Exact corners retain their original trailer values.
+Each producer uses the same grid for its own contribution and all destinations;
+quantization is not applied to an already-averaged global correction. Encoding
+uses double parameters and decoding uses float32 scale/minimum, matching the
+current affine quantizer. No exact-zero policy, clipping change, solver change,
+additional restriction pass or higher-precision metadata is introduced.
+
+The observer sums normalized producer contributions, performs the existing
+interior harmonic extension on temporary vectors, and measures true r.z and the
+error relative to the exact-prolongation shadow. All candidates see the same raw
+correction from the original run; none changes the trajectory. Group size 0 at
+the current bit depth must reproduce the actual correction within 1e-8 relative
+(the same diagnostic sanity bound as the original shadow test). This checks the
+producer model before any candidates are interpreted.
+
+`bddc-prolongation-grouping.csv` records:
+
+- 8-bit candidate grids, the original whole-buffer grid, and a whole-buffer
+  16-bit shadow on the **same state and restriction result**.
+- True rho, error norms, producer-group count and logical message count.
+- Hypothetical packet bytes with the actual integer graph transform and current
+  shared Huffman codebook. The table is read, never retrained or changed.
+- Metadata, stream bytes, padding and exact-corner trailers separately.
+- An alternative fixed-bit packed payload model, **not** the current quantization-
+  only path, which still uses transmission-sized symbol slots.
+
+For a grouped packet the proposed metadata model is uint32 run count followed by
+(uint32 number of scalar symbols, float32 scale, float32 minimum) per contiguous
+group run in packet order, padded to the transmission slot. This replaces the
+legacy scale/minimum header and makes group membership self describing even
+when a neighbor receives only part of a producer union. Huffman/tail stream-size
+fields, separate stream byte rounding and final slot padding are counted.
+Messages with encoding disabled by the existing threshold use transmission-sized
+symbols in the model. Missing Huffman symbols invalidate the codec estimate;
+they are never silently treated as a successful compressed payload.
+
+These are **snapshot prolongation models**, not a new wire format implementation.
+They exclude restriction traffic, MPI framing, training/reductions and effects of
+changed iteration counts. The P16 shadow uses the current trajectory's codebook,
+which need not be the one learned by a standalone 16-bit run. Beating this
+same-state P16 model is only preliminary screening; total bytes must eventually
+be compared with a fresh matched 16/16 solve.
+
+After syncing both repositories, rebuild and replay:
+
+```bash
+(
+set -e
+cd /BDDC/emiModelBddcSdc_new_scratch
+mpicxx -std=c++20 -O2 -I/kaskade7 \
+  tests/test_bddc_transfer_consistency.cpp -o /tmp/test_bddc_transfer_consistency
+/tmp/test_bddc_transfer_consistency
+python3 tests/test_emi_prolongation_diagnostics.py --kaskade-root /kaskade7
+make -W EMI_model.cpp -o /kaskade7/libs/libkaskade.a \
+  MPI=1 MPICXX=mpicxx \
+  MPI_INCLUDE_FLAGS="-include /usr/lib64/mpi/gcc/openmpi4/include/mpi.h -DMUMPS_MPI_H"
+python3 tests/replay_emi_prolongation_diagnostics.py \
+  --campaign output/emi-sd-cg8-20261101T121744Z-9497 \
+  --case 10cells --grouping-call 7
+)
+```
+
+Grouping replay defaults to CG16, FCG8 and SD8, each with diagnostics off/on.
+All ten original steps, physics, tolerances and solver modes are retained. The
+8-bit failures remain expected. The final intersection lists group sizes with
+positive shadow rho and fewer modeled P bytes for **both** failing configurations;
+an empty list means this screen found no shared candidate. Neither result proves
+convergence. Old outputs remain untouched and observer/source outcome and
+potential-snapshot parity are required. These heavily instrumented runs include
+extra reductions and solves and must not be used as timing benchmarks.
+
+Local validation compiles the production transfer routines against minimal Dune
+stubs, compares whole-buffer reconstructions and packet byte counts, checks exact
+corners/float32 singleton grids and overlapping three-owner interfaces, and
+verifies unchanged transfer state/counters. The report harness checks normalized
+producer assembly and harmonic extension on known matrices. Replay tests check
+flag isolation, target rows, numerical parity and byte/convergence screening.
+A full application build and MPI replay must still be performed in the container.
+
+## Experimental one-step FGMRES comparison
+
+`tests/run_emi_fgmres_check.py` tests whether right-preconditioned FGMRES(30)
+can use the existing 8/8 codec when prolongation makes `r.z` negative. This
+is a new optional outer solver, not a correction to the existing CG/FCG
+recurrences. It does not guarantee 8-bit convergence or communication savings.
+The solver stores each preconditioned Arnoldi vector, uses two-pass modified
+Gram-Schmidt and Givens rotations, and accepts convergence only after explicitly
+computing `||b-A*x||/||b|| <= 1e-7`. A small Hessenberg residual alone is insufficient.
+The formulation follows flexible right GMRES (Saad, 1993); see also the
+[PETSc FGMRES documentation](https://petsc.org/release/manualpages/KSP/KSPFGMRES/).
+
+For this validation implementation, Arnoldi, the global matrix-vector products
+and basis storage reside on rank zero. Each preconditioner application broadcasts
+one normalized Arnoldi vector, applies distributed BDDC, and reduces weighted
+local corrections to root. BDDC starts from zero on that RHS, including fresh
+restriction feedback, while retaining factors, weights, codebooks and traffic
+counters. Its output includes both the initial interior solve and the prolonged
+correction. There is one restriction exchange per application and no CG update
+or rho sign test. Thus this changes the outer algorithm and the lifetime of
+feedback relative to the CG control; it is not merely a different beta formula.
+
+The runner uses fresh direct, CG16, uncompressed FGMRES, FGMRES16 and FGMRES8
+controls/candidate, in that order. All use the saved 10cells mesh and physics,
+eight ranks for iterative solves, **one time step**, and tolerance `1e-7`.
+FGMRES8 uses exact-zero restriction and original ungrouped affine prolongation.
+Scale/minimum stay float32. No precision fallback, extra restriction pass,
+constant correction or tolerance relaxation is applied. The CG16 first-step
+residual summary must reproduce the saved source. A failed control stops the
+experiment before the candidate. New output directories preserve earlier runs.
+
+The report separates interface logical bytes from an outer-solver payload ledger.
+The latter counts broadcasts/reductions as `(ranks-1)*payload` and allreduces
+as `2*(ranks-1)*payload`, including command/status traffic. CG's existing global
+solution assembly and true-residual broadcasts are counted on the same basis.
+The sum is called **accounted logical bytes**, not total hardware network traffic:
+coarse-grid traffic, codebook training, internal BDDC control reductions, MPI
+framing and setup traffic remain excluded. Both interface-only and accounted
+savings against fresh CG16 and FGMRES16 are saved. Positive interface-only savings
+are insufficient if the added global-vector communication costs more.
+
+Per-iteration true/estimated residuals are written to `bddc-fgmres-step1.csv`.
+JSON retains full-precision raw/centered/max solution errors versus direct,
+application/cycle/matvec counts, peak V/Z basis bytes on root, and validation
+timings. Basis bytes exclude other work vectors and are not peak process RSS.
+The explicit residual check adds a second global matvec per candidate. Root
+orthogonalization and memory costs make this a validation experiment, not a
+scalable production solver or timing benchmark. PASS means convergence and
+finite comparisons; it does not impose an undisclosed solution-error threshold.
+
+After syncing **both** repositories, run inside the container:
+
+```bash
+(
+set -e
+cd /BDDC/emiModelBddcSdc_new_scratch
+python3 tests/test_bddc_preconditioner_apply.py --kaskade-root /kaskade7
+mpicxx -std=c++20 -O2 -I. tests/test_emi_fgmres.cpp -o /tmp/test_emi_fgmres
+/tmp/test_emi_fgmres
+mpicxx -std=c++20 -O2 -DKASKADE_HAVE_MPI -I. \
+  tests/test_emi_fgmres_mpi.cpp -o /tmp/test_emi_fgmres_mpi
+mpirun --allow-run-as-root -np 2 /tmp/test_emi_fgmres_mpi
+make -W EMI_model.cpp -o /kaskade7/libs/libkaskade.a \
+  MPI=1 MPICXX=mpicxx \
+  MPI_INCLUDE_FLAGS="-include /usr/lib64/mpi/gcc/openmpi4/include/mpi.h -DMUMPS_MPI_H"
+python3 tests/run_emi_fgmres_check.py \
+  --reference-campaign output/emi-sd-cg8-20261101T121744Z-9497
+)
+```
+
+Local checks cover varying/negative preconditioners, restarting, true-residual
+acceptance, breakdown and nonfinite handling; a production-method harness checks
+the initial interior contribution and absence of CG updates. Driver tests check
+fresh controls, immutable results and communication accounting. The MPI adapter
+test exercises collective success and a nonfinite result on one rank. These
+small tests do not replace the container build and EMI experiment above.
+
+## Frozen first-input BDDC probe
+
+`tests/run_emi_frozen_preconditioner_probe.py` compares uncompressed, R16/P16,
+R8/P16, R16/P8 and R8/P8 on the **same first normalized RHS**. This is the first
+Arnoldi input used by FGMRES. Each configuration starts in a separate MPI job,
+uses one BDDC application with one restriction pass, writes the full-precision
+`rhs`, `v`, assembled correction `z` and global matrix image `Az`, then exits
+without advancing the physical state. It does not perform a convergence run or
+print the usual completed-simulation marker. Normal solver behavior is unchanged
+when `--bddcPreconditionerProbe` is zero (the default).
+
+The driver reuses the saved CG16 command to retain mesh, physics, initial state,
+eight ranks and tolerance 1e-7. Eight-bit restriction uses the existing exact-zero
+quantizer; 16-bit restriction and all prolongations use the original quantizers.
+No grouping, extra pass, precision fallback or constant correction is added.
+Scale/minimum remain float32. Every job has independent fresh transfer feedback
+and codebook state, so this is not a replay of later warmed-codebook applications.
+The shared production BDDC application includes the initial interior solution.
+
+`MEASURED` means one finite application and consistent input were verified, not
+solver convergence. The driver rejects differing DOF counts, RHS values or input
+vectors. Errors are `||z-z_ref||/||z_ref||` and
+`||Az-Az_ref||/||Az_ref||`, with **uncompressed BDDC** as the reference; that
+reference is not assumed to be the exact inverse. The angle between `v` and `Az`
+and `sqrt(1-cosine^2)` describe the best residual obtainable using this one
+direction. They are not a prediction of the full restarted solve. JSON also
+records `v.z` and non-additivity of the two directional changes relative to
+R16/P16. A large matrix-image error despite a small correction error motivates
+investigating which components the quantizer damages; it does not establish a
+specific cause or a successful fix by itself.
+
+Run after syncing the updated EMI files (the existing library
+`applyPreconditioner` API is reused):
+
+```bash
+(
+set -e
+cd /BDDC/emiModelBddcSdc_new_scratch
+mpicxx -std=c++20 -O2 -DKASKADE_HAVE_MPI -I. \
+  tests/test_emi_frozen_probe.cpp -o /tmp/test_emi_frozen_probe
+mpirun --allow-run-as-root -np 2 /tmp/test_emi_frozen_probe /tmp/emi-frozen-probe-test.csv
+make -W EMI_model.cpp -o /kaskade7/libs/libkaskade.a \
+  MPI=1 MPICXX=mpicxx \
+  MPI_INCLUDE_FLAGS="-include /usr/lib64/mpi/gcc/openmpi4/include/mpi.h -DMUMPS_MPI_H"
+python3 tests/run_emi_frozen_preconditioner_probe.py \
+  --reference-campaign output/emi-fgmres-20261101T133918Z-12380
+)
+```
+
+New timestamped directories preserve all earlier campaigns. These five
+applications are diagnostic work, not production communication or timing
+measurements. The C++ adapter test checks normalization, assembly, `Az`, a
+nonfinite worker result and a root-only output failure (the latter prints an
+expected error before PASS). The Python tests check fixed-input comparisons,
+directional settings, rejection of invalid data, and preservation of prior runs.
+
+### Constant-split prolongation: controlled experiments
+
+`--bddcProlongateConstantSplit 1` is an optional numerical representation, off by
+default and permitted by EMI in frozen-probe mode or explicitly one-step FGMRES. For each
+producer, it takes the arithmetic mean of the **unweighted, non-exact** interface
+correction, rounds that mean to float32 as `c`, and quantizes `w*(u-c)` instead
+of `w*u`. Receivers reconstruct `decoded + w*c` before accumulating the producer
+contribution. The encoder subtracts the same rounded constant, so rounding `c`
+does not silently discard its rounding remainder. This is neither a change to
+the CG/FGMRES recurrence nor a post-solve mean correction. It changes the
+quantization error and may change convergence; no improvement is guaranteed.
+
+Each producer's averaging weights are cached from the existing setup exchange.
+No new solver exchange or per-DOF weight payload is introduced. The cache adds
+memory proportional to neighbor interface sizes. Computing the mean and restoring
+the constant add linear work in the interface size. Each prolongation packet
+adds an **8-byte prefix: uint32 `CSP1` format tag and float32 constant**. The
+existing scale and minimum remain float32; exact corner trailers remain original
+weighted values. The extra header is included in sent/received byte counters.
+All participants must enable the same mode before weight exchange. This first
+implementation requires scalar double transmission slots, active interfaces,
+ungrouped affine prolongation, no zero-preserving prolongation and no legacy
+ASCII dumps. Integer lifting, bit-length coding and Huffman still operate on
+the quantized fluctuation codes. Grouped shadow diagnostics reject this mode.
+
+The `--constant-split` probe runs fresh copies of the five existing configurations
+and then one `r8-p8-split` candidate. The five controls must reproduce the saved
+probe's RHS, normalized input, correction and matrix image exactly. The candidate
+still uses R8 exact-zero restriction, P8 affine quantization, one restriction
+pass and unchanged physical parameters. No physical time step is advanced.
+The report measures actual interface packet bytes for this single application,
+including the new header, metadata, padding, exact trailers and intra-rank
+deliveries. It excludes coarse traffic, setup/codebooks, diagnostic reductions
+and MPI framing. Single-application savings are not total-solve savings.
+
+Sync both repositories and run in the container:
+
+```bash
+(
+set -e
+cd /BDDC/emiModelBddcSdc_new_scratch
+mpicxx -std=c++20 -O2 -I/kaskade7 \
+  tests/test_bddc_constant_split.cpp -o /tmp/test_bddc_constant_split
+/tmp/test_bddc_constant_split
+mpicxx -std=c++20 -O2 -I/kaskade7 \
+  tests/test_bddc_transfer_consistency.cpp -o /tmp/test_bddc_transfer_consistency
+/tmp/test_bddc_transfer_consistency
+make -W EMI_model.cpp -o /kaskade7/libs/libkaskade.a \
+  MPI=1 MPICXX=mpicxx \
+  MPI_INCLUDE_FLAGS="-include /usr/lib64/mpi/gcc/openmpi4/include/mpi.h -DMUMPS_MPI_H"
+python3 tests/run_emi_frozen_preconditioner_probe.py \
+  --reference-campaign output/emi-fgmres-20261101T133918Z-12380 \
+  --reference-probe output/emi-frozen-probe-20261101T134855Z-12782 \
+  --constant-split
+)
+```
+
+The new transfer test uses large non-float32-exact offsets, nonuniform weights,
+three-owner interfaces, different local numbering, plain/full codec equivalence,
+mixed/all/no exact trailers, malformed headers, missing setup weights and actual
+packet-size accounting. Existing transfer tests cover the default modes. Local
+transfer checks use minimal Dune stubs; they do not replace the container build
+and MPI application probe. No long convergence run is launched automatically.
+
+### One-step FGMRES8/8 with constant-split prolongation
+
+After a successful frozen probe, `tests/run_emi_fgmres_check.py --constant-split`
+runs fresh direct, CG16, uncompressed FGMRES and FGMRES16 controls followed by
+`full-fgmres8-split`. It replaces the original failed FGMRES8 candidate in this
+campaign; it does not rerun that 300-application test. The original runner mode
+remains available without the flag. Both probe and split options are explicitly
+disabled in every control. The split candidate is an actual time-step solve,
+not a frozen probe.
+
+The source must be a saved one-step FGMRES campaign with full-precision potential
+snapshots. Each fresh control must reproduce its saved initial/final vectors and
+residual summary; FGMRES controls must also reproduce their residual CSVs. A
+changed or failing control stops the campaign before the candidate. The model
+allows split prolongation only with FGMRES and either a frozen probe or an
+explicit `maximumNumberOfTimeSteps` between 1 and 10. The runner defaults to
+one step; `--steps 10 --constant-split` selects the longer validation below.
+The runner retains restart 30, cap 300, tolerance `1e-7`, one restriction pass,
+eight ranks, the same mesh/physics, and no post-solve constant correction.
+
+The split codec and float32 metadata are unchanged from the frozen probe. Its
+eight-byte headers are already included in interface byte counters; they must
+not be added again. The report gives interface-only and accounted
+(interface plus outer collective payload model) savings against both CG16 and
+FGMRES16. The outer model has the same exclusions documented above, so it is
+not total hardware network traffic. Raw and centered relative L2 errors, raw
+maximum error and mean error against fresh direct are displayed. No mean is
+removed from the actual solution. PASS checks convergence and finite errors;
+there is no implicit physical-accuracy acceptance threshold. Failed runs retain
+their residual CSV and print the best/last true residual without claiming byte
+savings. Timings and root basis memory remain diagnostic measurements in JSON.
+
+After syncing the updated EMI files, rebuild and run:
+
+```bash
+(
+set -e
+cd /BDDC/emiModelBddcSdc_new_scratch
+make -W EMI_model.cpp -o /kaskade7/libs/libkaskade.a \
+  MPI=1 MPICXX=mpicxx \
+  MPI_INCLUDE_FLAGS="-include /usr/lib64/mpi/gcc/openmpi4/include/mpi.h -DMUMPS_MPI_H"
+python3 tests/run_emi_fgmres_check.py \
+  --reference-campaign output/emi-fgmres-20261101T133918Z-12380 \
+  --constant-split
+)
+```
+
+Runner tests cover unchanged physical inputs, registered command-line options,
+split selection, fresh-control parity failures, partial failed residual traces,
+missing codec markers, and cases where interface savings are outweighed by
+outer communication. They do not replace the container solve above.
+
+### Ten-step validation of the successful constant-split FGMRES8/8 case
+
+Use the successful one-step split campaign as the reference. The ten-step runner
+requires completed saved direct, CG16, uncompressed FGMRES, FGMRES16 and split8
+runs. It reruns all five configurations with the same first-step inputs,
+`dt`, physics, FGMRES(30), 300-application cap per step, one restriction pass,
+and tolerance `1e-7`. Only final time and maximum step count increase. No codec,
+solver recurrence, float32 metadata, or post-solve correction changes are made.
+Codebooks/factors retain the application's existing lifetime; each BDDC
+preconditioner application still starts with fresh RHS feedback.
+
+Every new run must reproduce the saved first-step potential and residual;
+FGMRES residual traces must also match exactly, including for split8. A control
+failure stops the campaign before the candidate. Every one of the ten steps must
+meet the true tolerance, and all ten accepted potential snapshots must exist.
+`per-step-errors.csv` reports raw and centered relative L2, maximum absolute and
+mean errors against the fresh direct solution at the same time, together with
+iterations and true residual. Centering is diagnostic only. Each trajectory
+advances its own state; it is not reset to direct between steps.
+
+The final report compares cumulative interface and accounted bytes against
+both fresh 16/16 controls. The outer ledger sums applications and overhead for
+**each** step, rather than treating ten steps as one large solve. It includes
+all constant-split headers in interface bytes exactly once. Failed runs never
+receive a communication-saving claim. Solver-wrapper and application times are
+retained as validation timings, not performance measurements. Previous campaigns
+are preserved in place; the runner creates a new output directory.
+
+After syncing the updated EMI files, run inside the container:
+
+```bash
+(
+set -e
+cd /BDDC/emiModelBddcSdc_new_scratch
+make -W EMI_model.cpp -o /kaskade7/libs/libkaskade.a \
+  MPI=1 MPICXX=mpicxx \
+  MPI_INCLUDE_FLAGS="-include /usr/lib64/mpi/gcc/openmpi4/include/mpi.h -DMUMPS_MPI_H"
+python3 tests/run_emi_fgmres_check.py \
+  --reference-campaign output/emi-fgmres-20261101T145024Z-13570 \
+  --constant-split --steps 10
+)
+```
+
+This stage tests only 10cells. Weak/strong cases are not launched automatically.
+The first-step result established convergence and lower interface bytes, but
+not lower accounted total communication; the ten-step campaign must report both.
+
+### Checkpoint: ten-step 10cells split8 result (2026-11-01)
+
+Container campaign `output/emi-fgmres-20261101T145954Z-13879` passed all
+ten steps at true relative tolerance `1e-7`, with one restriction pass and
+unchanged float32 constant/scale/minimum metadata. First-step parity against
+`emi-fgmres-20261101T145024Z-13570` passed for all five fresh runs.
+
+| Mode | Applications (10 steps) | Interface bytes | Accounted bytes | Final raw relative L2 | Final centered relative L2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| CG16/16 | 210 | 24,696,992 | 932,952,032 | 1.878023e-7 | 1.539172e-9 |
+| Uncompressed FGMRES | 209 | 90,782,912 | 974,266,268 | 1.977538e-9 | 1.973368e-9 |
+| FGMRES16/16 | 210 | 24,688,048 | 912,299,808 | 3.135092e-8 | 1.988078e-9 |
+| FGMRES8/8 split | 227 | 13,686,424 | 971,481,052 | 2.335418e-5 | 1.393521e-9 |
+
+Split8 applications per step were `[22,22,23,23,23,23,23,23,23,22]`;
+all true residuals were at most `9.092860e-8`. Compared with FGMRES16,
+interface bytes fell 44.56%, while accounted bytes rose 6.49%. The overall
+communication objective is **not met**. Accounted bytes use the exclusions
+above and are not total measured network traffic. The candidate's final
+mean error was `1.956782e-6`, maximum absolute error `1.957663e-6`;
+centering is only a diagnostic and does not change the accepted solution.
+Solver-wrapper times were 45.217 s (CG16), 42.254 s (uncompressed FGMRES),
+46.060 s (FGMRES16), and 47.955 s (split8). These single validation runs
+include diagnostic/output costs and establish no timing speedup. Raw output
+files remain outside source control; retain the named campaign separately.
