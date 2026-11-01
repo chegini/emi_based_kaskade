@@ -21,6 +21,11 @@ class FlexibleCheck(unittest.TestCase):
         self.assertEqual(differences,{'--bddcRestrictCompressionBits','--bddcProlongateCompressionBits','--dir'})
         self.assertEqual(new[new.index('--bddcRestrictionPasses')+1],'1')
         self.assertEqual(new[new.index('--bddcRelativeTolerance')+1],'1e-7')
+        eight=make_command(seed,'flex-zero-r8-p8',Path('/eight'))
+        self.assertEqual(eight[eight.index('--bddcRestrictCompressionBits')+1],'8')
+        self.assertEqual(eight[eight.index('--bddcProlongateCompressionBits')+1],'8')
+        self.assertEqual(eight[eight.index('--bddcRestrictionPasses')+1],'1')
+        with self.assertRaises(ValueError):make_command(seed,'flex-zero-r8-p12',Path('/bad'))
         with self.assertRaises(ValueError):make_command(new,'flex-zero-r12-p12',Path('/again'))
 
     def test_controls_parity_and_failure_continuation(self):
@@ -79,6 +84,28 @@ for name in ['emiBDDCLast.vtu','emiBDDCLastCompression.vtu']:(out/name).touch()
             self.assertEqual(rows['flex-zero-r12-p12']['saved_vs_standard16_percent'],0)
             self.assertIsNone(rows['flex-zero-r12-p12']['saved_vs_flexible16_percent'])
             self.assertEqual((ref/'summary.json').read_bytes(),old)
+            # A passing archive can supply controls to an 8/8 run without repeating them.
+            fake.write_text(fake.read_text().replace("if flex and bits=='16':",'if False:'))
+            result=subprocess.run(args[:-1]+[str(repo/'passing')],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            before=(repo/'calls').read_text()
+            reuse_args=args[:-1]+[str(repo/'eight'),'--bits','8',
+                                 '--reuse-controls-from',str(repo/'passing')]
+            result=subprocess.run(reuse_args,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertEqual((repo/'calls').read_text(),before+'flex-zero-r8-p8\n')
+            eight=json.loads((repo/'eight/summary.json').read_text())['10cells']
+            self.assertIn('reused_from',eight['flex-r16-p16'])
+            self.assertEqual(eight['flex-zero-r8-p8']['status'],'PASS')
+            # Changed executable must reject reuse before creating output or launching MPI.
+            model.write_text('changed binary')
+            rejected=repo/'rejected'
+            reject_args=[str(rejected) if x==str(repo/'eight') else x for x in reuse_args]
+            result=subprocess.run(reject_args,capture_output=True,text=True)
+            self.assertNotEqual(result.returncode,0)
+            self.assertFalse(rejected.exists())
+            self.assertEqual((repo/'calls').read_text(),before+'flex-zero-r8-p8\n')
+            model.write_text('new executable')
             # A standard-CG regression must stop experimental runs, not pass silently.
             (ref/'10cells/full-r16-p16/bddc-convergence-step1.csv').write_text('different history\n')
             result=subprocess.run(args[:-1]+[str(repo/'changed')],capture_output=True,text=True)

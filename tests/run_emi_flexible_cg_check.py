@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate rebuilt standard-CG controls, then test one-pass flexible CG at 16/16 and 12/12."""
+"""Compare one-pass flexible CG at equal low bit depths against validated 16/16 controls."""
 import argparse
 from datetime import datetime,timezone
 import json
@@ -19,13 +19,21 @@ MARKER='BDDC flexible CG: one-term Polak-Ribiere; original residual; existing tw
 MODES=['uncompressed-cg','full-r16-p16','flex-r16-p16','flex-zero-r12-p12']
 
 
+def modes_for(bits):
+    if not 2<=bits<=15:raise ValueError('Candidate bits must be in 2..15')
+    return MODES[:3]+[f'flex-zero-r{bits}-p{bits}']
+
+
 def make_command(saved,mode,out):
-    """The 12/12 candidate differs from the old 14/16 seed only in bits, solver and output."""
+    """Candidate differs from the saved seed only in bits, solver and output."""
     cmd=list(saved)
     if '--bddcFlexibleCg' in cmd: raise ValueError('Reference must predate the flexible-CG experiment')
-    if mode=='flex-zero-r12-p12':
-        cmd=candidate_command(cmd,12,out,12)
+    match=re.fullmatch(r'flex-zero-r(\d+)-p\1',mode)
+    if match:
+        bits=int(match[1]);modes_for(bits)
+        cmd=candidate_command(cmd,bits,out,bits)
     else:
+        if mode not in MODES[:3]:raise ValueError('Unknown mode '+mode)
         value(cmd,'--dir');cmd[cmd.index('--dir')+1]=str(out)
     if mode.startswith('flex-'):
         if value(cmd,'--bddcCgOriginalResidual')!='1': raise ValueError('Flexible CG needs original rho')
@@ -52,9 +60,11 @@ def save(root,records):
                          f"{str(count) if count is not None else '--':>14s} {fmt(savings[0]):>15s} "
                          f"{fmt(savings[1]):>15s} {f'{err:.4e}' if err is not None else '--':>18s}")
             for error in r['errors']: lines.append('  '+error)
+            if r.get('reused_from'):lines.append('  Reused validated control: '+r['reused_from'])
     lines+=['','PASS requires all steps to meet 1e-7 and finite final comparisons; no hidden accuracy threshold.',
             'Standard controls must reproduce saved convergence CSVs; the rebuilt binary is used for all new runs.',
             'Direct solutions are reused from the saved campaign. Raw/centered final errors remain in JSON.',
+            'Controls marked reused_from were not rerun or retimed; their executable and commands were checked.',
             'Flexible CG uses one prior direction (Polak-Ribiere), not full-history orthogonalization.',
             'No precision fallback, extra restriction pass or tolerance relaxation. Float32 metadata is unchanged.',
             'Logical byte totals include post-CG correction deliveries and intra-rank transfers.',
@@ -69,8 +79,13 @@ def main():
     p.add_argument('--repo',type=Path,default=Path(__file__).resolve().parents[1])
     p.add_argument('--reference-campaign',type=Path,required=True)
     p.add_argument('--cases',nargs='+',default=['10cells','strong_h16'])
+    p.add_argument('--bits',type=int,default=12,choices=range(2,16),
+                   help='Candidate precision in BOTH directions; default 12')
+    p.add_argument('--reuse-controls-from',type=Path,
+                   help='Reuse passing standard and flexible 16/16 controls from the same executable')
     p.add_argument('--output',type=Path)
     args=p.parse_args()
+    modes=modes_for(args.bits)
     repo=args.repo.resolve();ref=args.reference_campaign.resolve();model=repo/'emiModel'
     oldenv=json.loads((ref/'environment.json').read_text())
     old=json.loads((ref/'summary.json').read_text())
@@ -82,8 +97,8 @@ def main():
         if case not in old:p.error('Missing reference case '+case)
         for mode in ['direct','uncompressed-cg','full-r16-p16',seed_mode]:
             if old[case]['runs'][mode]['status']!='PASS':p.error('Reference solver failed: '+case+'/'+mode)
-        for mode in MODES:
-            source='full-r16-p16' if mode=='flex-r16-p16' else seed_mode if mode==MODES[-1] else mode
+        for mode in modes:
+            source='full-r16-p16' if mode=='flex-r16-p16' else seed_mode if mode==modes[-1] else mode
             saved=shlex.split((ref/case/source/'command.sh').read_text())
             cmd=make_command(saved,mode,Path('validation-only'))
             if str(model) not in cmd:p.error('Reference command uses another executable path')
@@ -97,21 +112,45 @@ def main():
             commands[case,mode]=saved
         if not (ref/case/'direct/emiLast.vtu').is_file():p.error('Missing direct solution')
         read(ref/case/'direct'/f'potential-state-step{steps}.csv')
+    reused={}
+    if args.reuse_controls_from:
+        reuse=args.reuse_controls_from.resolve()
+        renv=json.loads((reuse/'environment.json').read_text())
+        prior=json.loads((reuse/'summary.json').read_text())
+        if renv['executable_sha256']!=sha:
+            p.error('Executable differs from saved flexible-CG controls; omit reuse and rerun controls')
+        if renv['reference_environment']!=oldenv or Path(renv['reference_campaign']).resolve()!=ref:
+            p.error('Reused controls have different reference settings')
+        for case in args.cases:
+            reused[case]={}
+            for mode in modes[:3]:
+                row=prior.get(case,{}).get(mode,{})
+                if row.get('status')!='PASS':p.error('Missing passing reusable control: '+case+'/'+mode)
+                if mode in modes[:2] and not row.get('saved_convergence_parity'):
+                    p.error('Reusable standard control has no saved history parity')
+                previous_cmd=shlex.split((reuse/case/mode/'command.sh').read_text())
+                expected=make_command(commands[case,mode],mode,Path('validation-only'))
+                value(previous_cmd,'--dir');previous_cmd[previous_cmd.index('--dir')+1]='validation-only'
+                if previous_cmd!=expected:p.error('Reusable control command differs: '+case+'/'+mode)
+                if logical_bytes(row)<=0:p.error('Invalid reusable control byte count')
+                reused[case][mode]=dict(row,reused_from=str(reuse/case/mode))
     stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     root=(args.output or repo/'output'/f'emi-flexible-cg-{stamp}-{os.getpid()}').resolve()
     root.mkdir(parents=True,exist_ok=False)
     (root/'environment.json').write_text(json.dumps(dict(executable_sha256=sha,
         reference_campaign=str(ref),reference_environment=oldenv,preserved_reference_summary=old,
         cases=args.cases,steps=steps,ranks=ranks,tolerance=1e-7,restriction_passes=1,
-        solver='one-term truncated flexible CG, Polak-Ribiere; standard-CG controls rerun'),indent=2)+'\n')
+        candidate_bits=args.bits,reuse_controls_from=str(args.reuse_controls_from.resolve()) if args.reuse_controls_from else None,
+        solver='one-term truncated flexible CG, Polak-Ribiere'),indent=2)+'\n')
     env=dict(os.environ,OPENBLAS_NUM_THREADS='1',OMP_NUM_THREADS='1')
     env.pop('KASKADE_RESTRICTION_CAPTURE',None)
     records={}
     print('Flexible-CG validation output:',root,flush=True)
     for case in args.cases:
-        records[case]={}
+        records[case]=reused.get(case,{})
         direct=read(ref/case/'direct'/f'potential-state-step{steps}.csv')['u']
-        for mode in MODES:
+        for mode in modes:
+            if mode in records[case]:continue
             if digest(model)!=sha:raise RuntimeError('Executable changed during validation')
             folder=root/case/mode;folder.mkdir(parents=True)
             cmd=make_command(commands[case,mode],mode,folder)
@@ -129,7 +168,7 @@ def main():
                 corrections,extra,errors=correction_metrics(text,steps,ranks)
                 r['constant_corrections']=corrections;r['errors']+=errors
                 m['constant_correction_payload_bytes']=extra if not errors else 0
-            if mode in MODES[:2]:
+            if mode in modes[:2]:
                 r['saved_convergence_parity']=history_parity(ref/case/mode,folder)
                 if not r['saved_convergence_parity']:r['errors'].append('Standard-CG convergence history changed')
                 if not r['errors'] and logical_bytes(r)!=logical_bytes(old[case]['runs'][mode]):
@@ -145,12 +184,12 @@ def main():
             save(root,records)
             (folder/'metrics.json').write_text(json.dumps(r,indent=2,allow_nan=False)+'\n')
             print('  '+r['status'],flush=True)
-            if r['status']=='FAIL' and mode in MODES[:2]:
+            if r['status']=='FAIL' and mode in modes[:2]:
                 print('  Standard control failed validation; skipping experiments for this case.',flush=True)
                 break
     if digest(model)!=sha:raise RuntimeError('Executable changed during validation')
     print('\n'+(root/'summary.txt').read_text())
     print('Results:',root)
-    return int(any(len(r)!=len(MODES) or any(v['status']!='PASS' for v in r.values()) for r in records.values()))
+    return int(any(len(r)!=len(modes) or any(v['status']!='PASS' for v in r.values()) for r in records.values()))
 
 if __name__=='__main__':raise SystemExit(main())

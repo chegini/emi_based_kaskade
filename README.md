@@ -2081,3 +2081,47 @@ the communication objective: total bytes exceed standard 16/16 by 16.93% and
 47.28%. The additional iterations outweigh the reduced payload per iteration.
 These are validation results, not runtime or scaling claims. Keep the campaign
 directories as research data; they are not part of the source-code commit.
+
+To test flexible CG with **8-bit restriction and 8-bit prolongation**, reuse
+the successful controls above with the same executable (no rebuild required):
+
+```bash
+python3 tests/run_emi_flexible_cg_check.py \
+  --reference-campaign output/emi-mixed-validation-20261101T101620Z-6974 \
+  --reuse-controls-from output/emi-flexible-cg-20261101T105600Z-7824 \
+  --cases 10cells strong_h16 --bits 8
+```
+
+This launches only two new candidate runs. `--bits` sets both directional
+precisions, defaults to 12, and does not change the solver, quantizer policies,
+float32 metadata, one-pass schedule, saved timestep count or tolerance. Output
+goes to a fresh directory. Reuse requires matching executable hash, reference
+settings, passing controls and matching commands; reused rows are identified
+explicitly. Their timings are historical, not new measurements. If the binary
+has changed, omit `--reuse-controls-from` to validate the controls again.
+An 8/8 failure is preserved without a higher-precision retry.
+
+Further saved container checks, using the same controls and executable:
+
+| Flexible CG bits | 10cells: first-step / total iterations | strong_h16: first-step / total iterations | Bytes saved vs flexible 16/16 (10cells / strong_h16) |
+| --- | ---: | ---: | ---: |
+| 16/16 | 21 / 210 | 40 / 396 | baseline |
+| 14/14 | 26 / 225 | 42 / 421 | 7.21% / 4.59% |
+| 13/13 | 36 / 283 | 68 / 562 | -9.05% / -21.75% |
+| 12/12 | 36 / 329 | 83 / 717 | -16.91% / -47.28% |
+| 8/8 | failed; summary count unavailable | breakdown at call 14 of step 1 | unavailable |
+
+The additional campaigns are `emi-flexible-cg-20261101T111850Z-8325` (8/8),
+`emi-flexible-cg-20261101T112121Z-8438` (14/14) and
+`emi-flexible-cg-20261101T112507Z-8553` (13/13). Passing totals cover ten steps,
+each meeting the true relative tolerance `1e-7`, with one restriction pass.
+The first-step increase shows that the extra iteration cost at 12--13 bits
+is already present before later timesteps. A missing parsed failure count is
+not evidence of zero solver calls.
+
+Final full-precision relative errors against direct for 14/14 are 8.2188e-10
+and 2.1038e-9; for 13/13 they are 7.6280e-10 and 1.5068e-9, respectively.
+Among the tested equal-bit candidates, 14/14 is the best for total logical
+communication on these two problems. This does not establish runtime speedup,
+global optimality or robustness on other meshes. Failed cases remain part of
+the record.
