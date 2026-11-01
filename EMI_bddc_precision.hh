@@ -1,6 +1,8 @@
 #ifndef EMI_BDDC_PRECISION_HH
 #define EMI_BDDC_PRECISION_HH
 
+#include <stdexcept>
+
 namespace EmiBddc
 {
   // EMI uses uint32_t quantized symbols. -1 inherits the common bit setting;
@@ -22,6 +24,20 @@ namespace EmiBddc
     if constexpr (requires { transfer.setQuantizationBits(options.bddcCompressionBits); })
     {
       transfer.setQuantizationBits(options.bddcCompressionBits);
+      if constexpr (requires { options.bddcRestrictGroupSize; })
+      {
+        if constexpr (requires { transfer.setRestrictGroupSize(0); })
+          transfer.setRestrictGroupSize(options.bddcRestrictGroupSize);
+        else if (options.bddcRestrictGroupSize)
+          throw std::runtime_error("Kaskade headers lack grouped restriction quantization");
+      }
+      if constexpr (requires { options.bddcRestrictZeroPreserving; })
+      {
+        if constexpr (requires { transfer.setRestrictZeroPreserving(false); })
+          transfer.setRestrictZeroPreserving(options.bddcRestrictZeroPreserving!=0);
+        else if (options.bddcRestrictZeroPreserving)
+          throw std::runtime_error("Kaskade headers lack the zero-preserving restriction experiment");
+      }
       if constexpr (requires {
                       options.bddcRestrictCompressionBits;
                       transfer.setRestrictQuantizationBits(1);

@@ -1341,3 +1341,743 @@ small mesh; larger meshes, multiple timesteps and speedup remain unverified for
 this variant. The original one-pass 8-bit failure is retained separately.
 Detailed provenance is in `docs/emi_8bit_refinement_validation_20261031.txt` and
 its companion JSON.
+
+## Optional EMI CG communication diagnostics
+
+Use `--bddcCgDiagnostics 1` (default 0), or pass `--cg-diagnostics` to
+`tests/run_emi_quantization_diagnostic.py`. This is available for non-SDC BDDC CG
+with the original true-residual stopping rule. It does not change quantization,
+restriction passes, alpha/beta, the preconditioner, or the convergence tolerance.
+Rebuild EMI against the matching Kaskade headers before enabling the option.
+
+Each timestep writes `bddc-cg-diagnostics-stepN.csv`. Restriction rows are
+recorded after **every pass**, before the coarse solve. Search rows are recorded
+before updating the solution, with an `applied` flag filled after the solve call.
+Solver calls are one-based; their true residual is the **pre-update** residual.
+Use the existing convergence CSV for accepted post-update residuals.
+
+Definitions:
+
+- Original residual: `r = b - A*x`, using the original assembled EMI matrix,
+  current RHS, and weighted global correction. Root evaluates global norms once.
+- Restriction error: the Euclidean norm of `sum_s rRes_s - r`. Each owned
+  subdomain contributes once; the restricted dual residual is not weighted a
+  second time. Relative error divides by `||r||_2`; for zero residual it is absolute.
+- Reference CG scalar: `rho_true = r^T*z`, where `z` is the actual prolonged
+  preconditioned correction, including its configured quantization. This is
+  compared with the solver's existing `rho_internal`, not substituted for it.
+  Relative discrepancy is blank if the reference scalar is too small
+  (`|rho_true| <= 64*epsilon*||r||*||z||`) or invalid; the absolute discrepancy
+  and `rho_true_near_zero` flag remain available.
+- Adjacent conjugacy defect: `|q_k^T A q_previous| /
+  sqrt((q_k^T A q_k)*(q_previous^T A q_previous))`. The previous direction is
+  the last **accepted** direction. The first sample and nonpositive energies
+  yield a blank value, not a false zero. This checks adjacent directions only.
+- Internal curvature is the value used by CG. Global curvature is independently
+  evaluated with the original assembled matrix.
+- Shared-copy jumps for `x`, `z`, and `q` are the owner-local Euclidean norm
+  of deviations from their weighted global reconstruction, divided by
+  `max(1,||global vector||)`. Nonzero jumps must be considered before interpreting
+  scalar/conjugacy measurements of the reconstructed vector.
+- `solution_change_since_restriction` is the owner-local Euclidean norm of
+  solution changes since the preceding restriction observation in the same call.
+  The first pass defines the reference. It should remain exactly zero.
+
+All diagnostic observations are read-only. They add two sum reductions per event,
+root matrix-vector products, memory, and CSV output. File-status checks also
+broadcast on MPI runs. These costs are **not** included in transfer byte counters,
+and diagnostic timings are unsuitable for compression-performance claims.
+Default-off execution adds no diagnostic reductions or matrix-vector products.
+
+Start with the same 10-cell EMI input, refinement 2, 8 ranks, one timestep,
+unchanged physical parameters, CG, and tolerance `1e-7`:
+
+`RANKS=8 REFINE=2 bash tests/run_emi_cg_diagnostic_check.sh` runs the complete
+comparison. It first requires identical convergence CSVs with diagnostics off/on
+for uncompressed CG and 16-bit quantization. It then retains a failing one-pass
+12-bit run and proceeds to two passes, provided both reference solves succeeded.
+The script does not compile; rebuild first. Alternatively, run the cases directly:
+
+```bash
+python3 tests/run_emi_quantization_diagnostic.py \
+  --bits 12 16 --restriction-passes 1 --ranks 8 --refine 2 \
+  --tolerance 1e-7 --cg-diagnostics
+python3 tests/run_emi_quantization_diagnostic.py \
+  --bits 12 --restriction-passes 2 --ranks 8 --refine 2 \
+  --tolerance 1e-7 --cg-diagnostics
+python3 tests/summarize_emi_cg_diagnostics.py output/<diagnostic-output-directory>
+```
+
+The first command is expected to exit nonzero if the single-pass 12-bit case
+still fails; its diagnostics are retained and the 16-bit case is still attempted.
+Graph lifting and entropy coding stay disabled unless `--full-compression` is
+explicitly requested. Before drawing conclusions, compare an instrumented
+16-bit run's convergence CSV with an otherwise identical default-off run.
+
+Lightweight checks (not a replacement for container MPI validation):
+
+```bash
+python3 tests/test_bddc_cg_observer.py --kaskade-root /kaskade7
+c++ -std=c++20 -O2 tests/test_bddc_cg_diagnostics.cpp -o /tmp/test_bddc_cg_diagnostics
+diagnostic_test_dir=$(mktemp -d /tmp/emi-cg-diagnostics.XXXXXX)
+/tmp/test_bddc_cg_diagnostics "$diagnostic_test_dir"
+```
+
+### Experimental single-pass, zero-preserving restriction
+
+`--bddcRestrictZeroPreserving 1` selects an **optional restriction-only** quantizer.
+The default (`0`) retains the existing quantization arithmetic. CG scalars,
+recurrences, stopping rule, restriction pass count and prolongation quantization
+are unchanged. This experiment does not establish that 12-bit CG converges.
+
+The candidate uses an unsigned b-bit alphabet with an implicit integer zero point
+`Z=2^(b-1)` and symmetric limit `L=Z-1`. For each subdomain's residual increments,
+choose `s <= L/max(abs(increment))`, round the scale down to float32, encode
+`q=Z+round(s*increment)` and decode `(q-Z)/s`. Signed values are rounded before
+adding Z. The code range is `1..2^b-1`, leaving one code unused, so exact zero and
+sign symmetry are preserved. Sender feedback and received values use exactly the
+same float32 scale. The existing two-float header contains `(s,0)`; there is no
+additional metadata or exchange. All ranks must use the same rebuilt executable,
+bit depth and quantizer mode. Supported depths are 2..32 bits. Nodal quantization
+and optional integer lifting **after** quantization are supported; transforms
+before quantization are rejected for this experiment. Extreme data requiring a
+scale outside the supported float32 range are rejected rather than silently
+changing precision.
+
+This symmetric choice can have coarser spacing than the original affine min–max
+grid on an asymmetric range. It does not preserve weighted sums, change the
+quantization group, or add a second error-correction payload. Fully encoded size
+may improve or worsen; quantization-only still uses double-sized symbol slots.
+
+Run the controlled experiment in the existing container after synchronizing both
+this repository and `kaskade7_new`:
+
+```bash
+(
+set -e
+mpicxx -std=c++20 -O2 -I/kaskade7 tests/test_bddc_zero_quantization.cpp \
+  -o /tmp/test_bddc_zero_quantization
+/tmp/test_bddc_zero_quantization
+mpicxx -std=c++20 -O2 -I/kaskade7 tests/test_bddc_transfer_consistency.cpp \
+  -o /tmp/test_bddc_transfer_consistency
+/tmp/test_bddc_transfer_consistency
+make -W EMI_model.cpp -o /kaskade7/libs/libkaskade.a \
+  MPI=1 MPICXX=mpicxx \
+  MPI_INCLUDE_FLAGS="-include /usr/lib64/mpi/gcc/openmpi4/include/mpi.h -DMUMPS_MPI_H"
+python3 tests/run_emi_zero_preserving_check.py
+)
+```
+
+The driver fixes the original 10-cell mesh with refinement 2, 8 BDDC ranks,
+one timestep and relative tolerance `1e-7`. It runs matched direct/uncompressed
+references, legacy 16-bit/one-pass, and candidate 12-bit/one-pass, with both
+quantization-only and full coding. The candidate is 12 bits in **both** directions,
+but only restriction uses the new quantizer. Output is placed in a new
+`output/emi-zero-preserving-*` directory; existing runs are never overwritten.
+The direct and uncompressed cases never receive the new option.
+
+`comparison.json` declares the objective met only when the candidate converges,
+its raw exported-u relative Euclidean and maximum absolute errors versus direct
+are no worse than the matched 16-bit baseline, and its total fully encoded logical
+bytes beat both that baseline and the historical **2,430,000-byte** target.
+Quantization/full convergence histories must agree. No mean offset is removed
+for this criterion. CG diagnostics remain enabled to explain success or failure;
+their communication is outside the codec counters, and their times are **not**
+performance measurements. The driver does not silently increase bit depth,
+restriction passes, iteration limit or tolerance after a failure.
+
+For the candidate alone, the existing runner also accepts:
+
+```bash
+python3 tests/run_emi_quantization_diagnostic.py --bits 12 \
+  --restriction-passes 1 --zero-preserving-restriction \
+  --full-compression --cg-diagnostics --ranks 8 --refine 2 --tolerance 1e-7
+```
+
+### Read-only restriction range analysis before grouped quantization
+
+Existing aggregate diagnostics do not retain buffer values. After rebuilding,
+capture the existing 16-bit and zero-preserving 12-bit trajectories with:
+
+```bash
+python3 tests/run_emi_restriction_range_check.py \
+  --reference output/emi-zero-preserving-20261101T081725Z
+```
+
+This runs quantization-only diagnostics (with direct and uncompressed references)
+at the same 10-cell mesh, refinement 2, eight ranks, one time step, physics, one
+restriction pass, 300-call limit and true relative tolerance 1e-7. The known
+12-bit failure is retained. No new quantizer is applied, and no full-codec rerun
+is needed to observe these increments. Every convergence CSV must match its
+saved counterpart byte-for-byte before range results are interpreted.
+
+The opt-in `--restriction-range-capture` runner flag exports
+`KASKADE_RESTRICTION_CAPTURE` separately for each compressed case. Kaskade writes
+the actual pre-quantization increment (local residual minus published feedback),
+exact-corner exclusions and ordered neighbor membership. Capture occurs before
+encoding/feedback changes, without MPI, at restriction invocations 1..32, 50,
+100, 200 and 300. This is sampled data, not a complete failed-run byte count.
+Files are distinct per owned subdomain and invocation; existing files are never
+overwritten. Capture I/O invalidates timing comparisons. The low-level capture
+counter is per transfer object and does not reset at time steps.
+
+`range-analysis/buffers.csv` and `groups.csv` measure ranges for groups of
+32, 64, 128, 256 and 512 compressible entries in producer interface order.
+One producer DOF has one group, reused across all neighbors and its local copy.
+Naively quantizing independently per neighbor would violate this requirement.
+These groups use index order, not inferred spatial connectivity.
+
+The proposed metadata model is 12 bytes per contiguous group segment (uint32
+length and two float32 scale/offset fields), 4 bytes per packet for segment
+count, the existing 8 bytes of stream lengths, and 8-byte packet alignment.
+Receiver DOF order is already known; no per-value group IDs are assumed.
+Fragmented groups pay repeated segment descriptors. Exact-corner doubles remain
+unchanged. The analyzer explicitly counts these segments from captured topology.
+
+For full groups without fragmentation, descriptor overhead is 0.375, 0.1875,
+0.09375, 0.046875 and 0.0234375 bytes/value respectively. Reducing a fixed-width
+payload from 16 to 12 bits offers only 0.5 bytes/value before metadata. Small
+or fragmented groups can therefore erase that saving. The reported packed-bit
+model is **not** a prediction of integer lifting/Huffman sizes: changing scales
+may change symbol smoothness and entropy. Quantization-only double slots do not
+shrink when fewer quantization bits are selected.
+
+The numerical indicator compares the ideal symmetric 12-bit group step
+`maxabs(group)/2047` with the original affine 16-bit whole-buffer step
+`span(buffer)/65535` on the same captured values. It is a screening bound,
+not a measured quantization error or a CG convergence guarantee. Constant
+whole buffers have undefined relative step ratios. Offline replay cannot predict
+how changed quantization will alter future feedback and search directions.
+
+After reviewing these measurements, select one group size for a controlled
+experiment: grouped zero-preserving **12-bit restriction**, original **16-bit
+prolongation**, one pass, same CG/physics/tolerance. Keep exact corners and full
+coding settings fixed. Do not implement this candidate until the range and
+metadata evidence supports it. Judge total logical bytes against the matched
+16/16 baseline (historically 2,430,000), plus convergence and raw solution
+differences against direct. Per-packet savings alone are insufficient.
+
+### Controlled grouped restriction experiment (128 values, R12/P16)
+
+The optional `--bddcRestrictGroupSize 128` implementation now enables this
+experiment with `--bddcRestrictZeroPreserving 1`. Zero remains the default group
+size, retaining the previous path. Groups count compressible DOFs in sorted
+producer interface order; exact corners are skipped and remain unquantized.
+Per-group maximum magnitudes determine symmetric float32 scales. Own feedback
+and every neighbor use the same code and scale for a producer value.
+
+Neighbor packets retain their existing DOF order. A uint32 run count followed
+by (uint32 scalar count, float32 scale, float32 zero offset) descriptors replaces
+the previous scale/min header. The descriptor header is independently padded
+to an 8-byte slot boundary; this can cost up to four bytes more per packet than
+the earlier combined-padding model. Encoded stream lengths and payloads follow.
+Integer lifting/Huffman operate on the grouped codes and remain reversible;
+changing scales can change their entropy. Exact-corner trailers are unchanged.
+Sent/received byte counters include all descriptors, padding and payloads.
+There are no additional MPI exchanges. Packet repacking and receiver scale
+expansion add allocation, copying and computation overhead.
+
+After rebuilding, run:
+
+```bash
+python3 tests/run_emi_grouped_restriction_check.py
+```
+
+This preserves the fixed 10-cell/refinement-2 problem, eight BDDC ranks, one step,
+one restriction pass, 300-iteration limit, physics and tolerance 1e-7. It runs
+direct/uncompressed references, quantization-only and full-codec variants for:
+
+- Baseline: original restriction/prolongation quantizers, 16/16 bits, no groups.
+- Candidate: grouped exact-zero restriction at 12 bits, original prolongation
+  at 16 bits, group size 128.
+
+The baseline must reproduce the preserved convergence CSVs in
+`output/emi-zero-preserving-20261101T081725Z/baseline16`; use `--reference`
+to specify the corresponding preserved baseline directory elsewhere.
+Outputs go to a fresh `output/emi-grouped-restriction-*` directory. No existing
+results are changed. `comparison.json` requires true-residual convergence,
+raw exported-u relative Euclidean and maximum absolute errors no worse than the
+matched full-16/direct comparison, and fewer total logical bytes than both the
+matched baseline and 2,430,000 bytes. Quantization/full convergence CSVs must
+agree, the executable hash must remain unchanged, and precision/pass settings
+are checked explicitly. A solver PASS alone is not an objective PASS.
+
+The diagnostic runner also accepts `--prolongation-bits 16` and
+`--restriction-group-size 128`; these overrides affect compressed cases only
+and are recorded explicitly in the summary. This experiment changes restriction
+quantization and wire metadata, not CG. A successful outcome has not yet been
+established. Diagnostic timings include observation and are not benchmark claims.
+
+### Multi-step validation of ungrouped zero-preserving R12/P16
+
+The ungrouped R12/P16 configuration passed the refinement-2, eight-rank,
+one-step 10-cell test with 22 iterations and 2,213,992 total logical bytes,
+versus 21 iterations and 2,430,000 bytes for original R16/P16. Its final raw
+relative Euclidean and maximum absolute differences from direct were
+9.208e-7 and 1e-7 (baseline 2.820e-6 and 3e-7). This is a single-problem result,
+not a default change or general robustness/performance claim.
+
+Validate the same configuration for ten steps on all three existing problems:
+
+```bash
+python3 tests/run_emi_mixed_precision_validation.py --steps 10 --ranks 8
+```
+
+No rebuild is needed after the successful grouped/control builds; this adds
+Python validation infrastructure only. Defaults are 10cells at refinement 2,
+weak_8_h16 at refinement 0, and strong_h16 at refinement 0. The block meshes
+come from `../input_emi_mesh_blocks/weak_strong_scaling`; override with
+`--mesh-dir` if necessary. To run only the first problem:
+
+```bash
+python3 tests/run_emi_mixed_precision_validation.py --cases 10cells --steps 10 --ranks 8
+```
+
+For each mesh the script runs direct (one rank), uncompressed CG, full original
+R16/P16, and full zero-preserving R12/P16. References run only once per mesh.
+The candidate always uses one restriction pass, no groups, the original
+prolongation quantizer and unchanged CG. Physical parameters remain sigma_i=3,
+sigma_e=20, C_m=1, R=0.1, dt=0.01; finalTime=steps*dt. All BDDC steps must
+meet the true relative tolerance 1e-7 with at most 300 solver calls per step.
+Direct residuals are checked against 1e-7 at every step as well.
+
+The runner reuses `collect_emi_scaling_smoke.py` and the diagnostic runner's
+coordinate/finite-error comparison helper. It does not repeat quantization-only
+codec tests. CG observation and buffer capture are disabled; per-step true
+residual reports and convergence CSVs remain enabled. Final VTK output is used
+for raw accuracy comparisons, so intermediate-step solution differences are
+not evaluated. Timing includes setup, residual checks and output and is not
+a scaling benchmark.
+
+Each mesh has its own matched 16/16 byte budget and final raw error thresholds.
+The objective passes only if all solves complete, every step converges, the
+candidate's total logical bytes are strictly lower, and both its final relative
+Euclidean error and maximum absolute error versus direct are no worse than
+16/16. The historical 2,430,000-byte target is NOT applied to different meshes
+or ten-step runs. Mean-offset removal never affects the acceptance criterion.
+
+Results, exact commands, executable hash, fixed parameters, logs, comparisons,
+per-step iteration counts/residuals and byte metrics are saved in a fresh
+`output/emi-mixed-validation-*` directory. `summary.json` and `summary.txt`
+distinguish solver checks from the complete accuracy/communication objective.
+A failed reference skips the remainder of that mesh; subsequent meshes are
+still evaluated. A candidate failure or worse accuracy/traffic gives a nonzero
+final exit status while retaining all outputs. No precision or tolerance
+fallback is applied, and existing output directories are never reused.
+
+The ten-step validation `emi-mixed-validation-20261101T085314Z-5184`
+did not establish a generally successful R12/P16 configuration. The 10-cell
+case converged and saved 8.04% of logical bytes but failed the raw final accuracy
+comparison. The weak_8_h16 candidate failed at step 6: its best relative residual
+was 4.6333e-7 at iteration 117 and its final residual was 127.678 at iteration
+300. The strong_h16 candidate passed the objective with 3.27% fewer logical
+bytes. Keep these outcomes separate; do not generalize the earlier one-step
+success to all meshes or time steps.
+
+Replay only the failed run with read-only CG observations, preserving its exact
+stored command except for output directory and `--bddcCgDiagnostics 1`:
+
+```bash
+python3 tests/replay_emi_cg_diagnostics.py \
+  --run output/emi-mixed-validation-20261101T085314Z-5184/weak_8_h16/full-zero-r12-p16
+```
+
+Do not rebuild for this replay: its executable hash must match the saved run.
+The same solver failure is expected. The script checks byte-identical
+convergence CSVs and the same success/failure outcome before summarizing the
+CG observations. A successful diagnostic replay does NOT mean the solver
+converged. New logs and `replay.json` are saved under a fresh
+`output/emi-cg-replay-*` directory. No quantizer, metadata precision, physical
+parameter, iteration limit, pass count or tolerance is changed.
+
+### Experimental CG scalar from the original local residual
+
+`--bddcCgOriginalResidual 1` changes the CG numerator from
+`sum_i z_i^T rRes_i` to `sum_i z_i^T r_i`. In compressed CG, `r_i` is
+already recomputed as `f_i-A_i*u_i` after each update. The default is zero,
+preserving the previous behavior. The option is restricted to non-SDC BDDC CG
+with a positive true-residual tolerance and no operator audit.
+
+This is a numerical experiment: alpha and beta can change. It adds no exchange
+or reduction and keeps the quantizer, payload layout, float32 scale and float32
+minimum, one restriction pass, and CG recurrence formulas unchanged.
+It does not make a nonlinear/history-dependent compressed preconditioner fixed
+SPD or guarantee convergence. Original-local and assembled diagnostic rho
+should be compared while also monitoring shared-copy continuity.
+
+The weak-mesh replay showed that loss of accuracy and conjugacy preceded the
+growth of shared-copy disagreement. At the best step-6 residual (iteration
+117), the solution jump was about 3.1e-16; the much larger late jumps alone
+therefore do not explain the onset of failure.
+
+After rebuilding `emiModel` against the updated Kaskade headers, run a controlled experiment:
+
+```bash
+python3 tests/test_bddc_original_rho.py --kaskade-root /kaskade7
+python3 tests/run_emi_mixed_precision_validation.py \
+  --cases weak_8_h16 --steps 10 --ranks 8 \
+  --candidate-original-rho --candidate-cg-diagnostics \
+  --reference-campaign output/emi-mixed-validation-20261101T085314Z-5184
+```
+
+The direct, uncompressed CG and original 16/16 controls are rerun with the new
+binary; only the zero-preserving R12/P16 candidate enables the new scalar and
+observer. Saved commands must match except for output, observer and scalar
+switches. Uncompressed and 16/16 convergence CSVs must be byte-identical to the
+saved controls before running the candidate. Outputs go to a fresh directory.
+Final raw L2/max error and total logical bytes are compared against these newly
+run controls with the existing acceptance criteria; every step must meet 1e-7.
+Candidate diagnostics add operator work and reductions, so these timings must
+not be used to claim a performance improvement.
+
+Local verification compiles the production `prolongate()` body in a small
+vector/matrix harness, testing original/perturbed residuals, shared copies,
+constraints, first/later CG calls and unchanged steepest descent behavior.
+Mock runner tests check candidate-only flags, history parity and preservation
+of parameters. Actual multi-step convergence remains a container integration
+test, not a result established by these small tests.
+
+For a matched corrected-rho comparison, use:
+
+```bash
+python3 tests/run_emi_mixed_precision_validation.py \
+  --cases weak_8_h16 --steps 10 --ranks 8 \
+  --matched-original-rho --matched-cg-diagnostics \
+  --reference-campaign output/emi-mixed-validation-20261101T091721Z-5741
+```
+
+Both compressed runs now use `--bddcCgOriginalResidual 1` and the same
+observer setting. Direct and uncompressed controls retain their original
+settings. This runner extension requires no rebuild of a binary that already
+supports `bddcCgOriginalResidual`. Existing output directories are preserved.
+The uncompressed and R12/P16 convergence histories must reproduce the saved
+run because their scalar settings are unchanged. The 16/16 history may change
+because its scalar setting changes intentionally; this is recorded explicitly.
+
+The prior candidate-only scalar experiment converged in all ten steps but
+required 435 iterations versus the legacy 16/16 baseline's 365. Its logical
+bytes were 12,601,784 versus 11,957,688, and both final raw accuracy measures
+were worse. The matched experiment measures performance of the two compression
+configurations with the same scalar formulation; it does not isolate bit depth
+alone, since exact-zero restriction remains enabled only for R12/P16.
+The acceptance criteria remain fewer total logical bytes and no worse final raw
+L2/max errors against direct, with every step satisfying 1e-7. Equal observer
+settings remove one timing asymmetry, but these remain instrumented validation
+runs, not a timing benchmark.
+
+To test the next intermediate precision, R14/P16, with all other candidate
+settings held fixed:
+
+```bash
+python3 tests/run_emi_mixed_precision_validation.py \
+  --cases weak_8_h16 --steps 10 --ranks 8 \
+  --candidate-restriction-bits 14 \
+  --matched-original-rho --matched-cg-diagnostics \
+  --reference-campaign output/emi-mixed-validation-20261101T092402Z-5920
+```
+
+This is a Python runner extension; the current corrected-rho binary needs no
+recompilation. The default candidate remains R12/P16. The new mode directory
+and summary key are `full-zero-r14-p16`, and the selected restriction precision
+is recorded in `environment.json` and the saved command. Prolongation stays at
+16 bits, restriction stays zero-preserving with one pass and no groups, and
+scale/minimum metadata remain float32. Both compressed runs use corrected rho
+and the same diagnostics. The existing convergence and raw accuracy/byte
+acceptance checks remain unchanged.
+
+When referencing the prior R12 campaign, only the candidate restriction bit
+depth is additionally allowed to differ. The uncompressed and corrected-rho
+16/16 histories must reproduce the saved histories. Candidate history parity
+is intentionally skipped when restriction precision differs. All previous
+results are preserved; R14 convergence and efficiency remain to be measured.
+
+### Potential reference and per-step mean-error investigation
+
+Source inspection of `EMI_model.hh` shows an extracellular outer-boundary
+term with hard-coded `gamma = 1e-5`: its residual is `-gamma*u_e*v`.
+The semi-implicit Euler wrapper assembles `A = B - dt*L'`, so this contributes
+`+dt*gamma` times a boundary mass matrix. Bulk terms depend on gradients and
+inner-boundary terms on voltage differences. Consequently a common constant
+shift is anchored by the extracellular boundary term, not by an exact mean-zero
+constraint. The exposed `penalty` value is stored by EMIModel but is not used
+in these weak-form terms. Changing it is not a remedy for this observation.
+No boundary coefficient, constraint or physical parameter has been changed.
+
+Provided the relevant connected component touches the extracellular boundary,
+the common constant mode is therefore not an exact null mode. Its stiffness
+must be measured from the assembled matrix; `dt*gamma = 1e-7` in these runs is
+only the boundary-term multiplier, not an eigenvalue. The combination of weak
+anchoring and an unweighted residual tolerance can permit a visible common
+offset. This is an explanation to test, not proof that every observed error
+is caused by that mode or that the offset is physically irrelevant.
+
+Existing comparison outputs use nonconforming VTK samples written with
+`setPrecision(7)` in `writeState`. Their sample arithmetic mean is neither a
+unique-DOF mean nor a volume-weighted mean. In campaign
+`emi-mixed-validation-20261101T094154Z-6214`, the constant sample offset
+accounts for approximately 96.40% of squared R14 error on 10cells and 99.995%
+on strong_h16, using `1-(centered_L2/raw_L2)^2`. These are final-state
+exported-data diagnostics, not full-precision solution claims.
+The direct path saved per-step VTK states; BDDC saved only initial/final states.
+Existing files cannot reconstruct the BDDC mean-error time history.
+
+`--potentialDiagnostics 1` adds read-only rank-zero CSV snapshots after every
+accepted non-SDC update, plus the initial state and operator row/column sums.
+It writes double coefficients at 17 significant digits, with correction, RHS
+and independently evaluated residual. It never shifts the mean or edits a
+solver vector. The disabled path does no diagnostic work. Enabled diagnostics
+add matrix traversal, file I/O and a per-snapshot status broadcast, but no
+compressed transfer payloads; do not use their timings for scaling claims.
+Existing diagnostic files are not overwritten.
+
+Rebuild EMI, then rerun the saved R14 campaign with:
+
+```bash
+python3 tests/run_emi_mixed_precision_validation.py \
+  --cases 10cells strong_h16 --steps 10 --ranks 8 \
+  --candidate-restriction-bits 14 \
+  --matched-original-rho --matched-cg-diagnostics \
+  --potential-diagnostics \
+  --reference-campaign output/emi-mixed-validation-20261101T094154Z-6214
+```
+
+All BDDC convergence histories must match the saved histories, establishing
+observer parity for the numerical trajectories. Existing raw VTK acceptance
+criteria remain in force; the campaign can still report NOT MET. The runner
+also creates `potential-analysis/per-step-errors.csv`,
+`constant-mode.csv` and `interpretation.json`, even when the completed
+campaign misses the accuracy/byte objective.
+
+The additional report compares unique algebraic DOF states against direct at
+every step. It records raw and centered error, signed mean error, the fraction
+of squared error associated with the mean, correction mean differences and
+their accumulation. These norms are explicitly distinct from VTK sample norms
+and physical FE norms. Centered errors never replace raw acceptance tests.
+
+Operator column sums provide `1^T*A*u` and an anchor-weighted mean-error proxy.
+The report checks `1^T*b - 1^T*A*du - 1^T*r` for roundoff closure.
+It also reports `1^T*b + 1^T*A*u_previous` and
+`1^T*A*u_new + 1^T*r`: their agreement follows from the update identity,
+and their magnitude tests the expected cancellation of bulk/interface terms
+under the constant test function. The constant Rayleigh quotient is a probe,
+not an eigenvalue estimate. Membrane-voltage and gradient accuracy are not
+inferred from the centered potential error.
+
+### Opt-in constant-mode correction of the converged linear solve
+
+`--bddcConstantCorrection 1` applies one scalar energy correction after CG has
+already met the unchanged true-residual tolerance. For the assembled correction
+`x=du` and its current timestep RHS, it computes
+`delta = (1^T*(b-A*x))/(1^T*A*1)`, then adds `delta` to every global correction
+DOF. It does not subtract the arithmetic mean of the solution, reference a
+direct solution, or change the boundary anchoring. The default is zero.
+
+The proposal is computed on rank zero using long-double accumulation, broadcast
+to all ranks, and applied to the replicated global correction. The full original
+residual norm is then recomputed and broadcast. The timestep is advanced only
+if this corrected iterate still meets the same tolerance. A nonpositive or
+nonfinite constant stiffness, invalid delta, or failed residual recheck aborts
+without advancing the state. No silent fallback, extra restriction pass,
+precision escalation or relaxed tolerance is used. An energy correction can
+increase the Euclidean residual, which is why the recheck is essential.
+
+The correction is outside the CG recurrence: existing convergence and CG
+diagnostic CSVs describe the pre-correction CG trajectory. Separate
+`BDDC constant correction step ...` log entries contain delta, residual sum,
+constant stiffness, and pre/post relative residuals. Global completion summaries
+and full-precision potential snapshots describe the corrected accepted iterate.
+Local solver iterates are discarded at the next RHS restart; they are not used
+again after this final correction. Later timestep trajectories may change.
+
+For the controlled R14/P16 versus R16/P16 comparison, both compressed runs enable
+the same correction and original-residual rho; direct and uncompressed controls
+retain their previous settings:
+
+```bash
+python3 tests/run_emi_mixed_precision_validation.py \
+  --cases 10cells strong_h16 --steps 10 --ranks 8 \
+  --candidate-restriction-bits 14 \
+  --matched-original-rho --matched-cg-diagnostics \
+  --matched-constant-correction --potential-diagnostics \
+  --reference-campaign output/emi-mixed-validation-20261101T095708Z-6582
+```
+
+Rebuild EMI for this C++ change. First-step CG histories must match the saved
+pre-correction histories; full-history parity is required only for modes whose
+numerical settings are unchanged. Fresh output directories preserve all prior
+results. Both raw VTK acceptance criteria and full-precision mean diagnostics
+remain available. The saved `20261101T101620Z-6974` container campaign completed
+all ten steps for both compressed configurations on `10cells` and `strong_h16`.
+Its strict VTK accuracy objective passed only for `10cells`; convergence and
+communication savings must be distinguished from that accuracy comparison.
+
+The scalar proposal broadcast contains two doubles (validity and delta); the
+extra true-residual measurement broadcasts two more. The runner adds
+`32*(ranks-1)*steps` logical root-to-peer payload bytes to each corrected run's
+compressed-transfer count. At eight ranks and ten steps this is 2,240 additional
+bytes. Raw codec counters are preserved separately. This is logical delivery
+accounting, not actual MPI wire traffic; other validation reductions and framing
+remain outside the existing counters. Correction work includes a matrix
+traversal for the proposal, a vector update and the true-residual recheck.
+
+`tests/test_emi_constant_correction.cpp` checks the sign/formula, read-only
+proposal, preservation of differences, weak grounding, null/nonfinite mode
+rejection, and a case where the Euclidean residual increases. Runner tests
+check matched flags, post-correction residual checks, payload accounting and
+first-step parity. No quantizer or float32 scale/minimum metadata is modified.
+
+### Single-pass low-bit restriction ladder using saved controls
+
+The next controlled experiment lowers restriction precision to 12, 10 and 8
+bits while holding prolongation at 16 bits. It reuses the direct, uncompressed
+and 16/16 controls from the same executable and changes only restriction bits
+and the output directory in each saved R14/P16 command. Corrected rho,
+zero-preserving restriction, one pass, no groups, post-CG scalar correction,
+physical parameters and the true relative tolerance `1e-7` remain fixed.
+Scale and minimum metadata remain float32. This is mixed precision, not
+uniform 8-bit communication.
+
+Run in the container without rebuilding the executable used by this campaign:
+
+```bash
+python3 tests/run_emi_low_bit_one_pass.py \
+  --reference-campaign output/emi-mixed-validation-20261101T101620Z-6974 \
+  --cases 10cells strong_h16 \
+  --bits 12 10 8
+```
+
+The runner verifies the executable hash, creates fresh output, runs six
+candidates, and continues after a failed candidate. It does not rerun controls,
+change precision automatically, add refinement passes or relax tolerance.
+`PASS` requires every timestep to converge and finite final comparisons to
+complete. Byte savings and solution errors are separate findings: a slightly
+higher error than the 16-bit reference is no longer a convergence veto.
+The former strict objective is still recorded in JSON, and the original mixed
+validation runner and historical results retain their acceptance criteria.
+
+Full-precision final DOF errors include raw and centered relative L2 error,
+maximum error and mean offset. Centering is an analysis only; no additional
+solution shift is applied by this runner. These diagnostics do not establish
+accuracy of membrane voltages or gradients. Logical byte totals include the
+existing constant-correction broadcasts; reused controls are not fresh timing
+measurements. Successful 14-bit results do not establish success at 12 or 8
+bits: that is what this experiment tests.
+
+`python3 tests/test_emi_low_bit_one_pass.py` checks command isolation, control
+reuse, continuation after failure, separate accuracy reporting, preservation of
+reference results, and rejection of a changed executable using mock runs.
+
+To isolate prolongation precision after the successful R12/P16 ladder, run:
+
+```bash
+python3 tests/run_emi_low_bit_one_pass.py \
+  --reference-campaign output/emi-mixed-validation-20261101T101620Z-6974 \
+  --comparison-campaign output/emi-low-bit-one-pass-20261101T103116Z-7366 \
+  --cases 10cells strong_h16 \
+  --bits 12 --prolongation-bits 12
+```
+
+This adds only two R12/P12 solves. Direct, uncompressed, R16/P16 and R12/P16
+results are reused. The comparison campaign must use the same reference
+environment and executable; its successful commands must match after changing
+only prolongation precision and the output directory. The summary reports
+total logical byte savings against both R16/P16 and saved R12/P16, together
+with iteration counts and final full-precision errors. Failure is retained and
+does not trigger a higher-precision retry. No compilation is needed.
+
+Both directions now use 12 quantization bits, but their existing quantizer
+policies remain unchanged: restriction is zero-preserving and prolongation
+uses its original quantizer. Scale/minimum metadata remain float32, and exact
+corner values retain their existing representation. This experiment tests
+equal bit depths, not a change to the numerical algorithm or wire format.
+
+### Optional flexible CG for one-pass R12/P12
+
+`--bddcFlexibleCg 1` changes the search-direction recurrence to one-term
+truncated flexible CG (Polak--Ribiere). It requires `--bddcCgOriginalResidual 1`,
+non-SDC BDDC CG and a positive true residual tolerance. Standard CG remains the
+default. The fixed-preconditioner condition estimate is rejected in this mode.
+
+For original residual `r_k=b-A*x_k` and communicated/preconditioned correction
+`z_k`, the new coefficient is
+`beta_k = z_k^T*(r_k-r_(k-1)) / (r_(k-1)^T*z_(k-1))`.
+The direction is `q_k=z_k+beta_k*q_(k-1)` and the existing step length remains
+`alpha_k=(r_k^T*z_k)/(q_k^T*A*q_k)`. The first update is unchanged. With exact
+line searches this coefficient makes adjacent directions A-conjugate for a
+changing preconditioner. Negative beta is allowed; nonfinite beta is rejected.
+The usual positive-rho/curvature and true-residual checks remain in place.
+This is not full-history orthogonalization and does not guarantee convergence
+with arbitrary nonlinear or history-dependent quantization.
+
+The implementation stores one previous local residual per owned subdomain,
+copies it once per update, and computes one additional local dot product on
+later updates. The numerator occupies the otherwise unused second scalar in
+the existing prolongation Allreduce. Thus it adds no reduction, MPI message,
+payload bytes, matrix-vector product or restriction pass. Residual history is
+cleared at each RHS restart. Quantizers, exact corners, float32 scale/minimum
+metadata and post-CG constant correction are unchanged.
+
+Rebuild in the container and run the focused validation:
+
+```bash
+(
+set -e
+python3 tests/test_bddc_flexible_cg.py
+python3 tests/test_emi_flexible_cg_check.py
+make -W EMI_model.cpp -o /kaskade7/libs/libkaskade.a \
+  MPI=1 MPICXX=mpicxx \
+  MPI_INCLUDE_FLAGS="-include /usr/lib64/mpi/gcc/openmpi4/include/mpi.h -DMUMPS_MPI_H"
+python3 tests/run_emi_flexible_cg_check.py \
+  --reference-campaign output/emi-mixed-validation-20261101T101620Z-6974 \
+  --cases 10cells strong_h16
+)
+```
+
+The driver preserves prior results in their existing directories. It runs four
+configurations per problem: standard uncompressed CG, standard full R16/P16,
+flexible full R16/P16, and flexible full zero-preserving-R12/original-P12.
+All use the saved mesh/physics, ten steps, eight ranks, one restriction pass,
+300-update limit and tolerance `1e-7`. Saved direct solutions are reused.
+The rebuilt standard controls must reproduce saved convergence CSVs and logical
+byte counts before flexible experiments proceed for that problem. A failed
+flexible-16 run is recorded but does not prevent the flexible-12 test.
+
+The summary reports bytes relative to both standard and flexible 16/16, iteration
+counts and final full-precision DOF errors. Every timestep must converge; raw and
+centered errors are retained separately with no hidden accuracy threshold.
+Byte totals include the existing constant-correction broadcasts; other
+diagnostic collectives and MPI framing remain outside these logical counters.
+Use the saved phase timings only as validation timings, not performance claims.
+The transfer policies still differ between restriction and prolongation even
+when both alphabets are 12-bit. This experiment evaluates the established
+configurations, not bit depth in isolation from quantizer choice.
+
+The local C++ harness compiles production solver/subdomain methods and checks
+a changing SPD preconditioner, fixed-PCG equivalence, adjacent conjugacy,
+original-residual history, reset, negative beta, nonfinite rejection and exchange
+counts. Driver tests check controls, parity gates, command isolation and failure
+retention. These tests do not establish convergence on the EMI meshes; the
+container run above is required. For the flexible-CG framework see
+[Notay (2000), Flexible Conjugate Gradients](https://doi.org/10.1137/S1064827599362314).
+
+Container checkpoint `output/emi-flexible-cg-20261101T105600Z-7824` completed
+all four configurations on both problems, with ten steps, eight ranks, one
+restriction pass and true tolerance `1e-7`. Standard-control history and byte
+parity checks passed. The full-precision final relative L2 errors below are
+against the saved direct solution; iteration counts and bytes cover all steps.
+
+| Problem | Solver / restriction-prolongation bits | Iterations | Logical bytes | Final relative L2 |
+| --- | --- | ---: | ---: | ---: |
+| 10cells | Standard CG, 16/16 | 210 | 24,696,304 | 1.5588e-9 |
+| 10cells | Flexible CG, 16/16 | 210 | 24,698,992 | 1.5923e-9 |
+| 10cells | Flexible CG, 12/12 | 329 | 28,876,424 | 4.1044e-10 |
+| strong_h16 | Standard CG, 16/16 | 396 | 134,795,008 | 2.5117e-9 |
+| strong_h16 | Flexible CG, 16/16 | 396 | 135,192,416 | 2.5546e-9 |
+| strong_h16 | Flexible CG, 12/12 | 717 | 199,114,888 | 1.5260e-9 |
+
+This demonstrates single-pass 12/12 convergence for these two cases, but not
+the communication objective: total bytes exceed standard 16/16 by 16.93% and
+47.72%, respectively. Against flexible 16/16 the increases are 16.91% and
+47.28%. The additional iterations outweigh the reduced payload per iteration.
+These are validation results, not runtime or scaling claims. Keep the campaign
+directories as research data; they are not part of the source-code commit.

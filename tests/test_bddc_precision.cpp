@@ -46,6 +46,37 @@ int main()
   options.bddcRestrictCompressionBits = options.bddcProlongateCompressionBits = -1;
   EmiBddc::configureTransferPrecision(transfer,options);
   check(transfer,8,8); // Reusing a transfer clears previous overrides.
+  struct ZeroOptions : Options { int bddcRestrictZeroPreserving = 1; } zeroOptions;
+  struct ZeroTransfer : Transfer
+  {
+    bool zero = false;
+    void setRestrictZeroPreserving(bool enable) { zero = enable; }
+  } zeroTransfer;
+  EmiBddc::configureTransferPrecision(zeroTransfer,zeroOptions);
+  if (!zeroTransfer.zero) return 3;
+  zeroOptions.bddcRestrictZeroPreserving = 0;
+  EmiBddc::configureTransferPrecision(zeroTransfer,zeroOptions);
+  if (zeroTransfer.zero) return 4;
+  zeroOptions.bddcRestrictZeroPreserving = 1;
+  bool rejected = false;
+  try { EmiBddc::configureTransferPrecision(transfer,zeroOptions); }
+  catch (std::runtime_error const&) { rejected = true; }
+  if (!rejected) return 5;
+  struct GroupOptions : Options { int bddcRestrictGroupSize = 128; } groupOptions;
+  struct GroupTransfer : Transfer {
+    int group = -1;
+    void setRestrictGroupSize(int n) { group=n; }
+  } groupTransfer;
+  EmiBddc::configureTransferPrecision(groupTransfer,groupOptions);
+  if (groupTransfer.group!=128) return 6;
+  groupOptions.bddcRestrictGroupSize=0;
+  EmiBddc::configureTransferPrecision(groupTransfer,groupOptions);
+  if (groupTransfer.group!=0) return 7;
+  groupOptions.bddcRestrictGroupSize=128;
+  rejected=false;
+  try { EmiBddc::configureTransferPrecision(transfer,groupOptions); }
+  catch (std::runtime_error const&) { rejected=true; }
+  if (!rejected) return 8;
   struct LegacyOptions { int bddcCompressionBits = 24; } legacy;
   EmiBddc::configureTransferPrecision(transfer,legacy);
   check(transfer,24,24);

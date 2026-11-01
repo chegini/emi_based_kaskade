@@ -16,6 +16,7 @@
 #include <mutex>
 #include <numeric>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -41,6 +42,9 @@
 #include "EMI_bddc_condition.hh"
 #include "EMI_bddc_convergence.hh"
 #include "EMI_bddc_precision.hh"
+#include "EMI_bddc_cg_diagnostics.hh"
+#include "EMI_potential_diagnostics.hh"
+#include "EMI_constant_correction.hh"
 
 namespace EmiBddc
 {
@@ -1951,6 +1955,13 @@ State runBddcSdc(Functional& F,
                                                                options.assemblyThreads,
                                                                options.mpi != 0,
                                                                options.masterWorker != 0);
+    // Configure every owned subdomain, including the uncompressed control.
+    // This persists across resetForNewRhs(), without changing transfer settings.
+    for (size_t id = 0; id < subdomains.size(); ++id)
+      if (subdomains.has(id))
+        subdomains[id].setCgUseOriginalResidual(options.bddcCgOriginalResidual != 0);
+    if (options.bddcCgOriginalResidual && mpiRankZero(options.mpi != 0))
+      std::cout << "BDDC experimental CG rho: original local residual (existing scalar reduction)\n";
     if (options.profile)
     {
       profile.subdomainConstruction += ProfileTimes::seconds(subdomainStart);
@@ -2032,6 +2043,13 @@ State runBddcSdc(Functional& F,
                                                     options.masterWorker != 0);
     if constexpr (requires { options.bddcRestrictionPasses; })
       solver.setRestrictionPasses(options.bddcRestrictionPasses);
+    if (options.bddcFlexibleCg)
+    {
+      solver.setFlexibleCg(true);
+      if (mpiRankZero(options.mpi != 0))
+        std::cout << "BDDC flexible CG: one-term Polak-Ribiere; original residual; "
+                     "existing two-scalar reduction; no extra transfer pass\n";
+    }
     if (options.profile)
     {
       profile.solverConstruction += ProfileTimes::seconds(solverStart);
@@ -2068,6 +2086,20 @@ State runBddcSdc(Functional& F,
       if (!ready)
         throw std::runtime_error("Cannot write BDDC convergence CSV in " + options.outputDir);
     };
+    auto checkCgDiagnosticOutput = [&](bool success)
+    {
+      if (!options.bddcCgDiagnostics) return;
+      int ready = success ? 1 : 0;
+#ifdef KASKADE_HAVE_MPI
+      if (options.mpi != 0)
+        MPI_Bcast(&ready,1,MPI_INT,0,MPI_COMM_WORLD);
+#endif
+      if (!ready)
+        throw std::runtime_error("Cannot write BDDC CG diagnostic CSV in " + options.outputDir);
+    };
+    if (options.bddcCgDiagnostics && rankZero)
+      std::cout << "BDDC CG diagnostics enabled: extra reductions/operator applications; "
+                   "validation timings are not performance measurements.\n";
     bool const computeDiagnostics = options.diagnostics && rankZero;
     Vector diagnosticResidual((computeDiagnostics || (relativeStopping && rankZero)) ? nDofs : 0);
 
@@ -2195,6 +2227,23 @@ State runBddcSdc(Functional& F,
       };
 
       ConvergenceReport convergenceReport;
+      auto diagnosticSum = [&](std::vector<double>& values)
+      {
+#ifdef KASKADE_HAVE_MPI
+        if (options.mpi != 0)
+          MPI_Allreduce(MPI_IN_PLACE,values.data(),static_cast<int>(values.size()),
+                        MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+#else
+        (void)values;
+#endif
+      };
+      CgDiagnosticReport cgDiagnostics(globalMatrix,rhs,subdomains,data,rankZero,diagnosticSum);
+      if (options.bddcCgDiagnostics)
+      {
+        checkCgDiagnosticOutput(cgDiagnostics.open(options.outputDir
+          + "/bddc-cg-diagnostics-step" + std::to_string(step+1) + ".csv"));
+        solver.setDiagnosticObserver([&](auto const& event) { cgDiagnostics.observe(event); });
+      }
       std::string const convergencePath = options.bddcConvergenceReport
         ? options.outputDir + "/bddc-convergence-step" + std::to_string(step+1) + ".csv"
         : std::string{};
@@ -2225,6 +2274,11 @@ State runBddcSdc(Functional& F,
             auto const start = options.profile ? ProfileTimes::Clock::now()
                                                : ProfileTimes::Clock::time_point{};
             double const internalNorm = solver.solve();
+            if (options.bddcCgDiagnostics)
+            {
+              cgDiagnostics.finishCall(solver.lastCgStep().applied);
+              checkCgDiagnosticOutput(cgDiagnostics.good());
+            }
             recordCgStep();
             if (options.bddcConvergenceReport)
             {
@@ -2285,6 +2339,46 @@ State runBddcSdc(Functional& F,
         checkConvergenceOutput(!rankZero || convergenceReport.close());
         if (rankZero)
           std::cout << "BDDC convergence data: " << convergencePath << "\n";
+      }
+      if (options.bddcCgDiagnostics)
+      {
+        solver.setDiagnosticObserver({});
+        checkCgDiagnosticOutput(cgDiagnostics.close());
+        if (rankZero)
+          std::cout << "BDDC CG diagnostic data: " << options.outputDir
+                    << "/bddc-cg-diagnostics-step" << step+1 << ".csv\n";
+      }
+      // This is a post-solve correction, not part of the CG recurrence. Local
+      // solver iterates are no longer used in this step and restartRhs clears
+      // them next step. Only the assembled correction advances the state.
+      if (options.bddcConstantCorrection && trueResult.converged())
+      {
+        ConstantCorrection proposal;
+        if (rankZero)
+          proposal=proposeConstantCorrection(globalMatrix,rhs,stepVector);
+        double packet[2]={proposal.valid ? 1.0 : 0.0,proposal.delta};
+#ifdef KASKADE_HAVE_MPI
+        if (options.mpi != 0) MPI_Bcast(packet,2,MPI_DOUBLE,0,MPI_COMM_WORLD);
+#endif
+        if (packet[0]!=1.0)
+          throw std::runtime_error("Invalid or unanchored constant mode; state was not advanced");
+        double const preRelative=trueResult.measured.relative();
+        for (size_t i=0;i<nDofs;++i) stepVector[i][0]+=packet[1];
+        trueResult.measured=measureCurrentResidual();
+        if (rankZero)
+        {
+          std::ostringstream message;
+          message << std::setprecision(17)
+                  << "BDDC constant correction step " << step+1
+                  << ": delta=" << packet[1]
+                  << " sum_r=" << proposal.residualSum
+                  << " one_A_one=" << proposal.stiffness
+                  << " pre_rel=" << preRelative
+                  << " post_rel=" << trueResult.measured.relative() << "\n";
+          std::cout << message.str();
+        }
+        if (!trueResult.measured.meets(options.bddcRelativeTolerance))
+          throw std::runtime_error("Constant correction failed true residual recheck; state was not advanced");
       }
       if (relativeStopping || computeDiagnostics)
       {
@@ -2359,6 +2453,9 @@ State runBddcSdc(Functional& F,
         boost::fusion::at_c<0>(stepState.data).coefficients()[i] = stepVector[i];
 
       Kaskade::component<0>(state) += Kaskade::component<0>(stepState);
+      capturePotentialState(options.potentialDiagnostics != 0,rankZero,options.mpi != 0,
+                            options.outputDir,step+1,globalMatrix,
+                            boost::fusion::at_c<0>(state.data).coefficients(),stepVector,rhs);
       if (verbose && rankZero && !options.quiet)
       {
         std::cout << "BDDC step " << step+1 << "/" << steps
@@ -2370,6 +2467,18 @@ State runBddcSdc(Functional& F,
       }
     }
 
+    if (options.bddcConstantCorrection && rankZero)
+    {
+      int ranks=1;
+#ifdef KASKADE_HAVE_MPI
+      if (options.mpi != 0) MPI_Comm_size(MPI_COMM_WORLD,&ranks);
+#endif
+      // Two doubles for the proposal and two for the additional residual
+      // measurement per step. Logical root-to-peer deliveries, not wire bytes.
+      std::cout << "BDDC constant correction additional broadcast payload bytes: "
+                << 4ULL*sizeof(double)*static_cast<unsigned long long>(ranks-1)
+                     *static_cast<unsigned long long>(steps) << "\n";
+    }
     // The retained solver reports cumulative traffic. Add it once at the end.
     if (options.bddcCompressionReport)
     {

@@ -78,6 +78,7 @@ struct EmiOptions
   int maxCGIter = 10000;
   int writeVTK = 1;
   int diagnostics = 0;
+  int potentialDiagnostics = 0;
   int quiet = 0;
   int bddcDumpLocalData = 0;
   int bddcAudit = 0;
@@ -101,6 +102,12 @@ struct EmiOptions
   int bddcRestrictCompressionBits = -1;
   int bddcProlongateCompressionBits = -1;
   int bddcRestrictionPasses = 1;
+  int bddcRestrictZeroPreserving = 0;
+  int bddcRestrictGroupSize = 0;
+  int bddcCgDiagnostics = 0;
+  int bddcCgOriginalResidual = 0;
+  int bddcFlexibleCg = 0;
+  int bddcConstantCorrection = 0;
   int bddcCompressionMinInterfaceSize = 0;
   int bddcCompressionThresholdInterfaceTypes = Kaskade::BDDC::EDGE;
   int bddcGraphLifting = 1;
@@ -911,6 +918,8 @@ int main(int argc, char* argv[])
      "global direct backend: umfpack (default), or mumps-spd (single-rank non-SDC)")
     ("CG_shift", options.cgShift, options.cgShift, "apply constant shift correction after PCG")
     ("vtk", options.writeVTK, options.writeVTK, "write VTK output: 0=no, 1=yes")
+    ("potentialDiagnostics", options.potentialDiagnostics, options.potentialDiagnostics,
+     "read-only full-precision potential states and constant-mode operator data for non-SDC solves (0/1)")
     ("quiet", options.quiet, options.quiet, "compact non-SDC solver output: 0=current output, 1=per-step summaries")
     ("diagnostics", options.diagnostics, options.diagnostics, "print per-step vector diagnostics: 0=no, 1=yes")
     ("bddcDumpLocalData", options.bddcDumpLocalData, options.bddcDumpLocalData, "dump global LHS/RHS and BDDC local data: 0=no, 1=yes")
@@ -940,8 +949,20 @@ int main(int argc, char* argv[])
      options.bddcRestrictCompressionBits, "restriction quantization bits: -1=inherit common, 1..32=override")
     ("bddcProlongateCompressionBits", options.bddcProlongateCompressionBits,
      options.bddcProlongateCompressionBits, "prolongation quantization bits: -1=inherit common, 1..32=override")
+    ("bddcRestrictZeroPreserving", options.bddcRestrictZeroPreserving,
+     options.bddcRestrictZeroPreserving, "experimental exact-zero symmetric restriction quantizer (0/1); prolongation unchanged")
+    ("bddcRestrictGroupSize", options.bddcRestrictGroupSize, options.bddcRestrictGroupSize,
+     "experimental producer restriction group size; 0 disables, requires exact-zero restriction")
     ("bddcRestrictionPasses", options.bddcRestrictionPasses, options.bddcRestrictionPasses,
      "restriction communication passes per compressed BDDC update: 1..16 (default 1)")
+    ("bddcCgDiagnostics", options.bddcCgDiagnostics, options.bddcCgDiagnostics,
+     "read-only restriction/scalar/conjugacy CSV diagnostics for non-SDC CG: 0=no, 1=yes")
+    ("bddcCgOriginalResidual", options.bddcCgOriginalResidual, options.bddcCgOriginalResidual,
+     "experimental CG rho from original local residual, using existing reduction: 0=legacy, 1=enabled")
+    ("bddcFlexibleCg", options.bddcFlexibleCg, options.bddcFlexibleCg,
+     "one-term truncated flexible CG (Polak-Ribiere); requires original-residual rho (0/1)")
+    ("bddcConstantCorrection", options.bddcConstantCorrection, options.bddcConstantCorrection,
+     "experimental constant-mode correction after CG convergence, followed by a true-residual recheck (0/1)")
     ("bddcCompressionMinInterfaceSize", options.bddcCompressionMinInterfaceSize,
      options.bddcCompressionMinInterfaceSize,
      "minimum scalar interface size for compressed BDDC transfer; 0=all")
@@ -998,6 +1019,9 @@ int main(int argc, char* argv[])
     throw std::runtime_error("bddcIterations must be at least 1");
   if (options.bddcTolerance <= 0.0)
     throw std::runtime_error("bddcTolerance must be positive");
+  if (options.potentialDiagnostics < 0 || options.potentialDiagnostics > 1 ||
+      (options.potentialDiagnostics && (options.sdc || options.bddcOperatorAudit)))
+    throw std::runtime_error("potentialDiagnostics must be 0 or 1; requires non-SDC, non-operator-audit solve");
   if (!std::isfinite(options.bddcRelativeTolerance) || options.bddcRelativeTolerance < 0.0)
     throw std::runtime_error("bddcRelativeTolerance must be finite and nonnegative");
   if (options.bddcRelativeTolerance > 0.0
@@ -1013,6 +1037,24 @@ int main(int argc, char* argv[])
   if (options.bddcConvergenceReport && !supportsConvergenceReport)
     throw std::runtime_error("bddcConvergenceReport requires --bddc 1 --sdc 0 --bddcUseCg 1 "
                              "--bddcRelativeTolerance > 0 --bddcOperatorAudit 0");
+  if (options.bddcCgDiagnostics < 0 || options.bddcCgDiagnostics > 1
+      || (options.bddcCgDiagnostics && !supportsConvergenceReport))
+    throw std::runtime_error("bddcCgDiagnostics must be 0 or 1 and requires --bddc 1 "
+                             "--sdc 0 --bddcUseCg 1 --bddcRelativeTolerance > 0 "
+                             "--bddcOperatorAudit 0");
+  if (options.bddcCgOriginalResidual < 0 || options.bddcCgOriginalResidual > 1
+      || (options.bddcCgOriginalResidual && !supportsConvergenceReport))
+    throw std::runtime_error("bddcCgOriginalResidual must be 0 or 1 and requires --bddc 1 "
+                             "--sdc 0 --bddcUseCg 1 --bddcRelativeTolerance > 0 "
+                             "--bddcOperatorAudit 0");
+  if (options.bddcConstantCorrection < 0 || options.bddcConstantCorrection > 1
+      || (options.bddcConstantCorrection && !supportsConvergenceReport))
+    throw std::runtime_error("bddcConstantCorrection requires non-SDC BDDC CG, positive true tolerance and no operator audit");
+  if (options.bddcFlexibleCg < 0 || options.bddcFlexibleCg > 1
+      || (options.bddcFlexibleCg && (!supportsConvergenceReport || !options.bddcCgOriginalResidual
+                                   || options.bddcConditionEstimate)))
+    throw std::runtime_error("bddcFlexibleCg requires non-SDC BDDC CG, original-residual rho, "
+                             "positive true tolerance, no operator audit and no fixed-PCG condition estimate");
   if (options.bddcConditionEstimate != 0 && options.bddcConditionEstimate != 1)
     throw std::runtime_error("bddcConditionEstimate must be 0 or 1");
   if (options.bddcConditionEstimate &&
@@ -1055,6 +1097,21 @@ int main(int argc, char* argv[])
       !EmiBddc::validDirectionalCompressionBits(options.bddcProlongateCompressionBits))
     throw std::runtime_error("Directional compression bits must be -1 (inherit) or 1..32");
 
+  if (options.bddcRestrictZeroPreserving!=0 && options.bddcRestrictZeroPreserving!=1)
+    throw std::runtime_error("bddcRestrictZeroPreserving must be 0 or 1");
+  if (options.bddcRestrictGroupSize<0 ||
+      (options.bddcRestrictGroupSize && !options.bddcRestrictZeroPreserving))
+    throw std::runtime_error("bddcRestrictGroupSize must be nonnegative and requires exact-zero restriction");
+  if (options.bddcRestrictZeroPreserving)
+  {
+    int const bits = options.bddcRestrictCompressionBits>0
+                   ? options.bddcRestrictCompressionBits : options.bddcCompressionBits;
+    if (!options.bddc || !options.bddcCompression || options.sdc || bits<2 || bits>32)
+      throw std::runtime_error("Zero-preserving restriction requires EMI compressed BDDC and 2..32 restriction bits");
+    if (options.bddcGraphLifting && !options.bddcGraphLiftingAfterQuantization)
+      throw std::runtime_error("Zero-preserving restriction requires lifting AFTER quantization");
+  }
+
   if (options.bddcRestrictionPasses < 1 || options.bddcRestrictionPasses > 16)
     throw std::runtime_error("bddcRestrictionPasses must be in 1..16");
   if (options.bddcRestrictionPasses != 1 &&
@@ -1064,6 +1121,14 @@ int main(int argc, char* argv[])
   OptionalMpiSession mpiSession(argc,argv,options.mpi != 0,options.quiet == 0);
   bool const outputRankZero = EmiBddc::mpiRankZero(options.mpi != 0);
   bool const detailedOutput = outputRankZero && !options.quiet;
+  if (outputRankZero && options.bddcRestrictGroupSize)
+    std::cout << "BDDC restriction groups: producer-order size="
+              << options.bddcRestrictGroupSize
+              << "; shared scales; descriptors included in byte counters\n";
+  if (outputRankZero && options.bddcRestrictZeroPreserving)
+    std::cout << "BDDC restriction quantizer: symmetric exact-zero (experimental); "
+              << "prolongation quantizer unchanged; restriction passes="
+              << options.bddcRestrictionPasses << "\n";
 #ifdef KASKADE_HAVE_MPI
   if (options.directBackend == "mumps-spd")
   {
@@ -1315,6 +1380,12 @@ int main(int argc, char* argv[])
   Matrix lhs = assembler.template get<Matrix>(false);
   Vector assembledSystemRhs(nDofs);
   assembler.rhs().write(assembledSystemRhs.begin());
+  if (options.potentialDiagnostics)
+  {
+    Vector zero(nDofs); zero=0.0;
+    EmiBddc::capturePotentialState(true,outputRankZero,options.mpi != 0,options.outputDir,
+                                  0,lhs,at_c<0>(u.data).coefficients(),zero,zero);
+  }
   phaseProfile.next(Phase::diagnostics);
   if (options.bddcAudit)
     EmiBddc::auditConstantMode(lhs,assembledSystemRhs,options.mpi != 0);
@@ -1724,6 +1795,10 @@ int main(int argc, char* argv[])
       at_c<0>(stepState.data).coefficients()[i] = stepVector[i];
 
     component<0>(u) += component<0>(stepState);
+
+    EmiBddc::capturePotentialState(options.potentialDiagnostics != 0,outputRankZero,
+                                  options.mpi != 0,options.outputDir,step+1,lhs,
+                                  at_c<0>(u.data).coefficients(),stepVector,rhsVector);
 
     phaseProfile.next(Phase::vtkOutput);
     if (writeVtkOnThisRank(options.writeVTK))

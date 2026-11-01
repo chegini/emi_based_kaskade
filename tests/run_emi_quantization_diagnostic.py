@@ -48,7 +48,13 @@ def write_summary(root, records):
                      f"{number(row.get('relative_residual')):>12s} "
                      f"{number(direct):>16s} {number(baseline):>12s} "
                      f"{str(round(row['net_logical_byte_savings_vs_uncompressed_percent'],2))+'%' if row.get('net_logical_byte_savings_vs_uncompressed_percent') is not None else '--':>15s}")
-    lines += ['', 'Uniform bit depths apply to BOTH restriction and prolongation.',
+    for row in records:
+        if row.get('restriction_bits') is not None:
+            lines.append(f"Precision {row['case']}: restriction={row['restriction_bits']}, "
+                         f"prolongation={row['prolongation_bits']}, "
+                         f"restriction_group_size={row.get('restriction_group_size',0)}")
+    lines += ['', 'Directional bit depths and producer restriction group sizes are recorded above and in summary.json.',
+              'Zero-preserving restriction mode is recorded per case in summary.json; prolongation retains its original quantizer.',
               'Rpasses counts restriction exchanges per solver update; additional passes refine feedback and cost extra communication.',
               'quantization-* rows disable graph lifting, zigzag, bit-length coding and Huffman.',
               'full-* rows enable integer graph lifting after quantization, zigzag, bit-length coding and Huffman.',
@@ -71,8 +77,18 @@ def main():
     parser.add_argument('--tolerance', type=float, default=1e-7)
     parser.add_argument('--iterations', type=int, default=300)
     parser.add_argument('--restriction-passes', type=int, default=1)
+    parser.add_argument('--prolongation-bits', type=int,
+                        help='override prolongation only; rows are labelled mixed precision')
+    parser.add_argument('--restriction-group-size', type=int, default=0,
+                        help='producer group size; requires zero-preserving restriction')
     parser.add_argument('--full-compression', action='store_true',
                         help='also run full post-quantization coding at each selected bit depth')
+    parser.add_argument('--zero-preserving-restriction', action='store_true',
+                        help='experimental symmetric exact-zero restriction; prolongation unchanged')
+    parser.add_argument('--cg-diagnostics', action='store_true',
+                        help='record restriction error, CG scalar error and adjacent conjugacy; adds validation work')
+    parser.add_argument('--restriction-range-capture', action='store_true',
+                        help='read-only pre-quantization buffer capture; adds file I/O, not MPI')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     if (not args.bits or len(set(args.bits)) != len(args.bits)
@@ -86,6 +102,12 @@ def main():
         parser.error('--tolerance must be finite and positive')
     if args.restriction_passes < 1 or args.restriction_passes > 16:
         parser.error('--restriction-passes must be in 1..16')
+    if args.zero_preserving_restriction and min(args.bits)<2:
+        parser.error('zero-preserving restriction requires 2..32 bits')
+    if args.prolongation_bits is not None and not 1<=args.prolongation_bits<=32:
+        parser.error('--prolongation-bits must be in 1..32')
+    if args.restriction_group_size<0 or (args.restriction_group_size and not args.zero_preserving_restriction):
+        parser.error('restriction groups require a nonnegative size and zero-preserving restriction')
     repo = args.repo.resolve()
     model = repo/'emiModel'
     if not model.is_file() or not os.access(model, os.X_OK):
@@ -101,6 +123,7 @@ def main():
         root = repo/root
     root.mkdir(parents=True, exist_ok=False)
     env = dict(os.environ, OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')
+    env.pop('KASKADE_RESTRICTION_CAPTURE', None)
     launcher = shlex.split(env.get('MPIEXEC','mpirun'))
     if not launcher:
         parser.error('MPIEXEC must identify an MPI launcher')
@@ -123,8 +146,13 @@ def main():
                 'steps':1, 'true_relative_tolerance':args.tolerance,
                 'restriction_passes':args.restriction_passes,
                 'max_iterations':args.iterations, 'executable_sha256':digest.hexdigest(),
-                'hostname':os.uname().nodename, 'uniform_precision':True,
+                'hostname':os.uname().nodename, 'uniform_precision':args.prolongation_bits is None,
+                'prolongation_bits_override':args.prolongation_bits,
+                'restriction_group_size':args.restriction_group_size,
                 'full_encoding_enabled':args.full_compression,
+                'cg_diagnostics':args.cg_diagnostics,
+                'restriction_range_capture':args.restriction_range_capture,
+                'zero_preserving_restriction':args.zero_preserving_restriction,
                 'byte_counter_scope':'logical application transfers including intra-rank exchanges'}
     (root/'environment.json').write_text(json.dumps(metadata,indent=2)+'\n')
     records = []
@@ -144,24 +172,41 @@ def main():
                    '--bddcCompression','1' if bits is not None else '0',
                    '--bddcCompressionBits',str(bits if bits is not None else 32),
                    '--bddcRestrictCompressionBits',str(bits if bits is not None else 32),
-                   '--bddcProlongateCompressionBits',str(bits if bits is not None else 32),
+                   '--bddcProlongateCompressionBits',str(
+                       (args.prolongation_bits or bits) if bits is not None else 32),
                    '--masterWorker','0','--bddcSplitInterfaces','0','--bddcInterfaceTypes','7',
                    '--bddcExcludeCornersFromCompression','1',
                    '--bddcMaterialAssembly','1','--bddcInterfaceAssembly','2']
         command = launcher+['--allow-run-as-root','-np',str(ranks),
                             '-x','OPENBLAS_NUM_THREADS','-x','OMP_NUM_THREADS']
+        case_env = dict(env)
+        capture_prefix = ''
+        if args.restriction_range_capture and bits is not None:
+            capture = str(folder/'restriction-buffers')
+            case_env['KASKADE_RESTRICTION_CAPTURE'] = capture
+            command += ['-x','KASKADE_RESTRICTION_CAPTURE']
+            capture_prefix = 'env '+shlex.quote('KASKADE_RESTRICTION_CAPTURE='+capture)+' '
         coding = '1' if full else '0'
         encoding_options = ['--bddcGraphLifting',coding,'--bddcGraphLiftingAfterQuantization',coding,
                             '--bddcZigzag',coding,'--bddcBitlength',coding,'--bddcHuffman',coding]
         command += common+options+encoding_options+['--dir',str(folder)]
-        (folder/'command.sh').write_text(shlex.join(command)+'\n')
+        if args.zero_preserving_restriction and bits is not None:
+            command += ['--bddcRestrictZeroPreserving','1']
+        if args.restriction_group_size and bits is not None:
+            command += ['--bddcRestrictGroupSize',str(args.restriction_group_size)]
+        if args.cg_diagnostics and not direct:
+            command += ['--bddcCgDiagnostics','1']
+        (folder/'command.sh').write_text(capture_prefix+shlex.join(command)+'\n')
         print('Running '+name+' ...', flush=True)
         with (folder/'run.log').open('w') as stream:
-            result = subprocess.run(command,cwd=repo,env=env,stdout=stream,stderr=subprocess.STDOUT)
+            result = subprocess.run(command,cwd=repo,env=case_env,stdout=stream,stderr=subprocess.STDOUT)
         text = (folder/'run.log').read_text(errors='replace')
-        row = {'case':name, 'restriction_bits':bits, 'prolongation_bits':bits,
+        row = {'case':name, 'restriction_bits':bits,
+               'prolongation_bits':(args.prolongation_bits or bits) if bits is not None else None,
+               'restriction_group_size':args.restriction_group_size if bits is not None else 0,
                'ranks':ranks, 'return_code':result.returncode, 'full_encoding':full,
                'status':'FAIL','reason':'','log':str(folder/'run.log')}
+        row['zero_preserving_restriction'] = bool(args.zero_preserving_restriction and bits is not None)
         if not direct:
             row['restriction_passes'] = args.restriction_passes if bits is not None else 1
         if direct:

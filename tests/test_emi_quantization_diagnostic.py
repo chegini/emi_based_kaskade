@@ -26,6 +26,7 @@ from pathlib import Path
 args=sys.argv[1:]
 def value(key):return args[args.index(key)+1]
 with open('capture.jsonl','a') as f:f.write(json.dumps(args)+'\\n')
+with open('range-env.jsonl','a') as f:f.write(json.dumps(os.environ.get('KASKADE_RESTRICTION_CAPTURE'))+'\\n')
 out=Path(value('--dir'))
 if value('--direct')=='1':
     print('Direct global residual step 1: abs=1e-18 rel=4e-16')
@@ -107,6 +108,62 @@ print('relative L2 after removing mean offset: 1e-9')
             self.assertEqual(last[last.index('--bddcRestrictionPasses')+1],'4')
             self.assertEqual(last[last.index('--bddcRestrictCompressionBits')+1],'8')
             self.assertEqual(last[last.index('--bddcProlongateCompressionBits')+1],'8')
+            observed = subprocess.run(
+                command[:-1]+['observed','--bits','16','--cg-diagnostics'],
+                cwd=repo,env=env,capture_output=True,text=True)
+            self.assertEqual(observed.returncode,0,observed.stdout+observed.stderr)
+            observed_calls=[json.loads(line) for line in (repo/'capture.jsonl').read_text().splitlines()][-3:]
+            self.assertNotIn('--bddcCgDiagnostics',observed_calls[0])
+            for row in observed_calls[1:]:
+                self.assertEqual(row[row.index('--bddcCgDiagnostics')+1],'1')
+                self.assertEqual(row[row.index('--bddcRelativeTolerance')+1],'1e-07')
+            self.assertTrue(json.loads((repo/'observed/environment.json').read_text())['cg_diagnostics'])
+            zero_result = subprocess.run(
+                command[:-1]+['zero-test','--bits','12','--full-compression',
+                              '--zero-preserving-restriction','--refine','2','--ranks','8'],
+                cwd=repo,env=env,capture_output=True,text=True)
+            self.assertEqual(zero_result.returncode,0,zero_result.stdout+zero_result.stderr)
+            zero_calls=[json.loads(line) for line in (repo/'capture.jsonl').read_text().splitlines()][-4:]
+            for row in zero_calls[:2]:
+                self.assertNotIn('--bddcRestrictZeroPreserving',row)
+            for row in zero_calls[2:]:
+                self.assertEqual(row[row.index('--bddcRestrictZeroPreserving')+1],'1')
+                self.assertEqual(row[row.index('--bddcRestrictionPasses')+1],'1')
+                self.assertEqual(row[row.index('--bddcProlongateCompressionBits')+1],'12')
+            zero_summary=json.loads((repo/'zero-test/summary.json').read_text())
+            self.assertEqual([r['zero_preserving_restriction'] for r in zero_summary],
+                             [False,False,True,True])
+            self.assertTrue(json.loads((repo/'zero-test/environment.json').read_text())['zero_preserving_restriction'])
+            range_result = subprocess.run(
+                command[:-1]+['ranges','--bits','16','--restriction-range-capture'],
+                cwd=repo,env=dict(env,KASKADE_RESTRICTION_CAPTURE='/should-not-leak'),
+                capture_output=True,text=True)
+            self.assertEqual(range_result.returncode,0,range_result.stdout+range_result.stderr)
+            range_env=[json.loads(line) for line in (repo/'range-env.jsonl').read_text().splitlines()][-3:]
+            self.assertEqual(range_env[:2],[None,None])
+            self.assertEqual(Path(range_env[2]),(repo/'ranges/quantization-16/restriction-buffers').resolve())
+            range_calls=[json.loads(line) for line in (repo/'capture.jsonl').read_text().splitlines()][-3:]
+            self.assertNotIn('KASKADE_RESTRICTION_CAPTURE',range_calls[0])
+            self.assertNotIn('KASKADE_RESTRICTION_CAPTURE',range_calls[1])
+            self.assertIn('KASKADE_RESTRICTION_CAPTURE',range_calls[2])
+            grouped_result = subprocess.run(
+                command[:-1]+['grouped','--bits','12','--full-compression',
+                              '--zero-preserving-restriction','--restriction-group-size','128',
+                              '--prolongation-bits','16'],
+                cwd=repo,env=env,capture_output=True,text=True)
+            self.assertEqual(grouped_result.returncode,0,grouped_result.stdout+grouped_result.stderr)
+            grouped_calls=[json.loads(line) for line in (repo/'capture.jsonl').read_text().splitlines()][-4:]
+            for row in grouped_calls[:2]:
+                self.assertNotIn('--bddcRestrictGroupSize',row)
+            for row in grouped_calls[2:]:
+                self.assertEqual(row[row.index('--bddcRestrictGroupSize')+1],'128')
+                self.assertEqual(row[row.index('--bddcRestrictCompressionBits')+1],'12')
+                self.assertEqual(row[row.index('--bddcProlongateCompressionBits')+1],'16')
+                self.assertEqual(row[row.index('--bddcRestrictionPasses')+1],'1')
+            grouped_summary=json.loads((repo/'grouped/summary.json').read_text())
+            self.assertEqual(grouped_summary[-1]['prolongation_bits'],16)
+            self.assertEqual(grouped_summary[-1]['restriction_group_size'],128)
+            self.assertNotIn('Uniform bit depths apply', (repo/'grouped/summary.txt').read_text())
             full_result = subprocess.run(
                 command[:-1]+['full','--bits','8','--restriction-passes','4',
                               '--full-compression','--ranks','8','--refine','3'],
@@ -144,6 +201,37 @@ print('relative L2 after removing mean offset: 1e-9')
             stopped_summary=json.loads((repo/'direct-failure/summary.json').read_text())
             self.assertEqual(len(stopped_summary),1)
             self.assertFalse((repo/'direct-failure/uncompressed-cg').exists())
+            # Exercise the audit driver with mock launches only. A failed
+            # single-pass 12-bit case must not prevent the refinement check.
+            testdir=repo/'tests'
+            testdir.mkdir()
+            for name in ['run_emi_quantization_diagnostic.py','collect_emi_scaling_smoke.py',
+                         'run_emi_cg_diagnostic_check.sh']:
+                shutil.copy2(runner.with_name(name),testdir/name)
+            fake.write_text(fake.read_text().replace(
+                "bad=compressed and value('--bddcCompressionBits')=='8' and not full",
+                "bad=compressed and (value('--bddcCompressionBits')=='8' or "
+                "(value('--bddcCompressionBits')=='12' and value('--bddcRestrictionPasses')=='1'))"))
+            driver=['bash',str(testdir/'run_emi_cg_diagnostic_check.sh')]
+            audit=subprocess.run(driver,cwd=repo,env=dict(env,OUTPUT='audit',RANKS='8',REFINE='2'),
+                                 capture_output=True,text=True)
+            self.assertEqual(audit.returncode,0,audit.stdout+audit.stderr)
+            self.assertTrue((repo/'audit/observer-parity.txt').is_file())
+            failed=json.loads((repo/'audit/b12-passes1/summary.json').read_text())
+            passed=json.loads((repo/'audit/b12-passes2/summary.json').read_text())
+            self.assertEqual(failed[-1]['status'],'FAIL')
+            self.assertEqual(passed[-1]['status'],'PASS')
+            # Deliberate instrumentation-dependent history change must stop
+            # the driver before the low-bit experiments.
+            fake.write_text(fake.read_text().replace(
+                'rel=0.2 if bad else 7e-8',
+                "rel=0.2 if bad else (8e-8 if '--bddcCgDiagnostics' in args else 7e-8)"))
+            changed=subprocess.run(driver,cwd=repo,
+                                   env=dict(env,OUTPUT='audit-changed',RANKS='8',REFINE='2'),
+                                   capture_output=True,text=True)
+            self.assertNotEqual(changed.returncode,0)
+            self.assertIn('convergence history changed',changed.stdout+changed.stderr)
+            self.assertFalse((repo/'audit-changed/b12-passes1').exists())
 
 
 if __name__=='__main__':
