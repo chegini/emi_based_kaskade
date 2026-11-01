@@ -2880,3 +2880,286 @@ Solver-wrapper times were 45.217 s (CG16), 42.254 s (uncompressed FGMRES),
 46.060 s (FGMRES16), and 47.955 s (split8). These single validation runs
 include diagnostic/output costs and establish no timing speedup. Raw output
 files remain outside source control; retain the named campaign separately.
+
+### Continue split8 validation on the existing weak/strong meshes
+
+After the ten-step 10cells campaign succeeds, use `--case weak_8_h16` and
+`--case strong_h16` with `--constant-split --steps 10`. The runner validates
+all saved 10cells control/candidate residual summaries and FGMRES traces as
+preflight evidence, then runs five **fresh** configurations for each new mesh.
+There is no residual/solution parity claim across different meshes. The default
+10cells workflow retains its first-step parity checks.
+
+Inputs come from the existing
+`../input_emi_mesh_blocks/weak_strong_scaling/{case}_kaskade` files, using
+`refine=0`, as in the earlier weak/strong campaigns. `--mesh-dir` can select
+another location for those same files; this runner does not generate meshes.
+The source physical parameters remain sigma_i=3, sigma_e=20, C_m=1, R=0.1,
+dt=0.01. Restart 30, 300 applications per step, eight ranks, true tolerance
+1e-7, one restriction pass, and the constant-split codec remain fixed.
+
+Only the Python runner changes for this extension; an executable already built
+for the successful ten-step 10cells campaign needs no rebuild. After syncing
+the updated runner, use:
+
+```bash
+(
+set -e
+cd /BDDC/emiModelBddcSdc_new_scratch
+for case_name in weak_8_h16 strong_h16; do
+  python3 tests/run_emi_fgmres_check.py \
+    --reference-campaign output/emi-fgmres-20261101T145954Z-13879 \
+    --constant-split --steps 10 --case "$case_name"
+done
+)
+```
+
+The loop stops if a case fails; all completed and partial logs remain in its
+new output directory. Each case has independent fresh direct/CG16/FGMRES16
+references and its own summary and per-step error CSV. As before, a failing
+control prevents running the candidate, and a failing candidate has no claimed
+communication savings. No weak/strong success is assumed from 10cells.
+
+### One-step 6/6 and 4/4 screening with the successful constant split
+
+`--bits 6 4 --constant-split --steps 1 --case 10cells` changes only the common,
+restriction and prolongation bit depths for the two new candidates. It retains
+FGMRES(30), a 300-application limit, one restriction pass, true tolerance 1e-7,
+exact-zero restriction, ungrouped affine constant-split prolongation, full
+coding, float32 metadata and existing exact-corner handling. It adds no
+precision fallback, refinement exchange or post-solve correction.
+
+The runner first executes fresh direct, CG16, uncompressed FGMRES, FGMRES16
+and split8 controls, requiring saved first-step parity for all five. A failed
+control stops screening. Then split6 and split4 run independently; failure of
+split6 does not prevent split4. A nonzero final exit status means at least one
+run failed. Failures retain partial residual traces and have no claimed savings.
+The report compares both interface and accounted bytes with uncompressed
+FGMRES, CG16, FGMRES16 and split8, so the baseline and scope remain explicit.
+
+After syncing the Python runner (no rebuild needed with the validated split8
+executable), run:
+
+```bash
+cd /BDDC/emiModelBddcSdc_new_scratch
+python3 tests/run_emi_fgmres_check.py \
+  --reference-campaign output/emi-fgmres-20261101T145954Z-13879 \
+  --constant-split --steps 1 --case 10cells --bits 6 4
+```
+
+Four-bit screening remains restricted to one step on 10cells. Six-bit ten-step
+validation is available below and requires a successful one-step reference.
+
+### Precision study: extended 4/4 cap and ten-step 6/6 validation
+
+The saved 4/4 trace in `emi-fgmres-20261101T200034Z-14562` decreases from
+1.0722646e-5 at application 200 to 1.4172615e-7 at application 300, with no
+increases in that interval. Short plateaus occur within restart cycles; this
+is evidence for a cap-only extension, not demonstrated convergence.
+
+Sync the updated `tests/run_emi_fgmres_check.py` and the new
+`tests/run_emi_precision_followup.py`, then run in the existing Kaskade container:
+
+```bash
+cd /BDDC/emiModelBddcSdc_new_scratch
+python3 tests/run_emi_precision_followup.py \
+  --reference-campaign output/emi-fgmres-20261101T145954Z-13879 \
+  --screening-campaign output/emi-fgmres-20261101T200034Z-14562
+```
+
+This creates a new directory, runs 4/4 from the original initial state with cap
+500, and requires exact CSV-prefix parity with the original 300-iteration run.
+It runs cap 1,000 only if fresh controls pass, the 500-cap trace reproduces the
+saved prefix, the failure is an iteration-limit exit, and the last 100 intervals
+decrease beyond relative 1e-8 numerical noise with the final residual the best
+in that interval (also allowing relative 1e-8 noise). This gate only schedules
+another experiment; the solver tolerance remains
+1e-7. Every extended run starts afresh, not from a checkpoint. Controls keep
+their original 300 cap. A 1,000 run must reproduce the full 500 trace.
+
+Six-bit ten-step validation then runs independently with fresh direct,
+uncompressed FGMRES, CG16, FGMRES16 and split8 controls. The first six-bit step
+must reproduce the successful one-step solution/residual trace. Every accepted
+step is checked against 1e-7 and a fresh direct solution. No rebuild is needed
+for these Python-only changes with the existing validated executable. The
+numerical algorithms, physics, float32 metadata, restart=30, one restriction
+pass and no-fallback policy are unchanged. Add `--dry-run` to save the plan and
+print commands without executing the solver.
+
+Standalone equivalents, if needed:
+
+```bash
+python3 tests/run_emi_fgmres_check.py \
+  --reference-campaign output/emi-fgmres-20261101T145954Z-13879 \
+  --screening-campaign output/emi-fgmres-20261101T200034Z-14562 \
+  --constant-split --case 10cells --steps 1 --bits 4 --four-bit-limit 500
+
+python3 tests/run_emi_fgmres_check.py \
+  --reference-campaign output/emi-fgmres-20261101T145954Z-13879 \
+  --screening-campaign output/emi-fgmres-20261101T200034Z-14562 \
+  --constant-split --case 10cells --steps 10 --bits 6
+```
+
+`tests/analyze_emi_fgmres_precision.py` reads campaigns without altering them
+and writes a new HTML report, CSV tables, SHA-256 input manifest, and PDF/SVG/PNG
+figures. It compares accepted snapshots with both direct and uncompressed
+FGMRES references at every step. It distinguishes interface bytes, accounted
+outer-plus-interface payload, unavailable network/communication-time data,
+failed runs, and one-step versus ten-step evidence. Requires NumPy and Matplotlib:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  python3 tests/analyze_emi_fgmres_precision.py
+```
+
+The default inputs include the November 1 uniform and mixed one-step screens,
+the successful 4/4 cap extension, and three ten-step campaigns (including 6/6
+for 10cells). To analyze newly completed runs, specify each campaign
+with repeatable `--campaign PATH` arguments (these replace the default list).
+The report does not estimate unmeasured codec error or MPI time, or certify
+physical accuracy from centered coefficient errors. Mixed-direction experiments
+are available as a subsequent one-step stage below.
+
+### Follow-up results and controlled mixed-direction screen
+
+The campaign `output/emi-precision-followup-20261101T202243Z-14983` establishes:
+
+- `b4-cap500`: 4/4 converges at application 301, true relative residual
+  5.778563937e-8. All 301 original observations (iterations 0 through 300)
+  reproduce exactly. Only `--bddcIterations` (300 to 500) and the output
+  directory changed. No 1,000-cap run was needed. This is one-step evidence.
+- `b6-ten-steps`: 6/6 passes all ten steps with application counts
+  `[31,32,32,32,32,33,32,33,32,33]`, totaling 322. Its 14,814,944 interface
+  bytes exceed matched split8's 13,686,424 by 8.25%. It saves 83.68% versus
+  uncompressed FGMRES's interface total, but 8/8 remains more efficient.
+- The completed 4/4 run sends 9,570,528 interface bytes, 10.17% more than
+  uncompressed FGMRES for one step. Convergence and communication efficiency
+  are distinct outcomes.
+
+The next experiment changes only **one directional precision argument** from
+the split8 control. With the updated Python driver (no numerical-code rebuild):
+
+```bash
+cd /BDDC/emiModelBddcSdc_new_scratch
+python3 tests/run_emi_fgmres_check.py \
+  --reference-campaign output/emi-precision-followup-20261101T202243Z-14983/b6-ten-steps \
+  --constant-split --case 10cells --steps 1 \
+  --pairs 8/6 6/8
+```
+
+The runner executes fresh direct, CG16, uncompressed FGMRES, FGMRES16, and
+split8 controls before R8/P6 and R6/P8. Controls must reproduce saved first-step
+solutions and convergence traces. Mixed modes preserve the generic precision
+default of 8; the explicit directional override changes only R or P. All
+zero/split policies, full-codec stages, restart=30, cap=300, tolerance=1e-7,
+float32 metadata and one restriction pass are identical to split8. Candidate
+failures are retained and do not prevent the other candidate; control failures
+stop the campaign. `--pairs` cannot be combined with `--bits` or a changed four-bit cap.
+Ten-step mixed validation is restricted to screened R6/P8 as described below. R8/P4 and R4/P8 are supported for later investigation,
+but are not part of the command above.
+
+The precision-analysis script now includes the successful 4/4 extension and
+6/6 ten-step results by default, checks the 4/4 prefix independently, and keeps
+the original failed 300-cap campaign as historical evidence. Reported solution
+errors compare both direct and uncompressed references. The three ten-step
+cases have separate figures for all FGMRES residual histories.
+
+### R6/P8 one-step result and ten-step validation
+
+`emi-fgmres-20261101T203933Z-15690` passed both mixed one-step candidates.
+R6/P8 kept 22 applications and used 1,150,088 interface bytes, saving 12.77%
+versus split8 and 86.76% versus uncompressed FGMRES. R8/P6 needed 32
+applications and 1,708,232 bytes, 29.56% more than split8. This directional
+comparison applies to this input and these quantizer policies.
+R6/P8 raw/centered errors versus direct were 3.996068e-4 / 3.748169e-9;
+its larger mean offset is retained, not treated as a harmless gauge shift.
+Its accounted total still exceeds FGMRES16 by 3.13%.
+
+Run the next validation with the updated Python driver; no rebuild is needed:
+
+```bash
+python3 tests/run_emi_fgmres_check.py \
+  --reference-campaign output/emi-precision-followup-20261101T202243Z-14983/b6-ten-steps \
+  --screening-campaign output/emi-fgmres-20261101T203933Z-15690 \
+  --constant-split --case 10cells --steps 10 \
+  --pairs 6/8
+```
+
+The driver reruns controls and R6/P8, checks exact first-step trace/solution
+parity against the successful screen, and requires every subsequent step to
+meet 1e-7. One pass, restart 30, cap 300, float32 metadata and numerical
+implementation are unchanged. Results go to a fresh directory. Ten-step
+R6/P8 results are recorded below.
+
+### R6/P8 validation on weak and strong meshes
+
+`emi-fgmres-20261101T205726Z-16111` passed all ten 10cells steps for
+R6/P8 with 229 applications (22, then nine steps of 23). The candidate sent
+12,028,992 full-compressed interface bytes: 86.75% less than uncompressed
+FGMRES, 51.28% less than compressed FGMRES16, and 12.11% less than split8.
+Accounted interface-plus-outer bytes were 978,080,428, 0.68% more than split8.
+Final direct-reference raw/centered relative errors were 5.289474e-5 and
+1.601946e-9. Convergence does not establish physical accuracy or network savings.
+
+The next stage keeps R6/P8, full compression, constant splitting, float32
+metadata, restart 30, cap 300, one restriction pass and tolerance 1e-7 fixed.
+Only the established mesh inputs/refinement change between cases. The runner
+requires a completed ten-step 10cells R6/P8 reference and checks its settings,
+all accepted residuals and all FGMRES traces before creating new results.
+It records reference command/log hashes. No first-step equality is imposed
+between different meshes. Fresh direct, CG16, uncompressed FGMRES, FGMRES16
+and split8 controls precede the mixed candidate for each mesh.
+
+After syncing the Python driver (no numerical rebuild), run:
+
+```bash
+cd /BDDC/emiModelBddcSdc_new_scratch
+for case_name in weak_8_h16 strong_h16; do
+  python3 tests/run_emi_fgmres_check.py \
+    --reference-campaign output/emi-fgmres-20261101T205726Z-16111 \
+    --constant-split --steps 10 --case "$case_name" \
+    --pairs 6/8 || printf 'Case %s failed; inspect its retained logs.\n' "$case_name"
+done
+```
+
+Each case writes a unique output directory. All ten steps must converge;
+failed candidates are not assigned communication savings. A failed control
+stops that case before the candidate. The shell loop still attempts the other
+case. Prior results are untouched. The completed Linux validation results
+are recorded below.
+
+### Completed R6/P8 ten-step checkpoint
+
+All 30 time steps passed the true relative residual tolerance 1e-7 across
+10cells, weak_8_h16 and strong_h16. Each used one restriction pass, FGMRES(30),
+full compression, constant-split prolongation and unchanged float32 metadata.
+These PDE campaigns were run by the user in the Linux Kaskade container.
+
+| Case | Campaign under output/ | Applications | Interface bytes | Interface saving vs uncompressed FGMRES | Interface saving vs split8 |
+|---|---|---:|---:|---:|---:|
+| 10cells | emi-fgmres-20261101T205726Z-16111 | 229 | 12,028,992 | 86.75% | 12.11% |
+| weak_8_h16 | emi-fgmres-20261101T210711Z-16464 | 373 | 7,023,040 | 78.93% | 6.94% |
+| strong_h16 | emi-fgmres-20261101T211157Z-16694 | 470 | 101,559,440 | 73.63% | 5.80% |
+
+The totals cover ten steps, including all extra applications and packet metadata.
+R6/P8 is mixed precision, not uniform six-bit communication. Accounted
+interface-plus-outer totals were 978,080,428 / 141,010,796 / 1,364,359,440
+bytes, respectively: 0.68% / 1.41% / 0.91% MORE than matched split8. Thus
+interface savings do not imply lower accounted total or measured network traffic.
+
+Final raw / mean-centered relative coefficient errors against direct:
+
+- 10cells: 5.289474e-5 / 1.601946e-9.
+- weak_8_h16: 1.603363e-4 / 3.351779e-9.
+- strong_h16: 1.950395e-4 / 2.803261e-9.
+
+Mean offsets dominate the raw errors; centering remains diagnostic only. These
+results establish convergence on the tested cases, not physical-accuracy
+certification or general convergence guarantees. Runtime measurements include
+validation/output and are not replicated performance benchmarks. The analysis
+script's default campaign selection retains the earlier precision-screening
+cohort; its generated reports must not be mistaken for this newer checkpoint.
+
+Local checkpoint validation: 22 experiment-driver tests and the follow-up
+cap-decision test pass. The commit contains drivers, tests, analysis tooling
+and this documentation; generated campaigns, binaries and logs are not included.
