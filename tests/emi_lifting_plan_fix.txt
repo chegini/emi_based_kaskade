@@ -1,0 +1,64 @@
+Producer-owned integer lifting plans: focused Pepe validation
+
+Evidence: 20261104T174629Z-7635, 204 packets per phase. Packet bytes, metadata
+and decoded transformed symbols agreed. Four directed interfaces had different
+prediction plans; four prolongation packets reconstructed wrong nodal integers.
+Every sender inverted its own symbols exactly. Restriction values in this first
+observation masked the differing plans. This is not evidence that restriction
+is generally immune.
+
+For a producer plan L_i, the required identity is L_i^{-1}(L_i(q))=q.
+The faulty path used L_j^{-1}(L_i(q)), with no reason for L_j=L_i.
+Domain setup now exports L_i in interface-relative ordering, including exact
+Scalar weights, and caches it at j. Integer arithmetic and quantization stay
+unchanged. Encoding still uses the producer's local plan. Graph changes or
+corner exclusions invalidate received plans and require new domain setup.
+
+Setup uses direct copies for rank-local neighbors and the existing allgather
+strategy for remote setup payloads. This is a correctness fix, not a claim of
+scalable setup. Logged exported_remote_bytes includes framing headers but omits
+collective replication and MPI framing; it is not measured network traffic.
+These bytes and setup time must be included in future end-to-end measurements.
+
+Run in the container:
+  bash tests/run_emi_lifting_plan_fix_check.sh
+
+This runs unit/transfer tests, forces an application rebuild, and replays saved
+Pepe CG16 with auditing off/on. It uses fresh output directories. The required
+reference is the successful quantization-only CG16 run (48 iterations), not the
+old broken full-codec trajectory. Configuration comparison allows only the five
+coding switches and output directory to differ. Success requires exit zero,
+identical convergence traces off/on and versus the quantization-only reference,
+and zero packet/plan/nodal/value discrepancies. No tolerance change or fallback.
+The audit captures the first packet per directed interface; trace parity covers
+the complete one-step solve. It does not validate other meshes or ten steps.
+
+Optional offline regression on the original audit:
+  mpicxx -std=c++20 -O2 -I/kaskade7 tests/test_bddc_lifting_plan.cpp -o /tmp/test_lifting
+  /tmp/test_lifting output/emi-transfer-audit-pepe-20261104T174629Z-7635/on/packets
+This reproduces old sender symbols and receiver inverses, then checks imported
+producer-plan inverses. It does not execute MPI or the complete solver.
+
+Local validation completed on the mounted source (2026-11-04):
+- clang++ C++20 -O2 -Wall -Wextra -Werror: standalone plan regression passed.
+- All 408 saved packets replayed with the production integer transform helper:
+  8 unequal endpoint plans, 4 reproduced old nodal mismatches, 0 mismatches
+  after importing the producer plan. Sender forward symbols and both old
+  sender/receiver inverses were reproduced exactly.
+- Actual transfer headers compiled and transfer-consistency tests passed using
+  minimal local Dune vector stubs (not the full Dune library): differing endpoint
+  graphs, 8/12/16/24/32 bits, corner exclusions, grouping, both R/P directions,
+  and counted packet bytes. Existing Quantizer override warning remains.
+- Eight Python packet-audit tests passed; shell wrappers passed bash -n.
+- The offline replay alone makes no solver convergence or network-speedup claim.
+
+User-run Linux container validation (2026-11-04):
+output/emi-transfer-audit-pepe-20261104T180700Z-7775
+The full Dune/MPI application rebuilt successfully. Pepe CG16 exited normally
+with audit off and on, converging in 48 iterations to a true relative residual
+of 7.7116197620069874e-08. The complete residual traces agreed with each other
+and with the saved quantization-only reference. All 204 first-packet records
+per direction agreed at every audited stage, including the prediction plans,
+nodal codes and reconstructed values. No stage records were missing.
+Producer-plan repair validation: PASS. This establishes the one-step Pepe CG16
+repair; no multi-step, other-precision or scaling claim follows from this audit.

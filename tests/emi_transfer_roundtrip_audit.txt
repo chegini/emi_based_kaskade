@@ -1,0 +1,43 @@
+Pepe first-packet transfer audit
+
+Current repair validation: bash tests/run_emi_lifting_plan_fix_check.sh
+Historical failure replay: bash tests/run_emi_transfer_roundtrip_audit.sh
+The historical mode requires parity with the old failing source trace and is
+expected to report a changed trace after the repair. The repair wrapper instead
+requires convergence and parity with the successful quantization-only reference.
+The description below documents the original diagnostic replay.
+Requires the mounted Kaskade bddcTransferAudit.hh and updated bddcSpaceTransfer.hpp.
+The wrapper compiles capture tests, rebuilds EMI, and replays the saved failing
+Pepe CG16 command with capture off/on. The command's tolerance, maximum calls,
+mesh, physics, quantizer, coding stages and solver settings are preserved.
+No solver or compression algorithm is changed. No precision fallback or extra
+restriction pass is introduced. Only output directories and the diagnostic
+environment variable differ. Outputs are fresh; no previous results are removed.
+
+KASKADE_TRANSFER_AUDIT_DIR enables a first-observation capture per phase,
+direction, subdomain, peer and stage. Off by default. The recorder writes only
+files, without additional MPI messages, codebook mutations or counter changes.
+It is intended here for scalar affine, ungrouped transfers with integer lifting
+and splitting disabled. Capture is per directed interface, not a global clock;
+use the controlled replay and check off/on parity before interpretation.
+
+Stages: wire is the whole packet including exact trailers/padding. Metadata is
+the decoded float32 scale/minimum. Send symbols are after integer lifting and
+mapping; receive symbols are after Huffman/bit-length reconstruction and before
+inverse lifting. Nodal compares producer integer codes before lifting against
+receiver codes after inverse lifting. Values compares producer codes decoded
+with float32 wire metadata against receiver dequantized nodal values.
+
+Only the first packet per directed interface is captured; this is not proof
+for all iterations. Unencoded or exact-only packets can have a wire record
+without all encoded-stage records and are reported as incomplete. Failures
+before delivery also give incomplete coverage. Expected solver failure is
+retained; packet MISMATCH is a diagnostic finding, not a convergence result.
+Diagnostic file I/O and temporary work must not be used as performance data.
+
+Lifting-plan audit: coarse/fine positions, prediction-neighbor offsets, neighbor
+positions and weights are also captured, in interface-relative numbering.
+The sender additionally applies its own inverse to its transformed integer
+vector and compares against its original nodal integers. This distinguishes a
+locally noninvertible transform from disagreement between endpoint plans.
+These shadow operations do not modify the live transformed/decoded arrays.

@@ -12,6 +12,22 @@
 using Transfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,
                                                          std::uint32_t,std::uint8_t>;
 
+// Two subdomains may induce different graphs on the same ordered interface.
+struct TestTopologyRow
+{
+  std::vector<int> columns;
+  struct Iterator
+  {
+    std::vector<int>::const_iterator it;
+    int index() const { return *it; }
+    Iterator& operator++() { ++it; return *this; }
+    bool operator!=(Iterator const& other) const { return it!=other.it; }
+  };
+  Iterator begin() const { return {columns.begin()}; }
+  Iterator end() const { return {columns.end()}; }
+};
+using TestTopology=std::vector<TestTopologyRow>;
+
 void checkClose(double a, double b, char const* phase)
 {
   double const tolerance = 64 * std::numeric_limits<double>::epsilon()
@@ -54,6 +70,13 @@ std::vector<double> checkTransfer(int bits, bool encoded, int exactDofs, bool ze
   if (exactDofs == 1) exact = {1};
   if (exactDofs == 3) exact = {0,1,2};
   a.setExcludedLocalDofs(exact); b.setExcludedLocalDofs(exact);
+  // Path versus star: different coarse/fine partitions for the same three nodes.
+  TestTopology graphA{{{1}},{{0,2}},{{1}}};
+  TestTopology graphB{{{1,2}},{{0}},{{0}}};
+  a.setGraphLiftingFromMatrix(graphA); b.setGraphLiftingFromMatrix(graphB);
+  a.prepareIntegerLiftingPlans(); b.prepareIntegerLiftingPlans();
+  b.importIntegerLiftingPlan(0,a.exportIntegerLiftingPlan(1));
+  a.importIntegerLiftingPlan(1,b.exportIntegerLiftingPlan(0));
   Transfer::XVector wa(3), wb(3);
   for (int i=0;i<3;++i)
   {

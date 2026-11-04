@@ -1,0 +1,96 @@
+CG/FCG constant-split experiment
+
+Motivation: on the matched 10cells one-step FGMRES tests, splitting reduced
+12-bit iterations from 37 to 20, and 16-bit iterations from 21 to 20. Raw
+solution error increased, so iteration reduction is not an accuracy guarantee.
+
+The existing transfer uses Q(W*(v-c*1)) + W*(c*1), with the same float32
+producer constant c at both ends. In exact arithmetic its transfer error is
+Q(W*(v-c*1)) - W*(v-c*1). This can reduce the quantization range when v has
+a large constant component. It does not establish a fixed SPD preconditioner.
+
+This change only opens an explicit application configuration gate. Kaskade
+transfer code, CG/FCG recurrences, and nonpositive-rho breakdown checks are
+unchanged. Default configurations remain unchanged. The opt-in is restricted
+to one non-SDC step, uniform 4, 6, 8, 12, 16, 20, 24 or 32-bit affine quantization, one restriction
+pass, true relative tolerance 1e-7, original-residual rho, and no post-solve
+correction, fallback or extra diagnostics. The runner retains a 300-call cap.
+
+Run on the container, after the source files have synchronized:
+  bash tests/run_emi_cg_split_check.sh --case 10cells --solvers cg fcg
+
+With the default --bits 16 12, this rebuilds EMI and launches ten runs: two uncompressed controls and eight
+compressed runs (two solvers, two precisions, split off/on). Output directories
+are fresh and previous results are retained. Accuracy is compared to each
+solver's own fresh uncompressed control; there is no raw-error acceptance
+threshold. CG16 also checks saved first-step parity. Failures remain failures.
+
+Saved command lines, source hashes, binary hash, working-tree patch, revisions,
+thread settings and JSON metrics document each campaign. Interface bytes count
+logical deliveries including local deliveries; outer bytes are a collective
+payload model. Their sum excludes coarse, codebook, setup and framing traffic,
+and is not a network-traffic measurement. Timings are single validation runs,
+not a scaling or repeated timing benchmark. Full MPI validation runs on Linux.
+
+Extended precision sweep (same bit depth in R and P):
+  bash tests/run_emi_cg_split_check.sh --case pepe --solvers cg fcg fgmres --bits 12 16 20 24 32
+This launches 33 runs: three uncompressed controls and 30 compressed runs.
+To run only the new precisions, select --bits 20 24 32 (21 runs).
+The shell wrapper forwards these arguments to the Python runner. Previous
+commands retain their default 16/12-bit sweep. The extended application gate
+requires a rebuild, which the wrapper performs. No solver or codec algorithm
+is changed. 32-bit quantization remains lossy and is not an uncompressed control.
+
+Scaling-mesh checks use --case weak_8_h16 or --case strong_h16.
+Default saved campaigns are respectively emi-fgmres-20261101T210711Z-16464
+and emi-fgmres-20261101T211157Z-16694 under output/. Each case uses its own
+full-cg16 command as template, preserves all four mesh/region input files,
+refine=0, eight ranks and physical parameters, and changes the duration from
+ten steps to one. These are solver checks on scaling meshes, not scaling
+benchmarks. Historical first-step parity checks use each case's own saved
+CG16, uncompressed FGMRES and FGMRES16 controls. Fresh uncompressed controls
+still supply the solution-accuracy reference. --reference-campaign overrides
+the case's campaign root, which must contain its case subdirectory.
+
+Pipeline isolation (same runner, no numerical implementation changes):
+  bash tests/run_emi_cg_split_check.sh --case pepe --solvers cg fcg fgmres --bits 16 32 --pipeline quantization-only --split off
+--pipeline full remains the default. --pipeline quantization-only keeps affine
+R/P quantization and float32 scale/minimum metadata, but disables graph lifting
+(including post-quantization lifting), unsigned mapping, bit-length coding and
+Huffman. --split off disables the constant decomposition too; --split on or
+both can be used separately. Exact-corner and interface-exclusion settings
+are inherited from the saved source, unchanged. One R pass, tolerance and
+iteration limits are unchanged. All four cases support these switches.
+
+Quantization-only uses the existing unencoded nodal-symbol path, which puts
+one value in each double transmission slot, plus metadata and exact trailers.
+It does not pack each value into the selected number of bits. This isolates
+numerical effects, not low-bit bandwidth savings. Pipeline and splitting mode
+are saved explicitly in the manifest and per-run metrics. Historical compressed
+full-pipeline parity is not asserted for quantization-only runs; the selected
+uncompressed FGMRES historical control is still checked when available. All
+accuracy comparisons retain fresh uncompressed references for each solver.
+
+Older tests/run_emi_cg_diagnostic_check.sh is a separate 10cells-only CG audit:
+16-bit observer off/on parity, then 12-bit one/two restriction passes, with
+additional read-only CG diagnostics. It is not needed for pipeline isolation.
+
+8-bit extension (2026-11-04): --bits 8 now selects uniform R8/P8 for
+CG, FCG and FGMRES, with the existing split off/on comparisons. Both restriction
+and prolongation remain affine in this runner, including split runs. This differs
+from earlier low-bit campaigns that selected exact-zero restriction. No fallback,
+extra restriction pass, tolerance change or recurrence modification is added.
+The shell wrapper validates command-line options before compilation. The default
+precision list remains 16 12. New 8-bit convergence must be measured in the container.
+
+6-bit extension: --bits 6 selects uniform R6/P6 for the same three solvers and
+split off/on comparisons. Restriction and prolongation remain affine; earlier
+6-bit exact-zero-restriction campaigns are distinct configurations. Defaults,
+solver recurrences, tolerance 1e-7, 300-iteration cap and one restriction pass
+are unchanged. Acceptance of the configuration does not establish convergence.
+
+4-bit extension: --bits 4 selects uniform affine R4/P4 for CG, FCG and FGMRES,
+with splitting off/on. The tolerance remains 1e-7, the iteration cap remains
+300, and there is one restriction pass. Acceptance does not imply convergence.
+The earlier 301-iteration 4/4 result used exact-zero restriction and is not a
+matched baseline for this affine-restriction experiment.

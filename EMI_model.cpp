@@ -116,6 +116,7 @@ struct EmiOptions
   int bddcFgmresRestart = 30;
   int bddcPreconditionerProbe = 0;
   int bddcProlongateConstantSplit = 0;
+  int bddcCgConstantSplitExperiment = 0;
   int bddcConstantCorrection = 0;
   int bddcCompressionMinInterfaceSize = 0;
   int bddcCompressionThresholdInterfaceTypes = Kaskade::BDDC::EDGE;
@@ -1008,7 +1009,10 @@ int main(int argc, char* argv[])
     ("bddcPreconditionerProbe", options.bddcPreconditionerProbe, options.bddcPreconditionerProbe,
      "diagnostic only: apply BDDC once to the first normalized RHS, write v/z/Az, do not advance state; requires FGMRES")
     ("bddcProlongateConstantSplit", options.bddcProlongateConstantSplit, options.bddcProlongateConstantSplit,
-     "experimental float32 producer constant split; frozen probe or FGMRES validation (up to 10 steps) only")
+     "float32 producer constant split; FGMRES/probe or explicit one-step CG/FCG experiment")
+    ("bddcCgConstantSplitExperiment", options.bddcCgConstantSplitExperiment,
+     options.bddcCgConstantSplitExperiment,
+     "opt-in one-step CG/FCG split test: uniform 4, 6, 8, 12, 16, 20, 24 or 32 bits, affine grids, one R pass, tolerance 1e-7")
     ("bddcUseCg", options.bddcUseCg, options.bddcUseCg, "use CG in BDDC coarse solve path: 0=no, 1=yes")
     ("bddcConvergenceReport", options.bddcConvergenceReport, options.bddcConvergenceReport,
      "true-residual table and CSV: -1=automatic (default), 0=off, 1=on")
@@ -1106,14 +1110,16 @@ int main(int argc, char* argv[])
   if (options.bddcPreconditionerProbe<0 || options.bddcPreconditionerProbe>1 ||
       (options.bddcPreconditionerProbe && (!options.bddcFgmres || options.writeVTK)))
     throw std::runtime_error("bddcPreconditionerProbe requires FGMRES and writeVTK=0; this is not a time-step solve");
+  EmiBddc::validateCgConstantSplitExperiment(options);
   if (options.bddcProlongateConstantSplit<0 || options.bddcProlongateConstantSplit>1 ||
-      (options.bddcProlongateConstantSplit && (!options.bddcFgmres ||
+      (options.bddcProlongateConstantSplit && ((!options.bddcFgmres && !options.bddcCgConstantSplitExperiment) ||
        (!options.bddcPreconditionerProbe && (options.maximumNumberOfTimeSteps<1 ||
         options.maximumNumberOfTimeSteps>10)) ||
        !options.bddcCompression || options.bddcProlongateGroupSize ||
        options.bddcProlongateZeroPreserving ||
        (options.bddcGraphLifting && !options.bddcGraphLiftingAfterQuantization))))
-    throw std::runtime_error("Constant split requires a compressed frozen probe or FGMRES validation (1..10 steps) "
+    throw std::runtime_error("Constant split requires a compressed frozen probe, FGMRES validation (1..10 steps), "
+                             "or the explicit one-step CG/FCG experiment "
                              "with ungrouped affine nodal prolongation");
   if (options.bddcConditionEstimate != 0 && options.bddcConditionEstimate != 1)
     throw std::runtime_error("bddcConditionEstimate must be 0 or 1");
@@ -1197,6 +1203,9 @@ int main(int argc, char* argv[])
   OptionalMpiSession mpiSession(argc,argv,options.mpi != 0,options.quiet == 0);
   bool const outputRankZero = EmiBddc::mpiRankZero(options.mpi != 0);
   bool const detailedOutput = outputRankZero && !options.quiet;
+  if (options.bddcCgConstantSplitExperiment && outputRankZero)
+    std::cout << "BDDC CG/FCG constant-split experiment: one step; original-residual rho; "
+                 "unchanged recurrence and breakdown checks; convergence not guaranteed\n";
   if (outputRankZero && options.bddcProlongateGroupSize)
     std::cout << "BDDC prolongation groups: producer-order size=" << options.bddcProlongateGroupSize
               << "; float32 scale/minimum; descriptors included in byte counters\n";

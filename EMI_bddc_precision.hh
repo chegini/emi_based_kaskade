@@ -13,6 +13,44 @@ namespace EmiBddc
   }
 
   /**
+   * Validate the explicit one-step CG/FCG constant-split experiment.
+   *
+   * The existing transfer represents W*v as W*(v-c*1) + W*(c*1), and
+   * quantizes only the first term. Its transfer error is consequently
+   * Q(W*(v-c*1)) - W*(v-c*1). Reducing that error does not establish a
+   * linear or positive-definite preconditioner. CG/FCG recurrences and
+   * breakdown checks remain unchanged; convergence must be measured.
+   *
+   * Disabled by default. Existing FGMRES/probe validation is independent.
+   */
+  template <class Options>
+  void validateCgConstantSplitExperiment(Options const& options)
+  {
+    if (options.bddcCgConstantSplitExperiment < 0 || options.bddcCgConstantSplitExperiment > 1)
+      throw std::runtime_error("bddcCgConstantSplitExperiment must be 0 or 1");
+    if (!options.bddcCgConstantSplitExperiment)
+      return;
+    int const rBits = options.bddcRestrictCompressionBits > 0
+                   ? options.bddcRestrictCompressionBits : options.bddcCompressionBits;
+    int const pBits = options.bddcProlongateCompressionBits > 0
+                   ? options.bddcProlongateCompressionBits : options.bddcCompressionBits;
+    if (!options.bddc || options.sdc || options.direct || !options.bddcUseCg ||
+        options.bddcFgmres || options.bddcPreconditionerProbe ||
+        !options.bddcCgOriginalResidual || options.bddcOperatorAudit ||
+        options.bddcConditionEstimate || options.bddcConstantCorrection || options.masterWorker ||
+        !options.bddcProlongateConstantSplit || !options.bddcCompression ||
+        options.maximumNumberOfTimeSteps != 1 || options.bddcRestrictionPasses != 1 ||
+        options.bddcRelativeTolerance != 1e-7 || rBits != pBits ||
+        (rBits != 4 && rBits != 6 && rBits != 8 && rBits != 12 && rBits != 16 && rBits != 20 && rBits != 24 && rBits != 32) || options.bddcRestrictZeroPreserving ||
+        options.bddcProlongateZeroPreserving || options.bddcRestrictGroupSize ||
+        options.bddcProlongateGroupSize || options.bddcHistogram ||
+        options.bddcCgDiagnostics || options.bddcProlongationDiagnostics)
+      throw std::runtime_error("CG/FCG constant-split experiment requires compressed non-SDC CG, "
+          "original-residual rho, one time step, one restriction pass, tolerance 1e-7, "
+          "uniform 4, 6, 8, 12, 16, 20, 24 or 32-bit affine grids, split enabled and diagnostics/corrections disabled");
+  }
+
+  /**
    * Configure optional restriction/prolongation quantization overrides.
    * The default retains the existing common precision in both directions.
    * Mixed precision is a separate numerical configuration used to isolate
