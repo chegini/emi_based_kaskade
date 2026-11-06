@@ -42,6 +42,7 @@
 #include "EMI_bddc_condition.hh"
 #include "EMI_bddc_convergence.hh"
 #include "EMI_bddc_precision.hh"
+#include "EMI_bddc_step_schedule.hh"
 #include "EMI_bddc_cg_diagnostics.hh"
 #include "EMI_bddc_prolongation_diagnostics.hh"
 #include "EMI_potential_diagnostics.hh"
@@ -254,6 +255,14 @@ namespace EmiBddc
                 << "  SDC update/bookkeeping: " << sdcUpdate << "\n"
                 << "  algebraic adaptivity: " << adaptivity << "\n";
     }
+  };
+
+  // One ledger spans raw/compressed phases; setup is rebuilt once at the switch.
+  struct BddcRunAccounting
+  {
+    CompressionReport compression;
+    ProfileTimes profile;
+    OuterSolverTraffic outer;
   };
 
   template <class Matrix, class Vector>
@@ -1925,7 +1934,11 @@ State runBddcSdc(Functional& F,
                 Matrix const& globalMatrix,
                 size_t nDofs,
                 int steps,
-                Options const& options)
+                Options const& options,
+                int firstStep=0,
+                BddcRunAccounting* sharedAccounting=nullptr,
+                bool finalPhase=true,
+                int totalSteps=0)
   {
     using SemiLinearization = Kaskade::SemiLinearizationAtInner<Kaskade::SemiImplicitEulerStep<Functional>>;
     using Assembler = Kaskade::VariationalFunctionalAssembler<SemiLinearization>;
@@ -1945,8 +1958,12 @@ State runBddcSdc(Functional& F,
     Assembler assembler(spaces);
     auto zeroState(state);
     auto stepState(state);
-    CompressionReport compressionReport;
-    ProfileTimes profile;
+    BddcRunAccounting localAccounting;
+    auto& accounting=sharedAccounting ? *sharedAccounting : localAccounting;
+    auto& compressionReport=accounting.compression;
+    auto& profile=accounting.profile;
+    if (!totalSteps) totalSteps=firstStep+steps;
+    auto const histogramSteps=parseHistogramSteps(options.bddcHistogramSteps);
     zeroState *= 0.0;
     stepState *= 0.0;
 
@@ -2079,7 +2096,7 @@ State runBddcSdc(Functional& F,
     std::vector<double> globalStep(nDofs, 0.0);
     bool const rankZero = mpiRankZero(options.mpi != 0);
     bool const relativeStopping = options.bddcRelativeTolerance > 0.0;
-    OuterSolverTraffic outerTraffic;
+    auto& outerTraffic=accounting.outer;
     int outerRanks=1;
 #ifdef KASKADE_HAVE_MPI
     if (options.mpi != 0) MPI_Comm_size(MPI_COMM_WORLD,&outerRanks);
@@ -2167,8 +2184,50 @@ State runBddcSdc(Functional& F,
                 << "after interior elimination; fixed SPD preconditioner assumed, "
                 << "not the exact condition number of A\n";
 
-    for (int step = 0; step < steps; ++step)
+    for (int step = firstStep; step < firstStep+steps; ++step)
     {
+      if (!histogramSteps.empty())
+      {
+        bool const capture=std::binary_search(histogramSteps.begin(),histogramSteps.end(),step+1);
+        std::string const directory=capture ? options.outputDir+"/symbol-histograms/step"+
+                                                 std::to_string(step+1) : std::string{};
+        solver.setSymbolHistogramOutput(directory);
+        if (capture)
+        {
+          int ready=1;
+          if (rankZero)
+          {
+            try
+            {
+              std::filesystem::create_directories(directory);
+              auto const path=directory+"/metadata.txt";
+              if (std::filesystem::exists(path)) throw std::runtime_error("Histogram directory exists");
+              std::ofstream out(path);
+              out << std::setprecision(17)
+                  << "physical_step=" << step+1 << "\nstart_time=" << step*options.dt
+                  << "\nend_time=" << (step+1)*options.dt
+                  << "\nuncompressed_starting_steps=" << options.bddcUncompressedSteps
+                  << "\nsolver=" << (options.bddcFgmres ? "fgmres" : options.bddcFlexibleCg ? "fcg" : "cg")
+                  << "\nconstant_split=" << options.bddcProlongateConstantSplit
+                  << "\ngraph_lifting=" << options.bddcGraphLifting
+                  << "\ninteger_lifting=" << options.bddcGraphLiftingAfterQuantization
+                  << "\ncombined_lifting=" << options.bddcGraphLiftingBothOrders
+                  << "\nrestriction_bits=" << (options.bddcRestrictCompressionBits>0 ? options.bddcRestrictCompressionBits : options.bddcCompressionBits)
+                  << "\nprolongation_bits=" << (options.bddcProlongateCompressionBits>0 ? options.bddcProlongateCompressionBits : options.bddcCompressionBits)
+                  << "\nscope=directed packet symbols, including intra-rank transfers; exact trailers and training symbols excluded\n";
+              out.close();
+              ready=bool(out);
+            }
+            catch (std::exception const&) { ready=0; }
+          }
+#ifdef KASKADE_HAVE_MPI
+          if (options.mpi) MPI_Bcast(&ready,1,MPI_INT,0,MPI_COMM_WORLD);
+#endif
+          if (!ready) throw std::runtime_error("Cannot create fresh histogram metadata: "+directory);
+          if (rankZero)
+            std::cout << "BDDC packet histograms step " << step+1 << ": " << directory << '\n';
+        }
+      }
       double const time = step*options.dt;
       F.time(time);
       F.Mass_stiff(10);
@@ -2534,7 +2593,7 @@ State runBddcSdc(Functional& F,
         if (rankZero)
         {
           if (options.quiet)
-            std::cout << "BDDC step " << step+1 << "/" << steps
+            std::cout << "BDDC step " << step+1 << "/" << totalSteps
                       << ": iterations=" << solveCalls << " rel=" << measured.relative();
           else
             std::cout << "BDDC global residual step " << step+1
@@ -2552,7 +2611,7 @@ State runBddcSdc(Functional& F,
       }
       if (options.quiet && rankZero && !relativeStopping && !computeDiagnostics)
       {
-        std::cout << "BDDC step " << step+1 << "/" << steps
+        std::cout << "BDDC step " << step+1 << "/" << totalSteps
                   << ": iterations=" << solveCalls << " internal_norm=" << residual;
         if (!options.bddcConditionEstimate)
           std::cout << "\n";
@@ -2608,7 +2667,7 @@ State runBddcSdc(Functional& F,
                             boost::fusion::at_c<0>(state.data).coefficients(),stepVector,rhs);
       if (verbose && rankZero && !options.quiet)
       {
-        std::cout << "BDDC step " << step+1 << "/" << steps
+        std::cout << "BDDC step " << step+1 << "/" << totalSteps
                   << ": iterations=" << solveCalls;
         if (relativeStopping)
           std::cout << ", true relative residual=" << trueResult.measured.relative() << "\n";
@@ -2617,7 +2676,7 @@ State runBddcSdc(Functional& F,
       }
     }
 
-    if (options.bddcConstantCorrection && rankZero)
+    if (finalPhase && options.bddcConstantCorrection && rankZero)
     {
       int ranks=1;
 #ifdef KASKADE_HAVE_MPI
@@ -2627,10 +2686,10 @@ State runBddcSdc(Functional& F,
       // measurement per step. Logical root-to-peer deliveries, not wire bytes.
       std::cout << "BDDC constant correction additional broadcast payload bytes: "
                 << 4ULL*sizeof(double)*static_cast<unsigned long long>(ranks-1)
-                     *static_cast<unsigned long long>(steps) << "\n";
+                     *static_cast<unsigned long long>(totalSteps) << "\n";
     }
     // The retained solver reports cumulative traffic. Add it once at the end.
-    if (rankZero)
+    if (finalPhase && rankZero)
       std::cout << "BDDC outer solver logical payload bytes: " << outerTraffic.bytes
                 << " collectives=" << outerTraffic.collectives << '\n';
     if (options.bddcCompressionReport)
@@ -2641,9 +2700,9 @@ State runBddcSdc(Functional& F,
         compressionReport.addUncompressed(solver.traffic(),options.mpi != 0);
     }
 
-    if (options.profile && !options.quiet)
+    if (finalPhase && options.profile && !options.quiet)
       profile.print("BDDC");
-    if (options.bddcCompressionReport)
+    if (finalPhase && options.bddcCompressionReport)
       compressionReport.printGlobal("BDDC",options.mpi != 0,!options.quiet);
     return state;
   }

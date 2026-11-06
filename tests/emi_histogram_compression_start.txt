@@ -1,0 +1,133 @@
+Selected physical-step histograms after uncompressed starting steps
+==================================================================
+
+Scope
+-----
+Non-SDC EMI BDDC only. The initial state evolves normally through N steps
+with the ordinary, uncompressed SpaceTransfer. The next step uses compressed
+transfers, starting from the last accepted physical state. This is one
+continuous physical simulation, not a restart from the initial excitation.
+Each timestep still solves its own correction equation; we do not carry
+old Krylov vectors into the next linear solve.
+
+The transfer type is a compile-time parameter. Consequently the switch
+constructs a second BDDC solver and refactors its subdomains/coarse problem
+once. Physical time, state, output numbering and cumulative traffic/profile
+accounting continue across that switch. This extra setup is included in the
+reported time. It is not a steady-state compression timing measurement.
+
+Application options
+-------------------
+  --bddcCompression 1 --bddcUncompressedSteps 5
+
+Steps 1..5 use raw BDDC. Step 6 and subsequent steps use the requested
+compression settings. The default N=0 preserves compression from step 1.
+N >= the total step count produces an entirely raw run. The final time and
+maximumNumberOfTimeSteps must permit the requested physical steps.
+
+  --bddcHistogramSteps 6,10,20
+
+Only physical steps 6, 10 and 20 record actual packet symbols. They are not
+Krylov iteration numbers, intervals, or extra solves. The executable accepts
+ONE comma-separated string (a quoted space-separated string also works).
+Selected steps must exist and occur after the raw phase. An empty selection
+disables capture. Switching remains available with capture disabled, so the
+observer can be validated without changing the numerical experiment.
+
+Leave the legacy --bddcHistogram at 0. It is a different codebook-training
+observer which can overwrite its older output. The two histogram modes may
+not be combined. The new selection itself enables the new observer.
+
+Selected-step capture currently supports scalar uint32 affine 2..24-bit
+quantization, both directions, full zigzag/bit-length/Huffman coding, no
+grouping, zero-preserving quantizers or size thresholds. Exact corners and
+constant-split prolongation remain supported. Unsupported combinations are
+rejected rather than silently changing their codec.
+
+Existing solver validation gates remain in force: CG/FCG plus constant split
+is a one-step experiment; FGMRES plus split permits at most 10 physical steps.
+For a 20-step histogram experiment, use split off until its longer split
+validation is explicitly extended. Scheduling does not relax either gate.
+
+Output and interpretation
+-------------------------
+  symbol-histograms/step6/metadata.txt
+  symbol-histograms/step6/subdomain<ID>/restrict-exchange<N>-neighbor<ID>.csv
+  symbol-histograms/step6/subdomain<ID>/prolongate-exchange<N>-neighbor<ID>.csv
+
+Each packet is retained. Producer IDs are global subdomain IDs, not MPI ranks.
+R/P counters are independent and restart in each selected physical-step
+directory. They count exchanges, including setup/initial/preconditioner
+exchanges within that step; they are not necessarily Krylov iteration IDs.
+Fresh output directories are required; packet files cannot be overwritten.
+The MPI ranks must see the same output filesystem, as for existing diagnostics.
+
+CSV stages:
+  quantized_input: actual quantizer output codes entering the optional integer
+                   transform; role is nodal or floating-transform coefficient.
+  raw:            signed fine integer details and unsigned coarse codes for
+                   after/both; quantized coefficient codes for before.
+  unsigned:       symbols after integer-detail zigzag mapping, if applicable.
+  bitlength:      actual bit-length symbols passed to Huffman encoding.
+
+These are discrete symbol distributions, not floating wavelet amplitudes or
+Sobolev norms. Corner values, constant-split offsets, packet headers and
+synthetic codebook-training symbols are excluded from symbol populations.
+Repeated values are counted each time sent to a neighbor, including intra-rank
+transfers. The histograms describe this implementation's logical directed
+packets, not inter-node network measurements. Codebook retraining policy is
+unchanged. Capture adds file I/O and must be disabled for performance runs.
+
+A fallback packet is marked huffman_encoded=0. Its quantized_input stage is
+the uncoded quantized payload; later stages describe the candidate encoding,
+not transmitted Huffman symbols. The analysis reports fallback counts.
+Empirical entropy is per listed stage/role; it is not a complete byte-size
+prediction (tails, headers, exact values, padding and codebooks also matter).
+
+Validation runner
+-----------------
+Use feature/histogram-compression-start in both EMI and Kaskade. Inside the
+existing Open MPI container, with /kaskade7 and /BDDC mounted:
+
+  bash tests/run_emi_histogram_start_check.sh
+
+Defaults: 10cells, no refinement, 2 ranks, 3 steps, first 2 raw, histogram
+at step 3, FGMRES with split, 16 bits, transform before quantization.
+This deliberately small check runs five matched cases:
+  direct reference; ordinary raw BDDC; scheduled entirely raw BDDC;
+  scheduled raw/compressed BDDC without capture; same run with capture.
+
+After this passes, the requested Pepe check is:
+
+  bash tests/run_emi_histogram_start_check.sh \
+    --case pepe --ranks 2 --steps 6 --uncompressed-steps 5 \
+    --histogram-steps 6 --bits 16 --solver fgmres --split on \
+    --transform-order before
+
+The Python runner also accepts --histogram-steps 6 10 20 (nargs) and translates
+it into the executable's comma-separated string. For that example add
+--steps 20 --uncompressed-steps 5 --split off. Orders after and both are
+selectable. For a compression-from-step-1 check use --uncompressed-steps 0.
+The wrapper is for single-node validation; it does not submit cluster jobs.
+
+The runner checks normal completion and true residual tolerance at every
+step, exact full-precision snapshot equality throughout the raw prefix,
+exact all-raw scheduled/baseline parity, and exact capture-on/off snapshots,
+convergence traces, iteration counts and logical traffic. Snapshots include
+unique algebraic DOFs, RHS, correction and residual, avoiding rounded VTK
+exports.
+The first compressed step must also have exactly the same assembled RHS as
+the corresponding raw reference step, checking continuity at the switch.
+Solution errors against direct and raw BDDC are reported per step
+in summary.json: raw/centered relative Euclidean L2, absolute L2, max error
+and mean offset. No hidden solution-error acceptance threshold is applied.
+
+The captured run also contains histogram-counts.csv, aggregated by physical
+step, R/P, stage and role, and summary.json contains per-stage empirical
+entropy. Solver convergence, observer parity and scientific acceptability
+of the compressed solution are separate questions.
+
+Local transfer tests exercise real production transfer headers with synthetic
+interfaces, before/after/both, split off/on, exact corners, repeated R/P
+exchanges and identical observer-on/off wire packets/reconstructions. A full
+application/MPI run is still required in the Linux Kaskade environment.

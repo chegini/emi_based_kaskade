@@ -72,7 +72,18 @@ int main() {
   serial.addUncompressed(traffic);
   serial.addUncompressed(traffic);
   if(serial.originalSentBytes!=800 || serial.sentBytes!=800) return 2;
-  std::cout << "Compression report checks passed (8 MPI ranks, serial accumulation).\n";
+  globalRaw=globalWire=0;
+  for (simulatedRank=0;simulatedRank<8;++simulatedRank) {
+    CompressionReport phased, compressed;
+    phased.addUncompressed(traffic,true);
+    compressed.originalSentBytes=100;
+    compressed.sentBytes=20;
+    phased.add(compressed);
+    globalRaw+=phased.originalSentBytes;
+    globalWire+=phased.sentBytes;
+  }
+  if(globalRaw!=1200 || globalWire!=560) return 3;
+  std::cout << "Compression report checks passed (8 MPI ranks, serial and raw/compressed phase accumulation).\n";
 }
 '''
     with tempfile.TemporaryDirectory(prefix='emi-report-check-') as folder:

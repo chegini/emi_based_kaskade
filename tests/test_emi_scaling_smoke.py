@@ -28,6 +28,19 @@ EMI model completed
 
 
 class Metrics(unittest.TestCase):
+    def test_explicit_multiple_setups_preserve_topology(self):
+        header = 'BDDC coarse interfaces: corners=1, edges=42, faces=32\n'
+        two = log(steps=3)+header
+        self.assertEqual(collect(two,3,8,0)['status'], 'failed')
+        result = collect(two,3,8,0,expected_solver_setups=2)
+        self.assertEqual(result['errors'], [])
+        self.assertEqual(result['coarse_interfaces'], dict(corners=1,edges=42,faces=32))
+        for bad in (log(steps=3), two+header, log(steps=3)+header.replace('edges=42','edges=43')):
+            self.assertEqual(collect(bad,3,8,0,expected_solver_setups=2)['status'], 'failed')
+        for invalid in (0,-1,1.5):
+            with self.assertRaises(ValueError):
+                collect(two,3,8,0,expected_solver_setups=invalid)
+
     def test_valid(self):
         result=collect(log(steps=2,compression=1),2,8,0)
         self.assertEqual(result["status"],"converged")
