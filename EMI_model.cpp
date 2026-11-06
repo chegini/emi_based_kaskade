@@ -128,6 +128,8 @@ struct EmiOptions
   int bddcHuffman = 1;
   int bddcBitlength = 1;
   int bddcHistogram = 0;
+  int bddcUncompressedSteps = 0;
+  std::string bddcHistogramSteps;
   int bddcCompressionReport = 1;
   int bddcIterations = 3000;
   int bddcInterfaceTypes = 7;
@@ -998,6 +1000,10 @@ int main(int argc, char* argv[])
     ("bddcHuffman", options.bddcHuffman, options.bddcHuffman, "use Huffman coding in compressed BDDC transfer: 0=no, 1=yes")
     ("bddcBitlength", options.bddcBitlength, options.bddcBitlength, "use bit-length/tail split before Huffman coding: 0=no, 1=yes")
     ("bddcHistogram", options.bddcHistogram, options.bddcHistogram, "write compressed BDDC symbol histograms below the output directory: 0=no, 1=yes")
+    ("bddcUncompressedSteps", options.bddcUncompressedSteps, options.bddcUncompressedSteps,
+     "initial physical steps with raw BDDC transfers, then continue compressed; 0 preserves existing behavior")
+    ("bddcHistogramSteps", options.bddcHistogramSteps, options.bddcHistogramSteps,
+     "packet histograms at selected one-based physical steps, e.g. 6,10,20; empty disables")
     ("bddcCompressionReport", options.bddcCompressionReport, options.bddcCompressionReport, "print aggregate BDDC transfer volume report: 0=no, 1=yes")
     ("bddcIterations", options.bddcIterations, options.bddcIterations, "maximum BDDC iterations per time step")
     ("bddcTolerance", options.bddcTolerance, options.bddcTolerance, "legacy BDDC internal search-direction energy-norm tolerance")
@@ -1302,6 +1308,10 @@ int main(int argc, char* argv[])
               << environment("OPENBLAS_NUM_THREADS")
               << ", OMP_NUM_THREADS=" << environment("OMP_NUM_THREADS") << "\n";
   }
+
+  int const scheduledSteps=static_cast<int>(std::ceil(options.finalTime/options.dt));
+  EmiBddc::validateStepSchedule(options,options.maximumNumberOfTimeSteps>0 ?
+      std::min(options.maximumNumberOfTimeSteps,scheduledSteps) : scheduledSteps);
 
   phaseProfile.next(Phase::meshLoading);
   VTKReader vtk(options.input);
@@ -1797,7 +1807,38 @@ int main(int argc, char* argv[])
     if (options.bddcCompression)
     {
       using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint32_t,std::uint8_t>;
-      u = EmiBddc::runBddc<CompressedTransfer>(F,spaces,u,uAll,bddcData,lhs,nDofs,steps,options);
+      if (!options.bddcUncompressedSteps)
+        u = EmiBddc::runBddc<CompressedTransfer>(F,spaces,u,uAll,bddcData,lhs,nDofs,steps,options);
+      else
+      {
+        EmiBddc::BddcRunAccounting accounting;
+        auto phases=EmiBddc::bddcStepPhases(steps,options.bddcUncompressedSteps);
+        for (std::size_t i=0;i<phases.size();++i)
+        {
+          auto const& phase=phases[i];
+          bool const last=i+1==phases.size();
+          if (outputRankZero)
+            std::cout << "BDDC transfer phase: steps " << phase.first+1 << ".."
+                      << phase.first+phase.count << "; "
+                      << (phase.compressed ? "compressed" : "uncompressed")
+                      << "; state retained; physical time=" << phase.first*options.dt << '\n';
+          if (phase.compressed)
+            u = EmiBddc::runBddc<CompressedTransfer>(F,spaces,u,uAll,bddcData,lhs,nDofs,
+                  phase.count,options,phase.first,&accounting,last,steps);
+          else
+          {
+            auto raw=options;
+            raw.bddcCompression=0;
+            raw.bddcProlongateConstantSplit=0;
+            raw.bddcCgConstantSplitExperiment=0;
+            raw.bddcHistogramSteps.clear();
+            raw.bddcRestrictionPasses=1;
+            u = EmiBddc::runBddc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(
+                  F,spaces,u,uAll,bddcData,lhs,nDofs,phase.count,raw,
+                  phase.first,&accounting,last,steps);
+          }
+        }
+      }
     }
     else
       u = EmiBddc::runBddc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,lhs,nDofs,steps,options);

@@ -10,9 +10,12 @@ import sys
 NUMBER = r"[+\-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+\-]?\d+)?"
 
 
-def collect(text, expected_steps, expected_ranks, exit_code, expected_tolerance=1e-7):
+def collect(text, expected_steps, expected_ranks, exit_code, expected_tolerance=1e-7,
+            *, expected_solver_setups=1):
     if not math.isfinite(expected_tolerance) or expected_tolerance <= 0:
         raise ValueError("Expected tolerance must be finite and positive")
+    if not isinstance(expected_solver_setups, int) or expected_solver_setups < 1:
+        raise ValueError("Expected solver setup count must be a positive integer")
     errors = []
     rows = re.findall(
         rf"^BDDC global residual step (\d+): abs=({NUMBER}) rel=({NUMBER}) "
@@ -48,8 +51,11 @@ def collect(text, expected_steps, expected_ranks, exit_code, expected_tolerance=
                     "partition shared DOF count", int)
     coarse = re.findall(r"^BDDC coarse interfaces: corners=(\d+), edges=(\d+), faces=(\d+)\s*$",
                         text, re.MULTILINE)
-    if len(coarse) != 1:
-        errors.append("Expected one set of coarse-interface counts")
+    coarse_valid = len(coarse) == expected_solver_setups and len(set(coarse)) == 1
+    if len(coarse) != expected_solver_setups:
+        errors.append(f"Expected {expected_solver_setups} set(s) of coarse-interface counts; found {len(coarse)}")
+    elif len(set(coarse)) != 1:
+        errors.append("Coarse-interface counts changed between solver setups")
     ranks = single(r"^Profile \(wall seconds, EMI end-to-end phases; (\d+) rank\(s\)\):$",
                    "phase-profile rank count", int)
     if ranks != expected_ranks:
@@ -70,7 +76,7 @@ def collect(text, expected_steps, expected_ranks, exit_code, expected_tolerance=
         "subdomains": subdomains,
         "partition_shared_dofs": shared,
         "coarse_interfaces": dict(zip(("corners","edges","faces"),map(int,coarse[0])))
-                             if len(coarse)==1 else None,
+                             if coarse_valid else None,
         "mpi_ranks": ranks,
         "iterations_per_step": [int(row[5]) for row in rows],
         "relative_residuals": [float(row[2]) if math.isfinite(float(row[2])) else None
