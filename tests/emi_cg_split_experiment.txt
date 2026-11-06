@@ -94,3 +94,32 @@ with splitting off/on. The tolerance remains 1e-7, the iteration cap remains
 300, and there is one restriction pass. Acceptance does not imply convergence.
 The earlier 301-iteration 4/4 result used exact-zero restriction and is not a
 matched baseline for this affine-restriction experiment.
+
+Rizzo mesh: --case rizzo uses the existing Pepe CG command as a settings template
+and explicitly replaces all four inputs with ../input_emi_mesh/rizzo_combi_domi
+(.vtu, _extracellular.txt, _intracellular.txt, _excited.txt). Input existence is
+checked without reading mesh contents. Refinement remains zero, with eight MPI
+ranks, dt=0.01 and one step. Physical coefficients and solver settings are
+preserved and checked. Fresh uncompressed Rizzo controls provide the accuracy
+reference; no Pepe solution or convergence history is used as a Rizzo baseline.
+Use --source-run to override the command template if needed. Effective input
+paths are recorded separately from the original template in the manifest.
+Example:
+  bash tests/run_emi_cg_split_check.sh --case rizzo --solvers cg fcg fgmres --bits 12 16 --pipeline full --split both
+
+Explicit mode selection (2026-11-05):
+  bash tests/run_emi_cg_split_check.sh --case pepe --mpi-ranks 2 --modes cg12-split cg16-split cg24-split
+
+--modes selects individual solver/precision/split combinations and adds a fresh
+uncompressed control for each requested solver. The example runs uncompressed-cg,
+cg12-split, cg16-split and cg24-split, in that order. CG-split keeps flexible CG
+disabled. Mixed selections such as cg12-split fcg16 fgmres24-split are supported.
+Do not combine --modes with --solvers, --bits or --split; the original Cartesian
+sweep remains available through those options when --modes is omitted.
+
+--mpi-ranks defaults to 8 and can override the rank count for every supported
+case. Historical trace parity is disabled when the requested rank count differs
+from the saved template; fresh same-solver controls still run at the requested
+rank count. Mesh, physics, tolerance and iteration limit remain unchanged.
+--validate-only prints the planned modes and checks arguments without building
+or running experiments; it does not validate source files or numerical results.

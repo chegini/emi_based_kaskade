@@ -15,7 +15,7 @@ REFERENCE_CAMPAIGNS={
 
 
 def reference_directory(case, campaign=None):
-    if case=='pepe':return None
+    if case in ('pepe','rizzo','robin'):return None
     return Path(campaign or REFERENCE_CAMPAIGNS[case]).resolve()/case
 
 
@@ -30,6 +30,26 @@ def validate_scaling_source(case, command):
                        '--C_m':1,'--R':0.1,'--dt':0.01}.items():
         if command.count(flag)!=1 or float(command[command.index(flag)+1])!=value:
             raise ValueError('Unexpected scaling configuration: '+flag)
+
+
+MESH_INPUT_SUFFIXES={'--input':'.vtu','--extra_set':'_extracellular.txt',
+                     '--intra_set':'_intracellular.txt','--excited':'_excited.txt'}
+
+
+def configure_mesh_case(case, command, mesh_directory):
+    """Select all four inputs for the requested mesh; retain the template's numerical settings."""
+    if case not in ('rizzo','robin'):return list(command)
+    result=list(command)
+    for flag,suffix in MESH_INPUT_SUFFIXES.items():
+        if result.count(flag)!=1:raise ValueError('Expected exactly one '+flag)
+        path=(Path(mesh_directory)/(case+'_combi_domi'+suffix)).resolve()
+        if not path.is_file():raise ValueError('Missing mesh input: '+str(path))
+        result[result.index(flag)+1]=str(path)
+    for flag,wanted in {'--refine':0,'-np':8,'--sigma_i':3,'--sigma_e':20,
+                        '--C_m':1,'--R':0.1,'--dt':0.01}.items():
+        if result.count(flag)!=1 or float(result[result.index(flag)+1])!=wanted:
+            raise ValueError('Unexpected mesh template configuration: '+flag)
+    return result
 
 
 def digest(path):
@@ -87,6 +107,33 @@ def experiment_modes(solvers,bits,split):
         f'{s}{b}{suffix}' for b in bits for s in solvers for suffix in suffixes]
 
 
+def selected_experiment_modes(solvers, bits, split, requested=None):
+    """Explicit candidates plus fresh same-solver controls, or the legacy sweep."""
+    if requested is None:
+        return experiment_modes(solvers, bits, split)
+    if not requested:
+        raise ValueError('At least one explicit mode is required')
+    if len(requested) != len(set(requested)):
+        raise ValueError('Duplicate explicit modes')
+    controls = []
+    candidates = []
+    for mode in requested:
+        if mode.startswith('uncompressed-'):
+            solver = mode.removeprefix('uncompressed-')
+            if solver not in ('cg', 'fcg', 'fgmres'):
+                raise ValueError('Unknown mode: ' + mode)
+        else:
+            match = re.fullmatch(r'(cg|fcg|fgmres)(4|6|8|12|16|20|24|32)(-split)?', mode)
+            if not match:
+                raise ValueError('Unknown mode: ' + mode)
+            solver = match[1]
+            candidates.append(mode)
+        control = 'uncompressed-' + solver
+        if control not in controls:
+            controls.append(control)
+    return controls + candidates
+
+
 def residual_tail(out):
     # Trace files remain useful when MPI abort truncates stdout; do not turn a
     # partial trace into a completed-run or successful-convergence claim.
@@ -108,11 +155,13 @@ def residual_tail(out):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--case',choices=('10cells','pepe','weak_8_h16','strong_h16'),default='10cells')
+    p.add_argument('--case',choices=('10cells','pepe','rizzo','robin','weak_8_h16','strong_h16'),default='10cells')
     p.add_argument('--reference-campaign',type=Path,help='Override the saved reference campaign selected for this case')
-    p.add_argument('--source-run',type=Path,help='Optional Pepe CG source command; other cases use their saved reference campaigns')
+    p.add_argument('--source-run',type=Path,help='Optional CG command template for Pepe/Rizzo/Robin; other cases use saved reference campaigns')
     p.add_argument('--repo',type=Path,default=Path.cwd())
     p.add_argument('--kaskade',type=Path,default=Path('/kaskade7'))
+    p.add_argument('--modes',nargs='+',metavar='MODE',
+                   help='Explicit combinations, e.g. cg12-split fcg16 fgmres24-split; required uncompressed controls are added. Cannot combine with --solvers/--bits/--split.')
     p.add_argument('--solvers',nargs='+',choices=('cg','fcg','fgmres'),default=['cg','fcg'])
     p.add_argument('--bits',nargs='+',type=int,choices=(4,6,8,12,16,20,24,32),default=[16,12],
                    help='Uniform R/P bit depths, in run order (default: 16 12)')
@@ -120,15 +169,24 @@ def main():
                    help='Full coding pipeline or affine quantization with all transform/coding stages off')
     p.add_argument('--split',choices=('off','on','both'),default='both',
                    help='Constant-split prolongation selection (default: paired off/on)')
+    p.add_argument('--mpi-ranks',type=int,default=8,
+                   help='MPI ranks for every run (default: 8); changed ranks disable historical trace parity')
     p.add_argument('--validate-only',action='store_true',help='Check arguments without building or running experiments')
     args=p.parse_args();repo=args.repo.resolve()
-    if args.case!='pepe' and args.source_run:p.error('--source-run is only for Pepe')
+    if args.modes is not None and any(a.split('=',1)[0] in ('--solvers','--bits','--split') for a in sys.argv[1:]):
+        p.error('--modes cannot be combined with --solvers, --bits or --split')
+    try:planned_modes=selected_experiment_modes(args.solvers,args.bits,args.split,args.modes)
+    except ValueError as exc:p.error(str(exc))
+    if args.mpi_ranks < 1:p.error('--mpi-ranks must be positive')
+    if args.case not in ('pepe','rizzo','robin') and args.source_run:p.error('--source-run is only for Pepe/Rizzo/Robin')
     reference=reference_directory(args.case,args.reference_campaign)
-    source=(reference/'full-cg16' if args.case!='pepe' else
+    source=(reference/'full-cg16' if reference is not None else
             (args.source_run or Path('output/emi-step-histograms-20261104T143129Z-89/pepe-cg-r16-p16-off')).resolve())
     if len(set(args.solvers))!=len(args.solvers):p.error('Duplicate solvers')
     if len(set(args.bits))!=len(args.bits):p.error('Duplicate bit depths')
-    if args.validate_only:return 0
+    if args.validate_only:
+        print('Planned modes: '+', '.join(planned_modes),flush=True)
+        return 0
     sys.path.insert(0,str(repo/'tests'))
     from collect_emi_scaling_smoke import collect
     from run_emi_fgmres_check import saved_control
@@ -140,6 +198,11 @@ def main():
     try:validate_scaling_source(args.case,saved)
     except ValueError as exc:p.error(str(exc))
     source_command=list(saved)
+    try:saved=configure_mesh_case(args.case,saved,repo.parent/'input_emi_mesh')
+    except ValueError as exc:p.error(str(exc))
+    if saved.count('-np') != 1:p.error('Expected exactly one -np in source command')
+    source_mpi_ranks=int(saved[saved.index('-np')+1])
+    saved[saved.index('-np')+1]=str(args.mpi_ranks)
     def value(flag):return saved[saved.index(flag)+1]
     old_controls={}
     control_names={'cg16':'full-cg16','uncompressed-fgmres':'uncompressed-fgmres',
@@ -147,8 +210,10 @@ def main():
     if args.pipeline=='quantization-only':
         control_names={'uncompressed-fgmres':'uncompressed-fgmres'}
     control_names={m:n for m,n in control_names.items()
-                   if m in experiment_modes(args.solvers,args.bits,args.split)}
-    if args.case!='pepe':
+                   if m in planned_modes}
+    if args.mpi_ranks != source_mpi_ranks:
+        control_names={}  # Historical trace parity requires the same MPI rank count.
+    if reference is not None:
         for mode,name in control_names.items():
             control=reference/name
             previous=shlex.split((control/'command.sh').read_text())
@@ -175,6 +240,7 @@ def main():
     if str(model) not in saved:p.error('Source executable path differs from repository')
     stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     pipeline_tag='' if args.pipeline=='full' else '-quantization-only'
+    if args.mpi_ranks != 8:pipeline_tag+='-np'+str(args.mpi_ranks)
     root=repo/'output'/f'emi-cg-split-check-{args.case}{pipeline_tag}-{stamp}-{os.getpid()}';root.mkdir(exist_ok=False)
     # Match the saved reference runner's BLAS/OpenMP thread settings.
     env=dict(os.environ,OPENBLAS_NUM_THREADS='1',OMP_NUM_THREADS='1')
@@ -184,23 +250,36 @@ def main():
               'executable_sha256':model_hash,'source_run':str(source),
               'source_command':source_command,'source_command_sha256':digest(source/'command.sh'),
               'case':args.case,'refinements':int(value('--refine')),
-              'historical_controls':{mode:str(reference/name) for mode,name in control_names.items()} if args.case!='pepe' else {},
+              'mpi_ranks':args.mpi_ranks,'source_mpi_ranks':source_mpi_ranks,
+              'mesh_input_files':{flag:value(flag) for flag in MESH_INPUT_SUFFIXES},
+              'historical_controls':{mode:str(reference/name) for mode,name in control_names.items()} if reference is not None else {},
               'thread_environment':{k:env[k] for k in ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS')},
               'tolerance':1e-7,'steps':1,'capture':False,'constant_split':args.split,'pipeline':args.pipeline,
               'solvers':args.solvers,'bits':args.bits,'iteration_limit':300,'fgmres_restart':30,
               'restriction_grid':'affine','prolongation_grid':'affine',
               'communication_scope':'logical interface bytes plus an outer collective payload model; excludes coarse/codebook/setup traffic and MPI framing; not measured network traffic',
               'purpose':'Opt-in CG/FCG split validation; unchanged recurrences/breakdown checks; no convergence or speedup guarantee'}
+    manifest['planned_modes']=planned_modes
+    manifest['requested_modes']=args.modes
+    if args.modes is not None:
+        parsed=[re.fullmatch(r'(cg|fcg|fgmres)(4|6|8|12|16|20|24|32)(-split)?', m) for m in planned_modes if not m.startswith('uncompressed-')]
+        manifest['solvers']=[m.removeprefix('uncompressed-') for m in planned_modes if m.startswith('uncompressed-')]
+        manifest['bits']=list(dict.fromkeys(int(m[2]) for m in parsed))
+        states={bool(m[3]) for m in parsed}
+        args.split='both' if len(states)==2 else ('on' if True in states else 'off')
+        manifest['constant_split']=args.split if parsed else 'not-applicable'
     manifest['source_sha256']={name:digest(repo/name) for name in
         ('EMI_model.cpp','EMI_bddc_precision.hh','EMI_bddc.hh','tests/run_emi_cg_split_check.py')}
     (root/'emi-working-tree.patch').write_text(git(repo,'diff','HEAD','--','EMI_model.cpp','EMI_bddc_precision.hh'))
     (root/'environment.json').write_text(json.dumps(manifest,indent=2)+'\n')
     print('Matched '+args.case+' solver check:',root,flush=True)
+    print('MPI ranks:',args.mpi_ranks,flush=True)
+    print('Planned modes: '+', '.join(planned_modes),flush=True)
     print('One step; refine='+value('--refine')+'; tolerance=1e-7; one R pass; affine R/P; pipeline='+args.pipeline+'; split='+args.split,flush=True)
     if args.pipeline=='quantization-only':
         print('Transforms/mapping/bit-length/Huffman OFF. Quantized values use fixed-size transmission slots; bytes are not a packed b-bit stream.',flush=True)
     results={}
-    modes=experiment_modes(args.solvers,args.bits,args.split)
+    modes=planned_modes
     uncompressed_solutions={}
     for mode in modes:
         base_mode=mode.removesuffix('-split')

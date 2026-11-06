@@ -5,6 +5,7 @@ from pathlib import Path
 import unittest
 import subprocess
 import sys
+import tempfile
 
 runner_path=Path(__file__).with_name('run_emi_cg_split_check.py')
 spec=importlib.util.spec_from_file_location('cg_split_runner',runner_path)
@@ -39,6 +40,28 @@ class CommandChecks(unittest.TestCase):
             with self.assertRaises(ValueError):runner.validate_scaling_source(case,wrong)
             wrong=cmd.copy();wrong[wrong.index('--refine')+1]='2'
             with self.assertRaises(ValueError):runner.validate_scaling_source(case,wrong)
+
+    def test_rizzo_mesh_selection(self):
+        self.assertIsNone(runner.reference_directory('rizzo'))
+        with tempfile.TemporaryDirectory() as directory:
+            source=[]
+            for flag,suffix in runner.MESH_INPUT_SUFFIXES.items():
+                source += [flag,'/old/pepe_combi_domi'+suffix]
+                (Path(directory)/('rizzo_combi_domi'+suffix)).touch()
+            for flag,value in {'--refine':0,'-np':8,'--sigma_i':3,'--sigma_e':20,
+                               '--C_m':1,'--R':0.1,'--dt':0.01,'--bddcIterations':300}.items():
+                source += [flag,str(value)]
+            result=runner.configure_mesh_case('rizzo',source,directory)
+            expected=source.copy()
+            for flag,suffix in runner.MESH_INPUT_SUFFIXES.items():
+                expected[expected.index(flag)+1]=str((Path(directory)/('rizzo_combi_domi'+suffix)).resolve())
+            self.assertEqual(result,expected)
+            self.assertEqual(runner.configure_mesh_case('pepe',source,directory),source)
+            wrong=source.copy();wrong[wrong.index('--refine')+1]='2'
+            with self.assertRaises(ValueError):runner.configure_mesh_case('rizzo',wrong,directory)
+            with self.assertRaises(ValueError):runner.configure_mesh_case('rizzo',source+['--input','duplicate'],directory)
+            (Path(directory)/'rizzo_combi_domi_excited.txt').unlink()
+            with self.assertRaises(ValueError):runner.configure_mesh_case('rizzo',source,directory)
 
     def test_pairs(self):
         for solver in ('cg','fcg','fgmres'):
@@ -87,6 +110,12 @@ class CommandChecks(unittest.TestCase):
             result=subprocess.run(base+['--bits']+bits,capture_output=True,text=True)
             self.assertEqual(result.returncode,expected,result.stderr)
 
+    def test_rizzo_cli(self):
+        result=subprocess.run([sys.executable,str(runner_path),'--validate-only',
+                               '--case','rizzo','--solvers','cg','fcg','fgmres',
+                               '--bits','12','16'],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+
     def test_controls(self):
         for solver in ('cg','fcg','fgmres'):
             cmd=runner.make_command(self.source,'fresh','uncompressed-'+solver)
@@ -99,5 +128,48 @@ class CommandChecks(unittest.TestCase):
             runner.make_command(self.source+['--bddcCgConstantSplitExperiment','1'],'fresh','cg16')
         for mode in ('uncompressed-cg-split','cg3-split','fcg33','unknown'):
             with self.assertRaises(ValueError):runner.make_command(self.source,'fresh',mode)
+
+    def test_explicit_modes_add_only_needed_controls(self):
+        self.assertEqual(
+            runner.selected_experiment_modes([], [], 'both', ['cg12-split','cg16-split','cg24-split']),
+            ['uncompressed-cg','cg12-split','cg16-split','cg24-split'])
+        self.assertEqual(
+            runner.selected_experiment_modes([], [], 'off', ['cg12-split','fcg16','fgmres24-split']),
+            ['uncompressed-cg','uncompressed-fcg','uncompressed-fgmres',
+             'cg12-split','fcg16','fgmres24-split'])
+        self.assertEqual(
+            runner.selected_experiment_modes([], [], 'both', ['fcg12','uncompressed-fcg','fcg16-split']),
+            ['uncompressed-fcg','fcg12','fcg16-split'])
+        self.assertEqual(runner.selected_experiment_modes([], [], 'off', ['uncompressed-cg']),
+                         ['uncompressed-cg'])
+
+    def test_explicit_mode_solver_flags(self):
+        for mode, flexible, fgmres in [('cg12-split',0,0),('fcg16',1,0),('fgmres24-split',0,1)]:
+            cmd=runner.make_command(self.source,'fresh',mode)
+            self.assertEqual(cmd[cmd.index('--bddcFlexibleCg')+1],str(flexible))
+            self.assertEqual(cmd[cmd.index('--bddcFgmres')+1],str(fgmres))
+            self.assertEqual(cmd[cmd.index('--bddcProlongateConstantSplit')+1],str(int(mode.endswith('-split'))))
+
+    def test_explicit_modes_reject_invalid_and_duplicates(self):
+        for modes in ([], ['cg12','cg12'], ['cg2'], ['gmres16'], ['uncompressed-cg-split']):
+            with self.subTest(modes=modes), self.assertRaises(ValueError):
+                runner.selected_experiment_modes([], [], 'both', modes)
+
+    def test_legacy_selection_unchanged(self):
+        for split in ('off','on','both'):
+            self.assertEqual(runner.selected_experiment_modes(['cg','fcg'],[12,16],split),
+                             runner.experiment_modes(['cg','fcg'],[12,16],split))
+
+    def test_explicit_modes_cli_rank_overrides(self):
+        for case in ('10cells','pepe','rizzo','robin','weak_8_h16','strong_h16'):
+            cmd=[sys.executable,str(runner_path),'--validate-only','--case',case,
+                 '--mpi-ranks','2','--modes','cg12-split','cg16-split','cg24-split']
+            result=subprocess.run(cmd,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertIn('uncompressed-cg, cg12-split, cg16-split, cg24-split',result.stdout)
+        base=[sys.executable,str(runner_path),'--validate-only','--modes','cg12-split']
+        for extra in (['--bits','12'],['--solvers','cg'],['--split','on'],['--mpi-ranks','0']):
+            result=subprocess.run(base+extra,capture_output=True,text=True)
+            self.assertEqual(result.returncode,2,result.stdout)
 
 if __name__=='__main__':unittest.main()
