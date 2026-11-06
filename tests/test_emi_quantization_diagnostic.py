@@ -36,6 +36,20 @@ else:
     compressed=value('--bddcCompression')=='1'
     full=value('--bddcHuffman')=='1'
     bad=compressed and value('--bddcCompressionBits')=='8' and not full
+    family='fgmres' if value('--bddcFgmres')=='1' else 'fcg' if value('--bddcFlexibleCg')=='1' else 'cg'
+    if os.environ.get('FAMILY_TEST'):
+        assert value('--bddcUseCg')==str(int(family!='fgmres'))
+        assert value('--bddcConvergenceReport')==str(int(family!='fgmres'))
+        assert value('--bddcCgOriginalResidual')==str(int(family!='fgmres'))
+        if family=='fgmres':
+            assert '--bddcCgConstantSplitExperiment' not in args
+            assert value('--bddcFgmresRestart')=='30'
+        elif value('--bddcProlongateConstantSplit')=='1':
+            assert value('--bddcCgConstantSplitExperiment')=='1'
+        bad=compressed and family=='cg' and value('--bddcCompressionBits')=='12' and value('--bddcGraphLifting')=='1' and value('--bddcProlongateConstantSplit')=='0'
+        if os.environ.get('FAIL_FCG_BASELINE') and family=='fcg' and not compressed:
+            sys.exit(19)
+
     rel=0.2 if bad else 7e-8
     print('cells: 2560\\ndofs: 1156')
     print('BDDC subdomains: 20, shared dofs: 216')
@@ -50,7 +64,11 @@ else:
         sys.exit(134)
     print('Compression report (BDDC):')
     print('  raw sent bytes: '+str(30000 if full else 10000))
-    print('  transmitted sent bytes: '+str(12000 if full else 10000))
+    transmitted=(12000 if full else 10000)
+    if os.environ.get('FAMILY_TEST'):
+        baseline={'cg':10000,'fcg':20000,'fgmres':40000}[family]
+        transmitted=baseline//2 if compressed else baseline
+    print('  transmitted sent bytes: '+str(transmitted))
     print(f"Profile (wall seconds, EMI end-to-end phases; {value('-np')} rank(s)):")
     print('  solver wrapper (including setup) 1.0 1.1 1.2')
     (out/('emiBDDCLastCompression.vtu' if compressed else 'emiBDDCLast.vtu')).touch()
@@ -62,7 +80,9 @@ print('EMI model completed')
 from pathlib import Path
 assert all(Path(p).is_file() for p in sys.argv[1:])
 print('same coordinates: yes')
-print('relative L2 error: 2e-9')
+reference = Path(sys.argv[2]).parent.name
+error = {'uncompressed-fcg':3e-9, 'uncompressed-fgmres':4e-9}.get(reference,2e-9)
+print('relative L2 error: '+str(error))
 print('max absolute error: 1e-8')
 print('mean signed offset (first - reference): 1e-10')
 print('relative L2 after removing mean offset: 1e-9')
@@ -189,6 +209,87 @@ print('relative L2 after removing mean offset: 1e-9')
             self.assertEqual(last[last.index('--bddcRestrictionPasses')+1],'4')
             self.assertIn('comparison_to_direct',full_row)
             self.assertIn('comparison_to_uncompressed',full_row)
+            # New mesh selection changes all four inputs, and each explicit
+            # transform order has an independently checked flag combination.
+            # Use a private parent, avoiding fixture files outside this test.
+            pepe_repo=repo/'pepe-repo'
+            pepe_repo.mkdir()
+            shutil.copy2(model,pepe_repo/'emiModel')
+            shutil.copy2(repo/'compare_emi_vtu.py',pepe_repo/'compare_emi_vtu.py')
+            meshes=repo/'input_emi_mesh'
+            meshes.mkdir()
+            for suffix in ('.vtu','_extracellular.txt','_intracellular.txt','_excited.txt'):
+                (meshes/('pepe_combi_domi'+suffix)).touch()
+            paired=subprocess.run([sys.executable,str(runner),'--repo',str(pepe_repo),
+                '--case','pepe','--ranks','2','--bits','12','16','24',
+                '--cg-original-residual','1','--transform-orders','before','after',
+                '--output','orders'],cwd=pepe_repo,env=env,capture_output=True,text=True)
+            self.assertEqual(paired.returncode,0,paired.stdout+paired.stderr)
+            order_rows=json.loads((pepe_repo/'orders/summary.json').read_text())
+            self.assertEqual([r['case'] for r in order_rows],['direct','uncompressed-cg']+
+                [f'{mode}-{b}' for b in (12,16,24) for mode in ('quantization','before','after')])
+            cmds=[json.loads(line) for line in (pepe_repo/'capture.jsonl').read_text().splitlines()]
+            for i,c in enumerate(cmds):
+                def val(flag): return c[c.index(flag)+1]
+                for flag,suffix in zip(('--input','--extra_set','--intra_set','--excited'),
+                                      ('.vtu','_extracellular.txt','_intracellular.txt','_excited.txt')):
+                    self.assertEqual(Path(val(flag)),(meshes/('pepe_combi_domi'+suffix)).resolve())
+                if i:
+                    self.assertEqual(val('--bddcCgOriginalResidual'),'1')
+                    for flag in ('--bddcFlexibleCg','--bddcFgmres','--bddcProlongateConstantSplit'):
+                        self.assertEqual(val(flag),'0')
+                    self.assertEqual(val('-np'),'2')
+                if i>=2:
+                    mode=('quantization','before','after')[(i-2)%3]
+                    self.assertEqual(val('--bddcGraphLifting'),str(int(mode=='before')))
+                    self.assertEqual(val('--bddcGraphLiftingAfterQuantization'),str(int(mode=='after')))
+                    for flag in ('--bddcHuffman','--bddcBitlength','--bddcZigzag'):
+                        self.assertEqual(val(flag),str(int(mode!='quantization')))
+            all_command=[sys.executable,str(runner),'--repo',str(pepe_repo),
+                '--case','pepe','--ranks','2','--bits','12','16','24','--cg-original-residual','1',
+                '--transform-orders','before','after','--solvers','cg','fcg','fgmres','--split','both',
+                '--iterations','1000']
+            matrix=subprocess.run(all_command+['--output','matrix'],cwd=pepe_repo,
+                env=dict(env,FAMILY_TEST='1'),capture_output=True,text=True)
+            self.assertEqual(matrix.returncode,1,matrix.stdout+matrix.stderr)
+            matrix_rows=json.loads((pepe_repo/'matrix/summary.json').read_text())
+            self.assertEqual(len(matrix_rows),58)
+            self.assertEqual([r['case'] for r in matrix_rows if r['status']=='FAIL'],
+                             ['before-cg12'])
+            for row in matrix_rows[4:]:
+                self.assertEqual(row['uncompressed_reference'],'uncompressed-'+row['solver'])
+                if row['status']=='PASS':
+                    self.assertAlmostEqual(row['net_logical_byte_savings_vs_uncompressed_percent'],50)
+                    self.assertIn('comparison_to_direct',row)
+                    self.assertIn('comparison_to_uncompressed',row)
+                    self.assertEqual(row['comparison_to_direct']['relative L2 error'],2e-9)
+                    self.assertEqual(row['comparison_to_uncompressed']['relative L2 error'],
+                                     {'cg':2e-9,'fcg':3e-9,'fgmres':4e-9}[row['solver']])
+            matrix_calls=[json.loads(line) for line in (pepe_repo/'capture.jsonl').read_text().splitlines()][-58:]
+            for row,c in zip(matrix_rows,matrix_calls):
+                if row['case']=='direct': continue
+                self.assertEqual(c[c.index('--bddcIterations')+1],'1000')
+                self.assertEqual(c[c.index('--bddcProlongateConstantSplit')+1],str(int(row['constant_split'])))
+                self.assertEqual(c[c.index('--bddcFgmres')+1],str(int(row['solver']=='fgmres')))
+                self.assertEqual(c[c.index('--bddcFlexibleCg')+1],str(int(row['solver']=='fcg')))
+                if row['restriction_bits'] is not None:
+                    self.assertEqual(c[c.index('--bddcGraphLifting')+1],str(int(row['transform_order']=='before')))
+                    self.assertEqual(c[c.index('--bddcGraphLiftingAfterQuantization')+1],str(int(row['transform_order']=='after')))
+            # Failure of one baseline must skip only its own family.
+            baseline_failed=subprocess.run(all_command+['--output','one-baseline-failed',
+                '--bits','16','--skip-quantization'],cwd=pepe_repo,
+                env=dict(env,FAMILY_TEST='1',FAIL_FCG_BASELINE='1'),capture_output=True,text=True)
+            self.assertEqual(baseline_failed.returncode,1)
+            failed_rows=json.loads((pepe_repo/'one-baseline-failed/summary.json').read_text())
+            self.assertEqual(len(failed_rows),16)
+            self.assertEqual(len([r for r in failed_rows if r['status']=='SKIP']),4)
+            self.assertTrue(all(r['solver']=='fcg' for r in failed_rows if r['status']=='SKIP'))
+            self.assertEqual(failed_rows[-1]['status'],'PASS')
+            rejected=subprocess.run([sys.executable,str(runner),'--repo',str(pepe_repo),
+                '--case','pepe','--transform-orders','before','--zero-preserving-restriction',
+                '--output','invalid-before'],cwd=pepe_repo,env=env,capture_output=True,text=True)
+            self.assertEqual(rejected.returncode,2)
+            self.assertFalse((pepe_repo/'invalid-before').exists())
             invalid = subprocess.run(command+['--refine','-1'],cwd=repo,env=env,
                                      capture_output=True,text=True)
             self.assertEqual(invalid.returncode,2)

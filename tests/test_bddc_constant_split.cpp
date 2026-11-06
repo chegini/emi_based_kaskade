@@ -10,7 +10,7 @@
 using T=Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint32_t,std::uint8_t>;
 void require(bool ok, char const* message) {if(!ok) throw std::runtime_error(message);}
 
-std::vector<double> exercise(bool split, bool encoded, int exact, bool constant)
+std::vector<double> exercise(bool split, bool encoded, int exact, bool constant, bool before=false)
 {
   constexpr int n=67;
   std::vector<int> ids(n);std::iota(ids.begin(),ids.end(),0);
@@ -26,9 +26,10 @@ std::vector<double> exercise(bool split, bool encoded, int exact, bool constant)
     t[s]->setExcludedLocalDofs(corners);
     t[s]->setProlongateEncoding(encoded);t[s]->requireProlongateHuffman(encoded);
     t[s]->setProlongateBitlengthEncoding(encoded);t[s]->setProlongateZigzagEncoding(encoded);
-    t[s]->enableTransform(encoded ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
+    t[s]->enableTransform((encoded || before) ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
                                  : Kaskade::BDDC::TransformType::NONE);
-    t[s]->setProlongateTransformAfterQuantization(encoded);
+    t[s]->setProlongateTransform(before);
+    t[s]->setProlongateTransformAfterQuantization(encoded && !before);
     for(int i=0;i<n;++i)
     {
       // Strongly varying weights, a large non-float32-exact offset, small variation.
@@ -42,6 +43,32 @@ std::vector<double> exercise(bool split, bool encoded, int exact, bool constant)
     T::XVector wireWeights;t[peer]->getInterfaceAveragingWeights(s,wireWeights);
     t[s]->setInterfaceAveragingWeights(peer,wireWeights);
   }
+  for(auto* x:t) x->prepareIntegerLiftingPlans();
+  for(int s=0;s<3;++s)for(int peer=0;peer<3;++peer)if(s!=peer)
+    t[peer]->importIntegerLiftingPlan(s,t[s]->exportIntegerLiftingPlan(peer));
+  // A transform changes the quantization range and can amplify error on inverse
+  // lifting. Bound that error analytically instead of reusing the nodal fixture's
+  // empirical .08 limit. The predictor is a convex average, so ||T^-1||_inf <= 2.
+  std::vector<double> beforeBound(3,0);
+  if(before && split && exact!=2)
+    for(int s=0;s<3;++s)
+    {
+      std::vector<int> idx;
+      long double sum=0;
+      for(int i=0;i<n;++i)
+        if(std::find(corners.begin(),corners.end(),i)==corners.end())
+        {idx.push_back(i);sum+=u[s][i][0];}
+      float center=static_cast<float>(sum/idx.size());
+      std::vector<double> raw;
+      for(int i:idx)raw.push_back(weights[s][i][0]*(u[s][i][0]-double(center)));
+      auto coefficients=t[s]->applyTransform(raw,idx);
+      auto [lo,hi]=std::minmax_element(coefficients.begin(),coefficients.end());
+      double scale=255.0/(*hi==*lo ? 1 : *hi-*lo);
+      double wireScale=static_cast<float>(scale),wireMin=static_cast<float>(*lo);
+      double coefficientError=.5/scale+std::abs(wireMin-*lo)+
+                              255*std::abs(1/wireScale-1/scale);
+      beforeBound[s]=2*coefficientError;
+    }
   for(int s=0;s<3;++s)t[s]->preProlongate(u[s]);
   if(encoded)
   {
@@ -83,6 +110,12 @@ std::vector<double> exercise(bool split, bool encoded, int exact, bool constant)
     expected/=denom;
     double actual=u[0][i][0]+du[0][i][0];result.push_back(actual);
     maxError=std::max(maxError,std::abs(actual-expected));
+    if(before && split)
+    {
+      double bound=std::accumulate(beforeBound.begin(),beforeBound.end(),0.0)/denom;
+      require(std::abs(actual-expected)<=bound+1e-8,
+              "Floating split exceeds quantization/metadata/inverse-lifting error bound");
+    }
     for(int s=1;s<3;++s)
       require(std::abs(actual-u[s][i][0]-du[s][i][0])<1e-8,"Shared copies disagree");
     if(std::find(corners.begin(),corners.end(),i)!=corners.end())
@@ -96,8 +129,8 @@ std::vector<double> exercise(bool split, bool encoded, int exact, bool constant)
     require(x->prolongateConstantHeaderBytes()==(split ? 16 : 0),"Extra header counter");
   }
   require(sent==counted && sent==received,"Packet traffic accounting mismatch");
-  if(split)require(maxError<(constant ? 1e-4 : .08),"Constant split failed to protect small variation");
-  else if(!exact)require(maxError>10,"Fixture does not expose weighted-offset damage");
+  if(split && !before)require(maxError<(constant ? 1e-4 : .08),"Constant split failed to protect small variation");
+  if(!split && !exact)require(maxError>10,"Fixture does not expose weighted-offset damage");
   return result;
 }
 
@@ -135,6 +168,9 @@ int main()
     auto plain=exercise(true,false,exact,constant),full=exercise(true,true,exact,constant);
     require(plain==full,"Integer lifting/Huffman changed split reconstruction");
     exercise(false,false,exact,constant);
+    auto beforePlain=exercise(true,false,exact,constant,true);
+    auto beforeFull=exercise(true,true,exact,constant,true);
+    require(beforePlain==beforeFull,"Huffman changed floating split reconstruction");
   }
   T missing(0,{{1,{0,1}}});missing.setGlobalIndex_active();missing.setQuantizationBits(8);
   missing.setProlongateConstantSplit(true);T::XVector w(2);w=1;
@@ -144,5 +180,5 @@ int main()
   try {missing.setInterfaceValues(1,packet);}catch(std::runtime_error const&) {rejected=true;}
   require(rejected,"Missing producer weights accepted");
   std::cout<<"Constant-split transfer passed: weighted offsets, float32 center, three owners, "
-             "plain/full equivalence, exact trailers, invalid headers, packet counters.\n";
+             "both transform orders, plain/full equivalence, exact trailers, invalid headers, packet counters.\n";
 }

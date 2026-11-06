@@ -1116,11 +1116,10 @@ int main(int argc, char* argv[])
        (!options.bddcPreconditionerProbe && (options.maximumNumberOfTimeSteps<1 ||
         options.maximumNumberOfTimeSteps>10)) ||
        !options.bddcCompression || options.bddcProlongateGroupSize ||
-       options.bddcProlongateZeroPreserving ||
-       (options.bddcGraphLifting && !options.bddcGraphLiftingAfterQuantization))))
+       options.bddcProlongateZeroPreserving)))
     throw std::runtime_error("Constant split requires a compressed frozen probe, FGMRES validation (1..10 steps), "
                              "or the explicit one-step CG/FCG experiment "
-                             "with ungrouped affine nodal prolongation");
+                             "with ungrouped affine prolongation");
   if (options.bddcConditionEstimate != 0 && options.bddcConditionEstimate != 1)
     throw std::runtime_error("bddcConditionEstimate must be 0 or 1");
   if (options.bddcConditionEstimate &&

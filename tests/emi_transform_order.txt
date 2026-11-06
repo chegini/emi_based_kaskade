@@ -1,0 +1,68 @@
+Pepe transform-order and solver validation
+=========================================
+
+Run inside the existing Kaskade Open MPI container:
+  bash tests/run_emi_transform_order_check.sh --solvers cg fcg fgmres --split both --bits 12 16 24 --iterations 1000
+
+The wrapper tests transfers and command generation, rebuilds EMI against the
+updated headers, then runs the same pepe_combi_domi mesh, tags, refinement=0
+and physics in every case. There is one time step (dt=0.01), one restriction
+pass and tolerance=1e-7. The wrapper defaults to a maximum of 1000 solver
+iterations; --iterations overrides this. The standalone Python diagnostic
+retains its historical default of 300. The limit applies to all BDDC cases,
+including uncompressed references; convergence or breakdown can stop earlier.
+FGMRES restart remains 30.
+
+Without solver/split arguments the wrapper retains CG with split off. The
+command above selects all six compressed combinations: CG, FCG and FGMRES,
+each with split off/on. It runs 58 cases: one direct reference, three
+uncompressed solver references, and 54 compressed cases (three bit depths,
+three solver families, three pipelines, two split settings). Add
+--skip-quantization to run 40 cases covering just the two full coding orders.
+Splitting is a compressed-transfer representation; uncompressed references
+are run once per solver family without splitting.
+
+Pipelines:
+  quantization: affine quantization only, no lifting/zigzag/bit-length/Huffman.
+  before: floating graph lifting, affine quantization, full coding.
+  after: nodal affine quantization, reversible integer lifting, full coding.
+The before path's affine unsigned coefficient codes are not signed integer
+details. R and P use the same requested bit depth and order.
+
+CG uses bddcCgOriginalResidual=1, matching the earlier Pepe split-check
+campaign. FCG uses the existing flexible CG recurrence with original residual.
+FGMRES uses the existing right-preconditioned recurrence with restart 30.
+CG/FCG split runs explicitly enable the experimental validation gate.
+No recurrence, breakdown check or residual tolerance is changed.
+
+Transform-first plus split is newly enabled experimentally. For an unweighted
+producer constant c and weights W it reconstructs
+  T^-1 D Q T(W*(u-c)) + W*c.
+The producer restores its weighted float32 wire constant after inverse
+lifting, matching receivers. Exact corners bypass centering and quantization.
+Transfer tests cover own/copy consistency, overlapping interfaces, nonuniform
+weights, coding roundtrips and coefficient-roundoff error bounds.
+These tests do not guarantee PDE convergence at any precision.
+Grouped and zero-preserving transform-first modes remain unsupported.
+
+The runner stops if the direct reference fails. A failed uncompressed
+reference skips only its own solver family's compressed cases. Other
+compressed failures remain FAIL and later cases continue. A nonzero final
+exit status signals at least one FAIL or SKIP; partial summaries are retained.
+
+summary.txt/json records iterations, true residuals, raw relative Euclidean
+L2 errors, mean-centered relative L2 errors and maximum absolute errors.
+Every successful BDDC case is compared to the direct reference. Successful
+compressed cases are also compared to their matching uncompressed family
+(CG/FCG/FGMRES). Raw errors retain the mean offset; centered diagnostics
+remove only the arithmetic mean error. PASS confirms residual/completion
+and finite comparisons, not a hidden scientific error acceptance threshold.
+
+Logical-byte savings compare the whole solve against the matched uncompressed
+solver, including extra iterations. Counters include intra-rank transfers;
+setup plans, codebook training/communication and MPI framing are excluded.
+Timings include validation and output; these are not performance benchmarks.
+
+This compares live solver trajectories, not identical frozen input buffers.
+Frozen replay with splitting is not supported by this runner. Previous
+outputs are preserved in new timestamped directories.

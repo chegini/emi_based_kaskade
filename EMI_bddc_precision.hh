@@ -16,8 +16,9 @@ namespace EmiBddc
    * Validate the explicit one-step CG/FCG constant-split experiment.
    *
    * The existing transfer represents W*v as W*(v-c*1) + W*(c*1), and
-   * quantizes only the first term. Its transfer error is consequently
-   * Q(W*(v-c*1)) - W*(v-c*1). Reducing that error does not establish a
+   * quantizes only the first term. Nodal coding reconstructs Q(W*(v-c*1));
+   * floating transform-first reconstructs T^-1 Q(T(W*(v-c*1))). Both add
+   * W*c afterwards with the wire constant. Reducing transfer error does not establish a
    * linear or positive-definite preconditioner. CG/FCG recurrences and
    * breakdown checks remain unchanged; convergence must be measured.
    *
