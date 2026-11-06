@@ -70,12 +70,21 @@ def write_summary(root, records):
             lines.append(f"Precision {row['case']}: restriction={row['restriction_bits']}, "
                          f"prolongation={row['prolongation_bits']}, "
                          f"restriction_group_size={row.get('restriction_group_size',0)}")
+    for row in records:
+        pair=row.get('both_vs_before')
+        if pair:
+            lines.append(f"Combined vs before {row['case']}: {pair['status']}; "
+                         f"iteration difference={pair.get('iteration_difference','--')}; "
+                         f"logical byte saving={pair.get('logical_byte_saving_percent','--')}%; "
+                         f"solver time change={pair.get('solver_time_change_percent','--')}%")
     lines += ['', 'Directional bit depths and producer restriction group sizes are recorded above and in summary.json.',
               'Zero-preserving restriction mode is recorded per case in summary.json; prolongation retains its original quantizer.',
               'Rpasses counts restriction exchanges per solver update; additional passes refine feedback and cost extra communication.',
               'quantization-* rows disable graph lifting, zigzag, bit-length coding and Huffman.',
               'full-* and after-* rows enable integer graph lifting after quantization and full coding.',
               'before-* rows apply floating graph lifting before affine quantization and full coding.',
+              'both-* rows apply floating lifting, quantization, reversible integer lifting and full coding.',
+              'Combined/before parity compares exported solutions and numerical trace files; REVIEW is not a convergence failure.',
               'Solvers: cg=CG, fcg=flexible CG, fgmres=flexible GMRES (restart 30); -split adds constant splitting.',
               'Uncompressed controls have no split; each compressed case uses its matched solver-family baseline.',
               'Net bytes saved compares total logical transferred bytes with the same uncompressed solver, including all iterations and refinement passes.',
@@ -111,8 +120,8 @@ def main():
                         help='producer group size; requires zero-preserving restriction')
     parser.add_argument('--full-compression', action='store_true',
                         help='also run full post-quantization coding at each selected bit depth')
-    parser.add_argument('--transform-orders', nargs='+', choices=['before','after'],
-                        help='before=transform then quantize; after=quantize then integer lift')
+    parser.add_argument('--transform-orders', nargs='+', choices=['before','after','both'],
+                        help='before=float lift then quantize; after=quantize then integer lift; both=both lifts around quantization')
     parser.add_argument('--cg-original-residual', type=int, choices=[0,1], default=0,
                         help='CG scalar convention; 1 matches the previous Pepe split campaign')
     parser.add_argument('--zero-preserving-restriction', action='store_true',
@@ -143,7 +152,7 @@ def main():
     if args.transform_orders:
         if args.full_compression or len(set(args.transform_orders))!=len(args.transform_orders):
             parser.error('Use distinct --transform-orders without --full-compression')
-        if 'before' in args.transform_orders and (
+        if any(order in args.transform_orders for order in ('before','both')) and (
                 args.zero_preserving_restriction or args.restriction_group_size):
             parser.error('Transform-first requires ungrouped affine quantization')
     if len(set(args.solvers))!=len(args.solvers):
@@ -278,9 +287,10 @@ def main():
             capture_prefix = 'env '+shlex.quote('KASKADE_RESTRICTION_CAPTURE='+capture)+' '
         coding = '1' if full or order else '0'
         # Preserve the legacy full-compression command; explicit orders are unambiguous.
-        lifting = '1' if full or order=='before' else '0'
-        after = '1' if full or order=='after' else '0'
+        lifting = '1' if full or order in ('before','both') else '0'
+        after = '1' if full or order in ('after','both') else '0'
         encoding_options = ['--bddcGraphLifting',lifting,'--bddcGraphLiftingAfterQuantization',after,
+                            '--bddcGraphLiftingBothOrders',str(int(order=='both')),
                             '--bddcZigzag',coding,'--bddcBitlength',coding,'--bddcHuffman',coding]
         command += common+options+encoding_options+['--dir',str(folder)]
         if split and solver in ('cg','fcg'):
@@ -358,6 +368,9 @@ def main():
                 row['reason']='solver stagnation'
             else:
                 row['reason']='incomplete or invalid solver run'
+            if order=='both' and 'BDDC combined lifting: floating transform, quantization, reversible integer transform' not in text:
+                row['status']='FAIL'
+                row['reason']='Missing combined-lifting marker; rebuild the executable'
             if row['status']=='PASS':
                 solution = folder/('emiBDDCLastCompression.vtu' if bits is not None else 'emiBDDCLast.vtu')
                 try:
@@ -383,7 +396,39 @@ def main():
             write_summary(root,records)
             continue
         run(name,bits=bits,solver=solver,split=split,full=mode=='full',
-            order=mode if mode in ('before','after') else None)
+             order=mode if mode in ('before','after','both') else None)
+    # The second (integer) transform is lossless coding of the same coefficients.
+    # Compare live before/both solves separately from the uncompressed controls.
+    for row in records:
+        if row.get('transform_order')!='both' or row['status']!='PASS':
+            continue
+        before=next((r for r in records if r.get('transform_order')=='before' and
+                     r.get('solver')==row['solver'] and
+                     r.get('restriction_bits')==row['restriction_bits'] and
+                     r.get('constant_split')==row['constant_split']),None)
+        if before is None or before['status']!='PASS':
+            row['both_vs_before']={'status':'NOT_CHECKED','reason':'No successful matched before case'}
+            continue
+        folder=root/row['case']; reference=root/before['case']
+        try:
+            errors=comparison(repo,folder/'emiBDDCLastCompression.vtu',
+                              reference/'emiBDDCLastCompression.vtu',folder/'compare-before.log')
+            trace_name='bddc-fgmres-step1.csv' if row['solver']=='fgmres' else 'bddc-convergence-step1.csv'
+            left,right=folder/trace_name,reference/trace_name
+            trace_equal=(left.read_bytes()==right.read_bytes()) if left.is_file() and right.is_file() else None
+            row['both_vs_before']={
+                'status':'EXACT_EXPORTED_SOLUTION_AND_TRACE' if errors['relative L2 error']==0 and trace_equal
+                         else 'REVIEW',
+                'reference':before['case'],'solution_errors':errors,
+                'trace_equal':trace_equal,
+                'iteration_difference':row['iterations']-before['iterations'],
+                'logical_byte_saving_percent':100*(1-row['logical_transferred_bytes']/before['logical_transferred_bytes']),
+                'solver_time_change_percent':100*(row['solver_metrics']['solver_wrapper_max_seconds']/
+                                                 before['solver_metrics']['solver_wrapper_max_seconds']-1)}
+        except (RuntimeError,OSError,ValueError,KeyError,ZeroDivisionError) as error:
+            row['both_vs_before']={'status':'ERROR','reason':str(error)}
+            row['status']='FAIL'; row['reason']='Combined-order comparison failed'
+    write_summary(root,records)
     print('\n'+(root/'summary.txt').read_text())
     print('Summary and full logs: '+str(root))
     return int(any(row['status']!='PASS' for row in records))

@@ -122,6 +122,7 @@ struct EmiOptions
   int bddcCompressionThresholdInterfaceTypes = Kaskade::BDDC::EDGE;
   int bddcGraphLifting = 1;
   int bddcGraphLiftingAfterQuantization = 0;
+  int bddcGraphLiftingBothOrders = 0;
   int bddcExcludeCornersFromCompression = 0;
   int bddcZigzag = 1;
   int bddcHuffman = 1;
@@ -991,6 +992,7 @@ int main(int argc, char* argv[])
      "interface type mask for the size threshold: 2=edge, 4=face, 0=all")
     ("bddcGraphLifting", options.bddcGraphLifting, options.bddcGraphLifting, "use graph-lifting transform in compressed BDDC transfer: 0=none, 1=graph lifting")
     ("bddcGraphLiftingAfterQuantization", options.bddcGraphLiftingAfterQuantization, options.bddcGraphLiftingAfterQuantization, "apply reversible integer graph lifting after quantization: 0=no, 1=yes")
+    ("bddcGraphLiftingBothOrders", options.bddcGraphLiftingBothOrders, options.bddcGraphLiftingBothOrders, "explicitly combine floating lifting before quantization and reversible integer lifting after it")
     ("bddcExcludeCornersFromCompression", options.bddcExcludeCornersFromCompression, options.bddcExcludeCornersFromCompression, "exclude BDDC corner DOFs from compressed transfer payloads: 0=no, 1=yes")
     ("bddcZigzag", options.bddcZigzag, options.bddcZigzag, "use zigzag signed-symbol mapping in compressed BDDC transfer: 0=no, 1=yes")
     ("bddcHuffman", options.bddcHuffman, options.bddcHuffman, "use Huffman coding in compressed BDDC transfer: 0=no, 1=yes")
@@ -1162,6 +1164,15 @@ int main(int argc, char* argv[])
       !EmiBddc::validDirectionalCompressionBits(options.bddcProlongateCompressionBits))
     throw std::runtime_error("Directional compression bits must be -1 (inherit) or 1..32");
 
+  if (options.bddcGraphLiftingBothOrders<0 || options.bddcGraphLiftingBothOrders>1 ||
+      (options.bddcGraphLiftingBothOrders &&
+       (!options.bddc || !options.bddcCompression || options.sdc || options.direct ||
+        !options.bddcGraphLifting || !options.bddcGraphLiftingAfterQuantization ||
+        !options.bddcHuffman || options.bddcRestrictZeroPreserving ||
+        options.bddcProlongateZeroPreserving || options.bddcRestrictGroupSize ||
+        options.bddcProlongateGroupSize || options.bddcPreconditionerProbe)))
+    throw std::runtime_error("Combined lifting requires compressed non-SDC BDDC, both lifting switches, Huffman and ungrouped affine quantization; no frozen probe");
+
   if (options.bddcRestrictZeroPreserving!=0 && options.bddcRestrictZeroPreserving!=1)
     throw std::runtime_error("bddcRestrictZeroPreserving must be 0 or 1");
   if (options.bddcProlongateZeroPreserving!=0 && options.bddcProlongateZeroPreserving!=1)
@@ -1202,6 +1213,8 @@ int main(int argc, char* argv[])
   OptionalMpiSession mpiSession(argc,argv,options.mpi != 0,options.quiet == 0);
   bool const outputRankZero = EmiBddc::mpiRankZero(options.mpi != 0);
   bool const detailedOutput = outputRankZero && !options.quiet;
+  if (options.bddcGraphLiftingBothOrders && outputRankZero)
+    std::cout << "BDDC combined lifting: floating transform, quantization, reversible integer transform\n";
   if (options.bddcCgConstantSplitExperiment && outputRankZero)
     std::cout << "BDDC CG/FCG constant-split experiment: one step; original-residual rho; "
                  "unchanged recurrence and breakdown checks; convergence not guaranteed\n";

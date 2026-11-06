@@ -10,7 +10,8 @@
 using T=Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint32_t,std::uint8_t>;
 void require(bool ok, char const* message) {if(!ok) throw std::runtime_error(message);}
 
-std::vector<double> exercise(bool split, bool encoded, int exact, bool constant, bool before=false)
+std::vector<double> exercise(bool split, bool encoded, int exact, bool constant, bool before=false,
+                             bool both=false)
 {
   constexpr int n=67;
   std::vector<int> ids(n);std::iota(ids.begin(),ids.end(),0);
@@ -29,7 +30,8 @@ std::vector<double> exercise(bool split, bool encoded, int exact, bool constant,
     t[s]->enableTransform((encoded || before) ? Kaskade::BDDC::TransformType::GRAPH_LIFTING
                                  : Kaskade::BDDC::TransformType::NONE);
     t[s]->setProlongateTransform(before);
-    t[s]->setProlongateTransformAfterQuantization(encoded && !before);
+    t[s]->setTransformBeforeAndAfterQuantization(both);
+    t[s]->setProlongateTransformAfterQuantization(encoded && (!before || both));
     for(int i=0;i<n;++i)
     {
       // Strongly varying weights, a large non-float32-exact offset, small variation.
@@ -171,6 +173,8 @@ int main()
     auto beforePlain=exercise(true,false,exact,constant,true);
     auto beforeFull=exercise(true,true,exact,constant,true);
     require(beforePlain==beforeFull,"Huffman changed floating split reconstruction");
+    auto both=exercise(true,true,exact,constant,true,true);
+    require(beforeFull==both,"Combined lifting changed weighted split reconstruction");
   }
   T missing(0,{{1,{0,1}}});missing.setGlobalIndex_active();missing.setQuantizationBits(8);
   missing.setProlongateConstantSplit(true);T::XVector w(2);w=1;

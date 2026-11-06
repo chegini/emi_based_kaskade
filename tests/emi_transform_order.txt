@@ -26,6 +26,8 @@ Pipelines:
   quantization: affine quantization only, no lifting/zigzag/bit-length/Huffman.
   before: floating graph lifting, affine quantization, full coding.
   after: nodal affine quantization, reversible integer lifting, full coding.
+  both: floating lifting, affine quantization, reversible integer lifting,
+        full coding. There is only ONE quantization.
 The before path's affine unsigned coefficient codes are not signed integer
 details. R and P use the same requested bit depth and order.
 
@@ -66,3 +68,31 @@ Timings include validation and output; these are not performance benchmarks.
 This compares live solver trajectories, not identical frozen input buffers.
 Frozen replay with splitting is not supported by this runner. Previous
 outputs are preserved in new timestamped directories.
+
+Combined transform experiment
+-----------------------------
+For a first check with every solver and split choice:
+  bash tests/run_emi_transform_order_check.sh --case pepe --ranks 2 --bits 16 --solvers cg fcg fgmres --split both --transform-orders before both --skip-quantization --iterations 1000
+This runs 16 cases: direct, three uncompressed references and 12 compressed
+cases. Use --bits 12 16 24 for 40 cases; add after to the order list for 58.
+The wrapper's existing default before/after selection is unchanged.
+
+The new application flag --bddcGraphLiftingBothOrders 1 explicitly enables
+combined lifting and requires both old lifting flags and Huffman. Setting only
+the two old flags still selects integer-after for backward compatibility.
+The combined mode has no grouped/zero-preserving quantization or frozen probe.
+The second transform operates reversibly on integer coefficient codes, so
+both should match before in reconstructed solution and iteration trajectory.
+The local transfer tests require exact reconstruction parity across repeated
+R/P exchanges, split choices, bit depths, thresholds and corner exclusions.
+Extra compression is not guaranteed: already-transformed coefficients may be
+less correlated, and the extra stage also costs computation.
+
+When matched successful before/both runs exist, summary.json/txt records their
+iteration difference, byte saving, time change, exported solution errors and
+trace equality. REVIEW means parity needs investigation; it does not silently
+change the PDE convergence result. Different MPI reduction order can also
+affect comparisons between separate runs.
+Exported EMI VTK solutions currently have seven significant digits, so exact
+exported equality alone is not proof of full-precision solution equality.
+The packet tests and numerical traces provide additional independent checks.

@@ -1331,6 +1331,7 @@ namespace EmiBddc
       transfer.setProlongateEncoding(options.bddcHuffman != 0);
       transfer.setRestrictTransform(options.bddcGraphLifting != 0);
       transfer.setProlongateTransform(options.bddcGraphLifting != 0);
+      transfer.setTransformBeforeAndAfterQuantization(options.bddcGraphLiftingBothOrders != 0);
       transfer.setRestrictTransformAfterQuantization(options.bddcGraphLiftingAfterQuantization != 0);
       transfer.setProlongateTransformAfterQuantization(options.bddcGraphLiftingAfterQuantization != 0);
       transfer.setRestrictBitlengthEncoding(options.bddcBitlength != 0);
@@ -2004,6 +2005,7 @@ State runBddcSdc(Functional& F,
         subdomain.transfer().setProlongateEncoding(options.bddcHuffman != 0);
         subdomain.transfer().setRestrictTransform(options.bddcGraphLifting != 0);
         subdomain.transfer().setProlongateTransform(options.bddcGraphLifting != 0);
+        subdomain.transfer().setTransformBeforeAndAfterQuantization(options.bddcGraphLiftingBothOrders != 0);
         subdomain.transfer().setRestrictTransformAfterQuantization(options.bddcGraphLiftingAfterQuantization != 0);
         subdomain.transfer().setProlongateTransformAfterQuantization(options.bddcGraphLiftingAfterQuantization != 0);
         subdomain.transfer().setRestrictBitlengthEncoding(options.bddcBitlength != 0);

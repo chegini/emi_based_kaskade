@@ -37,6 +37,9 @@ else:
     full=value('--bddcHuffman')=='1'
     bad=compressed and value('--bddcCompressionBits')=='8' and not full
     family='fgmres' if value('--bddcFgmres')=='1' else 'fcg' if value('--bddcFlexibleCg')=='1' else 'cg'
+    if value('--bddcGraphLiftingBothOrders')=='1':
+        assert value('--bddcGraphLifting')==value('--bddcGraphLiftingAfterQuantization')=='1'
+        print('BDDC combined lifting: floating transform, quantization, reversible integer transform')
     if os.environ.get('FAMILY_TEST'):
         assert value('--bddcUseCg')==str(int(family!='fgmres'))
         assert value('--bddcConvergenceReport')==str(int(family!='fgmres'))
@@ -55,7 +58,7 @@ else:
     print('BDDC subdomains: 20, shared dofs: 216')
     print('BDDC coarse interfaces: corners=0, edges=27, faces=28')
     print(f"BDDC global residual step 1: abs=1e-10 rel={rel} target={value('--bddcRelativeTolerance')} status={'not-converged' if bad else 'converged'} iterations={300 if bad else 10}")
-    with (out/'bddc-convergence-step1.csv').open('w') as f:
+    with (out/('bddc-fgmres-step1.csv' if family=='fgmres' else 'bddc-convergence-step1.csv')).open('w') as f:
         w=csv.writer(f)
         w.writerow(['iteration','relative_residual'])
         w.writerow([300 if bad else 10,rel])
@@ -82,6 +85,7 @@ assert all(Path(p).is_file() for p in sys.argv[1:])
 print('same coordinates: yes')
 reference = Path(sys.argv[2]).parent.name
 error = {'uncompressed-fcg':3e-9, 'uncompressed-fgmres':4e-9}.get(reference,2e-9)
+if reference.startswith('before-'): error=0
 print('relative L2 error: '+str(error))
 print('max absolute error: 1e-8')
 print('mean signed offset (first - reference): 1e-10')
@@ -275,6 +279,21 @@ print('relative L2 after removing mean offset: 1e-9')
                 if row['restriction_bits'] is not None:
                     self.assertEqual(c[c.index('--bddcGraphLifting')+1],str(int(row['transform_order']=='before')))
                     self.assertEqual(c[c.index('--bddcGraphLiftingAfterQuantization')+1],str(int(row['transform_order']=='after')))
+            # Failure of one baseline must skip only its own family.
+            combined=subprocess.run(all_command+['--output','combined','--bits','16',
+                '--skip-quantization','--transform-orders','before','both'],cwd=pepe_repo,
+                env=dict(env,FAMILY_TEST='1'),capture_output=True,text=True)
+            self.assertEqual(combined.returncode,0,combined.stdout+combined.stderr)
+            combined_rows=json.loads((pepe_repo/'combined/summary.json').read_text())
+            self.assertEqual(len(combined_rows),16)
+            pairs=[r['both_vs_before'] for r in combined_rows if r.get('transform_order')=='both']
+            self.assertEqual(len(pairs),6)
+            self.assertTrue(all(p['status']=='EXACT_EXPORTED_SOLUTION_AND_TRACE' for p in pairs))
+            self.assertTrue(all(p['iteration_difference']==0 for p in pairs))
+            combined_calls=[json.loads(line) for line in (pepe_repo/'capture.jsonl').read_text().splitlines()][-16:]
+            for row,c in zip(combined_rows,combined_calls):
+                self.assertEqual(c[c.index('--bddcGraphLiftingBothOrders')+1],
+                                 str(int(row.get('transform_order')=='both')))
             # Failure of one baseline must skip only its own family.
             baseline_failed=subprocess.run(all_command+['--output','one-baseline-failed',
                 '--bits','16','--skip-quantization'],cwd=pepe_repo,
