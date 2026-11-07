@@ -109,6 +109,8 @@ def main():
     parser.add_argument('--plan-only', action='store_true',
                         help='Print validated experiment names without building/running')
     parser.add_argument('--ranks', type=int, default=1)
+    parser.add_argument('--mpi-routing', choices=['legacy','destination'], default='legacy',
+                        help='Route R/P payloads to destinations; compression policy is unchanged')
     parser.add_argument('--refine', type=int, default=0,
                         help='uniform mesh refinement levels, applied to every case (default: 0)')
     parser.add_argument('--tolerance', type=float, default=1e-7)
@@ -229,6 +231,7 @@ def main():
                 'bits':args.bits, 'bddc_ranks':args.ranks, 'direct_ranks':1,
                 'mesh_refinements':args.refine,
                 'steps':1, 'true_relative_tolerance':args.tolerance,
+                'mpi_routing':args.mpi_routing,
                 'restriction_passes':args.restriction_passes,
                 'max_iterations':args.iterations, 'executable_sha256':digest.hexdigest(),
                 'hostname':os.uname().nodename, 'uniform_precision':args.prolongation_bits is None,
@@ -239,13 +242,14 @@ def main():
                 'restriction_range_capture':args.restriction_range_capture,
                 'zero_preserving_restriction':args.zero_preserving_restriction,
                 'byte_counter_scope':'logical application transfers including intra-rank exchanges'}
-    if args.transform_orders:
+    if args.transform_orders or args.mpi_routing=='destination':
         kaskade=Path(env.get('KASKADE7','/kaskade7'))
         sources=[repo/name for name in
                  ('EMI_model.cpp','EMI_bddc.hh','EMI_bddc_precision.hh',
                   'tests/run_emi_quantization_diagnostic.py')]
         sources += [kaskade/'mg'/name for name in
-                    ('bddcSpaceTransfer.hh','bddcSpaceTransfer.hpp','bddcLiftingPlan.hh')]
+                    ('bddcSpaceTransfer.hh','bddcSpaceTransfer.hpp','bddcLiftingPlan.hh',
+                     'bddc.hh','bddc.hpp','bddcMpi.hh','bddcMpiRouting.hh')]
         metadata['source_sha256']={str(p):hashlib.sha256(p.read_bytes()).hexdigest()
                                    for p in sources if p.is_file()}
     (root/'environment.json').write_text(json.dumps(metadata,indent=2)+'\n')
@@ -259,6 +263,7 @@ def main():
         options = ['--bddc','0','--direct','1','--directBackend','mumps-spd',
                    '--bddcCompression','0','--bddcConvergenceReport','0'] if direct else [
                    '--bddc','1','--direct','0','--bddcUseCg',str(int(solver!='fgmres')),
+                   '--bddcMpiRouting',str(int(args.mpi_routing=='destination')),
                    '--bddcCgOriginalResidual',str(0 if solver=='fgmres' else
                                                    1 if solver=='fcg' else args.cg_original_residual),
                    '--bddcFlexibleCg',str(int(solver=='fcg')),

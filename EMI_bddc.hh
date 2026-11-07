@@ -261,6 +261,7 @@ namespace EmiBddc
   struct BddcRunAccounting
   {
     CompressionReport compression;
+    Kaskade::BDDC::MpiRoutingTraffic routing;
     ProfileTimes profile;
     OuterSolverTraffic outer;
   };
@@ -2063,6 +2064,7 @@ State runBddcSdc(Functional& F,
                                                     verbose,
                                                     options.mpi != 0,
                                                     options.masterWorker != 0);
+    solver.setMpiDestinationRouting(options.bddcMpiRouting != 0);
     if constexpr (requires { options.bddcRestrictionPasses; })
       solver.setRestrictionPasses(options.bddcRestrictionPasses);
     if (options.bddcFlexibleCg)
@@ -2689,6 +2691,11 @@ State runBddcSdc(Functional& F,
                      *static_cast<unsigned long long>(totalSteps) << "\n";
     }
     // The retained solver reports cumulative traffic. Add it once at the end.
+    if (options.bddcMpiRouting)
+    {
+      accounting.routing.add(solver.routingTraffic());
+      if (finalPhase) accounting.routing.printGlobal();
+    }
     if (finalPhase && rankZero)
       std::cout << "BDDC outer solver logical payload bytes: " << outerTraffic.bytes
                 << " collectives=" << outerTraffic.collectives << '\n';

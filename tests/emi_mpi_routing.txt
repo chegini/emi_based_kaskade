@@ -1,0 +1,210 @@
+MPI routing validation, stage 1
+===============================
+
+Branch: feature/inter-node-compression (EMI and Kaskade).
+Executable option: --bddcMpiRouting 0|1 (default 0).
+Transform-order runner option: --mpi-routing legacy|destination (default legacy).
+
+Scope
+-----
+1 selects destination routing for iterative BDDC restriction/prolongation only.
+It is supported for non-SDC MPI BDDC, including CG, FCG, FGMRES, compressed and
+uncompressed transfers. All ranks must select the same option. Operator-audit
+and preconditioner-probe paths reject it rather than silently ignoring it.
+Raw starting steps and compressed continuation retain the same policy and
+accumulate routing counters across the solver rebuild at the switch.
+
+The old implementation Allgathervs all cross-rank packets to every rank; each
+receiver then discards packets for other destinations. The opt-in implementation
+batches by destination and uses Alltoall for counts and Alltoallv for payloads.
+Same-rank copies remain local. The order in which each subdomain accumulates
+contributions is unchanged: local packets first, then ascending source ranks,
+with the producer's order retained inside each bucket. Neither quantization,
+solver recurrence, stopping rule, split, transform, codebook policy nor packet
+format changes. Exact numerical parity is expected and checked, not assumed.
+
+MPI_Comm_split_type(MPI_COMM_TYPE_SHARED) discovers shared-memory groups once
+when routing is enabled. The minimum world rank identifies each group. The
+temporary communicator is freed immediately; no communicator survives finalize.
+This identifies shared-memory capability; the MPI library chooses its transport.
+No host-name parsing or assumption of contiguous rank numbering is used.
+
+The six routing lines count sent logical payload bytes/packets by R/P and
+same-rank / different-rank-same-node / inter-node endpoints. Each packet is
+counted once at its producer. Their bytes must sum to the existing transmitted
+logical payload counter. They exclude batch headers, MPI framing, count/control
+collectives, setup, codebook training, coarse solves and global corrections.
+They are NOT measurements of physical network traffic. MPI implementations may
+internally forward collective messages through intermediate ranks.
+
+Stage 1 does NOT turn off local compression. Setup weight/plan exchanges and
+training-symbol gathers are also unchanged. Global scalar/correction collectives
+still occur. A two-node topology does not imply all communication is compressed.
+
+Why the local bypass is a separate numerical change
+--------------------------------------------------
+The compressed transfer keeps one reconstructed contribution per producer/DOF,
+including its own copy and published-residual feedback. A DOF can be shared by
+three or more subdomains spanning local and remote ranks. Sending original raw
+values to local copies while remote copies receive quantized values would make
+their assembled interface values disagree. A bypass needs a consistent policy
+for these mixed owner sets (or node-level aggregation), plus explicit continuity
+and feedback tests; it cannot be a simple conditional around the MPI send.
+
+First Linux single-node check (from the EMI repository)
+-----------------------------------------------------
+podman run --rm --pull=never \
+  --memory=24g --memory-swap=24g --cpus=2 \
+  --volume /data/numerik/people/fchegini/kaskade7_new:/kaskade7 \
+  --volume "$(dirname "$PWD"):/BDDC" \
+  --workdir /BDDC/emiModelBddcSdc_new_scratch \
+  --entrypoint /bin/bash \
+  localhost/kaskade7-robin-cluster:20261105 \
+  tests/run_emi_mpi_routing_check.sh
+
+This checks node discovery and real production R/P exchanges, builds EMI, then
+runs 10cells with two ranks: one direct reference and six legacy/destination
+pairs (CG, FCG, FGMRES, each raw and 16-bit before+split). One physical step,
+no histograms. Each pair must have identical full-precision state/RHS/correction
+snapshots, convergence CSVs, iterations, residuals and logical bytes. All solves
+must meet the true residual tolerance. Errors vs direct and raw BDDC are also
+reported without imposing an undocumented solution-error threshold.
+
+Output: output/emi-mpi-routing-<case>-<timestamp>-<pid>/
+Contains environment/source hashes, commands, logs, snapshots and summary.json.
+The expected node count is one and inter-node packet counts must be zero.
+The runner stops at the first failure; it never labels an incomplete pair PASS.
+Validation timings include snapshot output and are not performance measurements.
+
+After 10cells passes, use the same command with --case pepe. Other transform
+orders can be selected with --transform-order after|both. The existing matrix
+runner also accepts --mpi-routing destination; it does not by itself compare
+against legacy routing or validate the topology counters.
+
+Standalone transport tests (no mesh or Dune)
+------------------------------------------
+mpicxx -std=c++20 -O2 -DKASKADE_HAVE_MPI -I /kaskade7 \
+  /kaskade7/tests/bddcMpiRouting/bddcMpiRouting.cpp -o /tmp/bddc-routing
+mpirun -np 2 /tmp/bddc-routing 1
+python3 tests/test_bddc_mpi_exchange.py --kaskade /kaskade7 --ranks 1 2
+
+The final numeric argument in the standalone test is the expected shared-memory
+domain count. On the later ZIB two-node test use 2, with an actual scheduler
+allocation and ranks on both nodes. Do not simulate remote nodes by assigning
+fake node IDs in the production path. Only the route-classification unit test
+uses an artificial interleaved map.
+
+ZIB two-node application check
+------------------------------
+The standalone transport test passed with four ranks on htc-cmp008/009,
+using Slurm pmix_v5 and the container Open MPI 4.1.8 pmix3x component.
+It reported ranks=4 nodes=2 despite unavailable munge/shmem2 component
+warnings and a vader CMA fallback. This is correctness evidence, not a
+performance measurement or confirmation of full EMI routing on two nodes.
+
+Use an active two-node allocation in partition big (high-mem and small allow
+only one node). From the host EMI repository, build on one allocated node:
+
+emi_sif=/data/numerik/people/fchegini/containers/kaskade-robin-20261105/kaskade7-robin.sif
+emi_kaskade=/data/numerik/people/fchegini/kaskade7_new
+srun --mpi=none --nodes=1 --ntasks=1 --ntasks-per-node=1 \
+  apptainer exec --cleanenv \
+  --bind "$emi_kaskade:/kaskade7" \
+  --bind "$(dirname "$PWD"):/BDDC" \
+  --pwd /BDDC/emiModelBddcSdc_new_scratch "$emi_sif" \
+  /bin/bash tests/build_emi_mpi_routing_cluster.sh
+
+After the build passes, run the orchestrator on the host in that allocation:
+
+python3 tests/run_emi_mpi_routing_check.py \
+  --case 10cells --ranks 4 --expected-nodes 2 \
+  --slurm-container "$emi_sif" --kaskade "$emi_kaskade"
+
+The orchestrator starts every solve through srun and Apptainer; no numerical
+solve runs on the login node. Direct uses one rank on one node; BDDC uses
+four ranks, two per node, with block placement. It preserves launcher PMIx
+variables, explicitly selects the container Open MPI libraries, and uses
+ob1 with self,vader,tcp, matching the successful transport check. Do not use
+the single-node shell wrapper for this launch or nest mpirun inside srun.
+
+The checker first verifies container/executable visibility on both nodes,
+then runs the same 13 reference/paired cases. Destination runs must discover
+two shared-memory domains and report positive inter-node bytes and packets
+for both restriction and prolongation. The application pairs must retain
+exact snapshots/traces/iterations/bytes. Logs and commands are retained,
+including preflight output and allocation metadata. Each solve has a
+10-minute Slurm step limit; the allocation's remaining time still applies.
+Only after 10cells passes, repeat with --case pepe.
+
+Compression remains enabled on local interfaces. These runs validate routing
+before implementing a numerically consistent local compression bypass.
+
+Pepe setup timeout diagnostic
+----------------------------
+The first four-rank/two-node Pepe legacy CG run was terminated by Slurm's
+10-minute step limit before material replication completed. The last standard
+assembly messages were rank 0's five owned subdomains; they do not show other
+ranks' progress. This does not establish a CG failure or identify the bottleneck.
+
+After rebuilding with build_emi_mpi_routing_cluster.sh, use the same host
+checker command with --case pepe --setup-diagnostic-only. This runs exactly
+one uncompressed legacy CG case, with no direct reference, compressed cases,
+or parity comparison. The 10-minute limit is unchanged.
+
+The option enables EMI_MATERIAL_TRACE=1 inside each application process.
+Rank-local, flushed stderr messages show assembly, the error-consensus
+collectives, matrix packing, length/payload broadcasts and reconstruction.
+Subdomains in these messages are numbered from one; zero denotes a whole
+stage. Elapsed seconds are local to each progress object (assembly and
+exchange have separate clocks); they are not synchronized wall timestamps.
+The observer adds no MPI calls, barriers, or arithmetic on solution data.
+It is off by default and its timings are not performance measurements.
+Inspect the new run's cg-uncompressed-legacy/run.log while it runs.
+
+To isolate the Open MPI shared-memory transport in this container, repeat the
+single setup diagnostic with --slurm-btl self,tcp. This sets the BTL selection
+inside the container (a host export alone is overridden by the runner).
+It disables vader and uses TCP also between different ranks on the same node;
+self remains for send-to-self. It does not change compression or matrix data.
+The default remains self,vader,tcp. No EMI rebuild is needed to change BTLs.
+The selected transports are printed and saved in environment.json/command.sh.
+This is a diagnostic comparison, not the desired final shared-memory policy
+or a network-performance measurement. A successful TCP-only run would point
+to a transport-dependent problem, but would not alone identify its root cause.
+
+Validated checkpoint (user-run Linux/cluster tests)
+-------------------------------------------------
+All 13 reference/paired cases passed for each of these campaigns:
+
+* Single-node 10cells, two ranks:
+  output/emi-mpi-routing-10cells-20261106T225419Z-82
+* Single-node Pepe, two ranks:
+  output/emi-mpi-routing-pepe-20261106T225600Z-82
+* Two-node 10cells, four ranks, self,vader,tcp:
+  output/emi-mpi-routing-10cells-20261106T231730Z-3313988
+* Two-node Pepe, four ranks, self,tcp:
+  output/emi-mpi-routing-pepe-20261106T234109Z-3444773
+
+The paired checks cover CG, FCG and FGMRES, each uncompressed and 16-bit
+transform-before-quantization with constant splitting. They require exact
+legacy/destination snapshot, trace, iteration, residual and logical-byte
+parity. Two-node destination cases also require nonzero inter-node R/P
+traffic. These are correctness results for the tested settings.
+
+Pepe with self,vader,tcp timed out during the first material payload broadcast:
+ranks 1 and 3 reported receipt/reconstruction while ranks 0 and 2 had not
+reported broadcast completion. Repeating with self,tcp completed the single
+uncompressed solve in about 91.59 s; material exchange took about 0.57 s.
+This isolates a transport-dependent problem but does not establish its
+precise cause. Restoring working shared-memory transport remains pending.
+TCP-only runs are not evidence for same-node shared-memory performance.
+
+No local compression bypass is included in this checkpoint. Generated logs,
+meshes and solution files are retained outside version control.
+
+References
+----------
+MPI shared-memory grouping:
+https://www.mpi-forum.org/docs/mpi-3.1/mpi31-report/node156.htm
+MPI Alltoallv semantics:
+https://www.mpi-forum.org/docs/mpi-3.1/mpi31-report/node109.htm

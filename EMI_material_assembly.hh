@@ -3,10 +3,14 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
+#include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -15,6 +19,33 @@
 
 namespace EmiBddc
 {
+  // Optional rank-local diagnostics: no new MPI calls or numerical changes.
+  // Seconds are elapsed on this rank, not synchronized across nodes.
+  class MaterialProgress
+  {
+  public:
+    explicit MaterialProgress(int rank) : rank_(rank)
+    {
+      char const* value = std::getenv("EMI_MATERIAL_TRACE");
+      enabled_ = value && value[0] == '1' && value[1] == '\0';
+    }
+    void mark(char const* stage, size_t subdomain = 0, size_t words = 0) const
+    {
+      if (!enabled_) return;
+      std::ostringstream line;
+      line << "[material-progress rank=" << rank_ << " elapsed_s="
+           << std::chrono::duration<double>(Clock::now()-start_).count()
+           << " subdomain=" << subdomain << " words=" << words << "] "
+           << stage << '\n';
+      std::cerr << line.str() << std::flush;
+    }
+  private:
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point start_ = Clock::now();
+    int rank_;
+    bool enabled_ = false;
+  };
+
   // Full scalar matrices have already been extracted from the legacy
   // assembler, including its symmetry convention. Exchange only nonzeros:
   // each entry is (global row, global column, exact double bits). There is
@@ -76,8 +107,10 @@ namespace EmiBddc
 #ifdef KASKADE_HAVE_MPI
     if (layout.enabled() && layout.size() > 1)
     {
+      MaterialProgress progress(layout.rank());
       for (size_t subdomain = 0; subdomain < matrices.size(); ++subdomain)
       {
+        progress.mark("pack begin",subdomain+1);
         int const owner = layout.owner(static_cast<int>(subdomain));
         std::vector<std::uint64_t> words;
         std::exception_ptr error;
@@ -91,10 +124,13 @@ namespace EmiBddc
           }
         }
         catch (...) { error = std::current_exception(); }
+        progress.mark("pack finished; error allreduce begin",subdomain+1,words.size());
         checkInterfaceAssemblyError(error,layout,"Material matrix packing");
 
         std::uint64_t length = words.size();
+        progress.mark("length broadcast begin",subdomain+1);
         MPI_Bcast(&length,1,MPI_UINT64_T,owner,MPI_COMM_WORLD);
+        progress.mark("length broadcast done; allocation begin",subdomain+1,length);
         try
         {
           if (length%3 != 0 || length > words.max_size())
@@ -103,7 +139,9 @@ namespace EmiBddc
             words.resize(static_cast<size_t>(length));
         }
         catch (...) { error = std::current_exception(); }
+        progress.mark("allocation finished; error allreduce begin",subdomain+1,words.size());
         checkInterfaceAssemblyError(error,layout,"Material matrix receive allocation");
+        progress.mark("payload broadcasts begin",subdomain+1,words.size());
         for (size_t offset = 0; offset < words.size();)
         {
           int const count = static_cast<int>(std::min(words.size()-offset,
@@ -111,6 +149,7 @@ namespace EmiBddc
           MPI_Bcast(words.data()+offset,count,MPI_UINT64_T,owner,MPI_COMM_WORLD);
           offset += count;
         }
+        progress.mark("payload broadcasts done; reconstruction begin",subdomain+1,words.size());
         try
         {
           if (layout.rank() != owner)
@@ -120,7 +159,9 @@ namespace EmiBddc
           }
         }
         catch (...) { error = std::current_exception(); }
+        progress.mark("reconstruction finished; error allreduce begin",subdomain+1,words.size());
         checkInterfaceAssemblyError(error,layout,"Material matrix reconstruction");
+        progress.mark("matrix complete",subdomain+1,words.size());
       }
     }
 #else

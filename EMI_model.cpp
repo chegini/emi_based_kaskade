@@ -98,6 +98,7 @@ struct EmiOptions
   int algebraicAdaptivity = 0;
   int bddc = 0;
   int bddcCompression = 0;
+  int bddcMpiRouting = 0;
   int bddcCompressionBits = 16;
   int bddcRestrictCompressionBits = -1;
   int bddcProlongateCompressionBits = -1;
@@ -957,6 +958,8 @@ int main(int argc, char* argv[])
     ("algebraicAdaptivityTolerance", options.algebraicAdaptivityTolerance, options.algebraicAdaptivityTolerance, "AA dof-selection tolerance; 0 disables selection")
     ("bddc", options.bddc, options.bddc, "use BDDC solver for EMI: 0=no, 1=yes")
     ("bddcCompression", options.bddcCompression, options.bddcCompression, "use quantized BDDC transfer: 0=no, 1=yes")
+    ("bddcMpiRouting", options.bddcMpiRouting, options.bddcMpiRouting,
+     "interface payload routing: 0=legacy allgather, 1=destination MPI; compression unchanged")
     ("bddcCompressionBits", options.bddcCompressionBits, options.bddcCompressionBits, "quantization bits for compressed BDDC transfer")
     ("bddcRestrictCompressionBits", options.bddcRestrictCompressionBits,
      options.bddcRestrictCompressionBits, "restriction quantization bits: -1=inherit common, 1..32=override")
@@ -1056,6 +1059,11 @@ int main(int argc, char* argv[])
     throw std::runtime_error("Require 1 <= sdcStartCollocationPoints <= sdcCollocationPoints");
   if (options.bddcIterations < 1)
     throw std::runtime_error("bddcIterations must be at least 1");
+  if (options.bddcMpiRouting < 0 || options.bddcMpiRouting > 1 ||
+      (options.bddcMpiRouting && (!options.bddc || !options.mpi || options.sdc ||
+                                options.direct || options.bddcOperatorAudit ||
+                                options.bddcPreconditionerProbe)))
+    throw std::runtime_error("bddcMpiRouting=1 requires non-SDC MPI BDDC without audit/probe");
   if (options.bddcTolerance <= 0.0)
     throw std::runtime_error("bddcTolerance must be positive");
   if (options.potentialDiagnostics < 0 || options.potentialDiagnostics > 1 ||
@@ -1539,6 +1547,8 @@ int main(int argc, char* argv[])
     Kaskade::BDDC::MpiDomainLayout materialLayout;
     materialLayout.configure(options.bddcMaterialAssembly && options.mpi != 0,
                              bddcData.tags.size(),options.masterWorker != 0);
+    EmiBddc::MaterialProgress materialProgress(materialLayout.rank());
+    materialProgress.mark("assembly begin");
     std::exception_ptr materialError;
     try
     {
@@ -1547,6 +1557,7 @@ int main(int argc, char* argv[])
         if (options.bddcMaterialAssembly && !materialLayout.owns(static_cast<int>(subdomain)))
           continue;
         int const tag = bddcData.tags[subdomain];
+        materialProgress.mark("subdomain assembly begin",subdomain+1);
         if (detailedOutput)
           std::cout << "  subdomain " << subdomain+1 << "/" << bddcData.tags.size()
                     << " (tag " << tag << "): assembling..." << std::flush;
@@ -1558,16 +1569,20 @@ int main(int argc, char* argv[])
           SemiLinearization(equation,u,u,duState),cellFilter,Assembler::MATRIX,
           options.assemblyThreads);
         localContributions[subdomain] = assembler.template get<Matrix>(false);
+        materialProgress.mark("subdomain assembly done",subdomain+1);
         if (detailedOutput)
           std::cout << " done\n" << std::flush;
       }
     }
     catch (...) { materialError = std::current_exception(); }
+    materialProgress.mark("assembly finished; error allreduce begin");
     EmiBddc::checkInterfaceAssemblyError(materialError,materialLayout,"Material assembly");
+    materialProgress.mark("assembly error allreduce done");
     if (options.bddcMaterialAssembly)
     {
       phaseProfile.next(Phase::materialExchange);
       EmiBddc::replicateMaterialMatrices(localContributions,lhs,materialLayout);
+      materialProgress.mark("all matrix exchanges done");
       if (detailedOutput)
         std::cout << "BDDC material assembly: source owners, sparse matrix exchange\n";
     }
