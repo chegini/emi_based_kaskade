@@ -99,6 +99,7 @@ struct EmiOptions
   int bddc = 0;
   int bddcCompression = 0;
   int bddcMpiRouting = 0;
+  int bddcLocalCompressionBypass = 0;
   int bddcCompressionBits = 16;
   int bddcRestrictCompressionBits = -1;
   int bddcProlongateCompressionBits = -1;
@@ -159,6 +160,26 @@ struct EmiOptions
   bool direct = false;
   bool cgShift = true;
 };
+
+// When every rank is on one shared-memory node there is nothing to compress.
+// Use the ordinary solver instantiation as well as raw packets: a separate
+// compressed template instantiation need not reproduce every rounding bit.
+bool selectSingleNodeRawBypass(EmiOptions& effective, int nodes)
+{
+  if (!effective.bddcLocalCompressionBypass || nodes!=1) return false;
+  effective.bddcCompression=0;
+  effective.bddcLocalCompressionBypass=0;
+  effective.bddcProlongateConstantSplit=0;
+  effective.bddcCgConstantSplitExperiment=0;
+  effective.bddcGraphLifting=0;
+  effective.bddcGraphLiftingAfterQuantization=0;
+  effective.bddcGraphLiftingBothOrders=0;
+  effective.bddcZigzag=0;
+  effective.bddcBitlength=0;
+  effective.bddcHuffman=0;
+  effective.bddcUncompressedSteps=0;
+  return true;
+}
 
 // This smoke test is deliberately independent of BDDC. It verifies that an
 // MPI-enabled executable can initialize and communicate while the normal
@@ -960,6 +981,8 @@ int main(int argc, char* argv[])
     ("bddcCompression", options.bddcCompression, options.bddcCompression, "use quantized BDDC transfer: 0=no, 1=yes")
     ("bddcMpiRouting", options.bddcMpiRouting, options.bddcMpiRouting,
      "interface payload routing: 0=legacy allgather, 1=destination MPI; compression unchanged")
+    ("bddcLocalCompressionBypass", options.bddcLocalCompressionBypass, options.bddcLocalCompressionBypass,
+     "keep same-node shared DOFs exact on all copies, including mixed-node copies (0/1)")
     ("bddcCompressionBits", options.bddcCompressionBits, options.bddcCompressionBits, "quantization bits for compressed BDDC transfer")
     ("bddcRestrictCompressionBits", options.bddcRestrictCompressionBits,
      options.bddcRestrictCompressionBits, "restriction quantization bits: -1=inherit common, 1..32=override")
@@ -1064,6 +1087,13 @@ int main(int argc, char* argv[])
                                 options.direct || options.bddcOperatorAudit ||
                                 options.bddcPreconditionerProbe)))
     throw std::runtime_error("bddcMpiRouting=1 requires non-SDC MPI BDDC without audit/probe");
+  if (options.bddcLocalCompressionBypass<0 || options.bddcLocalCompressionBypass>1 ||
+      (options.bddcLocalCompressionBypass && (!options.bddcCompression ||
+       options.bddcMpiRouting!=1 || options.bddcHistogram ||
+       options.bddcRestrictGroupSize || options.bddcProlongateGroupSize ||
+       options.bddcRestrictZeroPreserving || options.bddcProlongateZeroPreserving ||
+       options.bddcCompressionMinInterfaceSize)))
+    throw std::runtime_error("Local bypass requires compressed destination MPI routing, affine ungrouped quantization, no threshold or histograms");
   if (options.bddcTolerance <= 0.0)
     throw std::runtime_error("bddcTolerance must be positive");
   if (options.potentialDiagnostics < 0 || options.potentialDiagnostics > 1 ||
@@ -1819,7 +1849,16 @@ int main(int argc, char* argv[])
       EmiBddc::printLocalMatrixReconstruction(bddcData,bddcData.localMatrices,lhs,
                                               nDofs,options.mpi != 0);
     phaseProfile.next(Phase::solver);
-    if (options.bddcCompression)
+    auto effectiveTransferOptions=options;
+    if (options.bddcLocalCompressionBypass)
+    {
+      Kaskade::BDDC::MpiNodeTopology topology;
+      topology.configure();
+      if (selectSingleNodeRawBypass(effectiveTransferOptions,topology.nodes()) && outputRankZero)
+        std::cout << "BDDC local compression bypass: on; nodes=1; backend=uncompressed; "
+                     "all steps use raw transfers\n";
+    }
+    if (effectiveTransferOptions.bddcCompression)
     {
       using CompressedTransfer = Kaskade::BDDC::SpaceTransferDataCompression<1,double,double,std::uint32_t,std::uint8_t>;
       if (!options.bddcUncompressedSteps)
@@ -1856,7 +1895,7 @@ int main(int argc, char* argv[])
       }
     }
     else
-      u = EmiBddc::runBddc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,lhs,nDofs,steps,options);
+      u = EmiBddc::runBddc<Kaskade::BDDC::SpaceTransfer<1,double,double>>(F,spaces,u,uAll,bddcData,lhs,nDofs,steps,effectiveTransferOptions);
     if (options.bddcPreconditionerProbe) return 0;
     phaseProfile.next(Phase::vtkOutput);
     if (writeVtkOnThisRank(options.writeVTK))

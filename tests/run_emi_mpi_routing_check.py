@@ -37,6 +37,8 @@ def arguments(argv=None):
     p.add_argument('--plan-only', action='store_true')
     p.add_argument('--setup-diagnostic-only', action='store_true',
                    help='Run only uncompressed legacy CG with per-rank material progress; no parity claim')
+    p.add_argument('--check-local-bypass', action='store_true',
+                   help='Also validate exact local/mixed-owner DOFs with compressed remote transfers')
     p.add_argument('--output', type=Path)
     a = p.parse_args(argv)
     if min(a.ranks, a.expected_nodes, a.iterations) < 1 or a.expected_nodes > a.ranks:
@@ -47,6 +49,8 @@ def arguments(argv=None):
         p.error('Slurm routing check requires equal ranks per node')
     if not a.slurm_container and a.slurm_btl != 'self,vader,tcp':
         p.error('--slurm-btl requires --slurm-container')
+    if a.setup_diagnostic_only and a.check_local_bypass:
+        p.error('Setup-only and local-bypass validation are separate checks')
     a.repo = a.repo.resolve()
     a.kaskade = a.kaskade.resolve()
     if a.slurm_container:
@@ -58,13 +62,16 @@ def arguments(argv=None):
 def planned_modes(a):
     if a.setup_diagnostic_only:
         return [('cg-uncompressed-legacy', 'cg', False, False)]
-    return [('direct', 'fgmres', False, False)] + [
+    modes = [('direct', 'fgmres', False, False)] + [
         (f'{solver}-{kind}-{route}', solver, kind == 'compressed-split', route == 'destination')
         for solver in a.solvers for kind in ('uncompressed', 'compressed-split')
         for route in ('legacy', 'destination')]
+    if a.check_local_bypass:
+        modes += [(f'{s}-compressed-split-local-bypass', s, True, True) for s in a.solvers]
+    return modes
 
 
-def make_command(a, folder, launcher, solver, compressed, routed, direct=False):
+def make_command(a, folder, launcher, solver, compressed, routed, direct=False, bypass=False):
     # Reuse the explicit physical/solver controls and full-precision snapshot export.
     a.solver = solver
     cmd = command(a, 'direct' if direct else 'scheduled' if compressed else 'uncompressed',
@@ -72,6 +79,7 @@ def make_command(a, folder, launcher, solver, compressed, routed, direct=False):
     if compressed and solver in ('cg', 'fcg'):
         cmd[cmd.index('--bddcCgConstantSplitExperiment')+1] = '1'
     cmd += ['--bddcMpiRouting', str(int(routed and not direct))]
+    cmd += ['--bddcLocalCompressionBypass', str(int(bypass and not direct))]
     if a.setup_diagnostic_only and not a.slurm_container:
         model_index = cmd.index(str(a.repo/'emiModel'))
         cmd[model_index:model_index] = ['env', 'EMI_MATERIAL_TRACE=1']
@@ -141,7 +149,9 @@ def main():
     a = arguments()
     modes = planned_modes(a)
     print('Checks: '+', '.join(m[0] for m in modes), flush=True)
-    print('One physical step; routing only; compression unchanged; histograms OFF.', flush=True)
+    print('One physical step; histograms OFF; '+
+          ('includes local-bypass numerical comparison.' if a.check_local_bypass else
+           'routing only; compression unchanged.'), flush=True)
     if a.slurm_container:
         print('Container Open MPI transports: '+a.slurm_btl, flush=True)
     if a.setup_diagnostic_only:
@@ -199,7 +209,8 @@ def main():
         folder = root/name
         folder.mkdir()
         require(digest(model) == model_hash, 'Executable changed during validation')
-        cmd = make_command(a, folder, launcher, solver, compressed, routed, name == 'direct')
+        bypass = name.endswith('-local-bypass')
+        cmd = make_command(a, folder, launcher, solver, compressed, routed, name == 'direct', bypass)
         (folder/'command.sh').write_text(shlex.join(['env', 'OPENBLAS_NUM_THREADS=1',
                                                    'OMP_NUM_THREADS=1']+cmd)+'\n')
         print('Running '+name+' ...', flush=True)
@@ -229,7 +240,28 @@ def main():
                 row['routes'] = routing_counts(log, a.expected_nodes)
                 require(sum(r['bytes'] for r in row['routes']) == row['transmitted_sent_bytes'],
                         'Routing counters do not sum to total logical payload bytes')
-                legacy_name = name.removesuffix('destination')+'legacy'
+                if bypass:
+                    require('BDDC local compression bypass: on;' in log,
+                            'Missing local-bypass policy confirmation')
+                    if a.expected_nodes == 1:
+                        require('nodes=1; backend=uncompressed; all steps use raw transfers' in log,
+                                'Single-node bypass did not select the uncompressed backend')
+                        row['effective_transfer_backend'] = 'uncompressed'
+                    else:
+                        row['effective_transfer_backend'] = 'compressed-with-exact-local-dofs'
+                    row['error_vs_compressed_all_interfaces'] = error_metrics(
+                        read(folder/'potential-state-step1.csv')['u'],
+                        read(root/f'{solver}-compressed-split-destination/potential-state-step1.csv')['u'])
+                    if a.expected_nodes > 1:
+                        # Quantization changes with placement. Do NOT require parity with
+                        # the all-compressed case or hide its solution error.
+                        report['checks'][name] = 'CONVERGED_WITH_NODE_TOPOLOGY_AND_BYTE_ACCOUNTING'
+                        row['status'] = 'PASS'
+                        print('  PASS (mixed-node solution differences recorded)', flush=True)
+                        save()
+                        continue
+                legacy_name = (f'{solver}-uncompressed-destination' if bypass else
+                               name.removesuffix('destination')+'legacy')
                 baseline = root/legacy_name
                 snapshots_equal(baseline, folder, (0, 1))
                 trace = 'bddc-fgmres-step1.csv' if solver == 'fgmres' else 'bddc-convergence-step1.csv'
@@ -250,7 +282,10 @@ def main():
         print('Single uncompressed solve passed; no routing parity comparison. Results: '+str(root), flush=True)
         return 0
     print('All routing parity checks passed. Results: '+str(root), flush=True)
-    print('Compression is still applied to local interfaces. Local bypass is the next stage.', flush=True)
+    if a.check_local_bypass:
+        print('Local bypass checked: mixed-owner DOFs remain exact across nodes; errors are reported without a hidden acceptance threshold.', flush=True)
+    else:
+        print('Compression is still applied to local interfaces. Local bypass is opt-in.', flush=True)
     return 0
 
 

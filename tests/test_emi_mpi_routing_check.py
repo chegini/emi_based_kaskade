@@ -13,6 +13,55 @@ from test_emi_compression_report import extract
 
 
 class RoutingCheck(unittest.TestCase):
+    def test_single_node_raw_backend(self):
+        repo = Path(__file__).resolve().parents[1]
+        source = (repo/'EMI_model.cpp').read_text()
+        options = extract(source, 'struct EmiOptions').replace('Kaskade::BDDC::EDGE', '0')+';'
+        helper = extract(source, 'bool selectSingleNodeRawBypass(')
+        checks = r'''
+int main() {
+  for (int nodes: {1,2,4}) for (int bypass: {0,1}) for (int solver: {0,1,2}) {
+    EmiOptions o;
+    o.bddcCompression=1; o.bddcLocalCompressionBypass=bypass; o.bddcMpiRouting=1;
+    o.bddcUseCg=solver!=2; o.bddcFlexibleCg=solver==1; o.bddcFgmres=solver==2;
+    o.bddcProlongateConstantSplit=1; o.bddcCgConstantSplitExperiment=solver!=2;
+    o.bddcGraphLifting=1; o.bddcGraphLiftingAfterQuantization=1; o.bddcGraphLiftingBothOrders=1;
+    o.bddcZigzag=1; o.bddcBitlength=1; o.bddcHuffman=1;
+    o.bddcUncompressedSteps=5; o.bddcRestrictionPasses=2; o.dt=0.013;
+    bool selected=selectSingleNodeRawBypass(o,nodes);
+    if (selected!=(bypass && nodes==1)) return 1;
+    if (o.bddcUseCg!=(solver!=2) || o.bddcFlexibleCg!=(solver==1) ||
+        o.bddcFgmres!=(solver==2) || o.bddcMpiRouting!=1 ||
+        o.bddcRestrictionPasses!=2 || o.dt!=0.013) return 2;
+    if (selected) {
+      if (o.bddcCompression || o.bddcLocalCompressionBypass || o.bddcProlongateConstantSplit ||
+          o.bddcCgConstantSplitExperiment || o.bddcGraphLifting || o.bddcGraphLiftingAfterQuantization ||
+          o.bddcGraphLiftingBothOrders || o.bddcZigzag || o.bddcBitlength || o.bddcHuffman ||
+          o.bddcUncompressedSteps) return 3;
+    } else {
+      if (!o.bddcCompression || o.bddcLocalCompressionBypass!=bypass ||
+          !o.bddcProlongateConstantSplit || !o.bddcGraphLiftingBothOrders ||
+          !o.bddcHuffman || o.bddcUncompressedSteps!=5) return 4;
+    }
+  }
+}
+'''
+        with tempfile.TemporaryDirectory(prefix='emi-bypass-backend-') as tmp:
+            cpp, binary = Path(tmp)/'backend.cpp', Path(tmp)/'backend'
+            cpp.write_text('#include <string>\n#include "EMI_bddc_precision.hh"\n'+options+'\n'+helper+'\n'+checks)
+            subprocess.run(shlex.split(os.environ.get('CXX', 'c++'))+
+                           ['-std=c++20', '-I', str(repo), str(cpp), '-o', str(binary)], check=True)
+            subprocess.run([str(binary)], check=True)
+
+    def test_local_bypass_commands(self):
+        a = arguments(['--check-local-bypass'])
+        self.assertEqual(len(planned_modes(a)), 16)
+        for solver in ('cg', 'fcg', 'fgmres'):
+            cmd = make_command(a, Path('/tmp/bypass'), ['mpirun'], solver, True, True, bypass=True)
+            self.assertEqual(cmd[cmd.index('--bddcLocalCompressionBypass')+1], '1')
+            self.assertEqual(cmd[cmd.index('--bddcMpiRouting')+1], '1')
+            self.assertEqual(cmd[cmd.index('--bddcCompression')+1], '1')
+
     def test_tcp_only_container(self):
         a = arguments(['--slurm-container', '/shared/image.sif',
                        '--slurm-btl', 'self,tcp', '--setup-diagnostic-only'])
@@ -100,6 +149,16 @@ class RoutingCheck(unittest.TestCase):
                         cmd = make_command(a, Path('/tmp/out'), ['mpirun'], solver, compressed, routed)
                         add(cmd, True)
         add(make_command(a, Path('/tmp/out'), ['mpirun'], 'fgmres', False, False, True), True)
+        for solver in ('cg', 'fcg', 'fgmres'):
+            cmd = make_command(a, Path('/tmp/out'), ['mpirun'], solver, True, True, bypass=True)
+            add(cmd, True)
+            for flag in ('--bddcCompression', '--bddcMpiRouting'):
+                invalid = list(cmd)
+                invalid[invalid.index(flag)+1] = '0'
+                add(invalid, False)
+            invalid = list(cmd)
+            invalid[invalid.index('--bddcHistogram')+1] = '1'
+            add(invalid, False)
         cmd = make_command(a, Path('/tmp/out'), ['mpirun'], 'fgmres', False, True)
         for flag, value in [('--mpi', '0'), ('--sdc', '1'), ('--bddcMpiRouting', '2')]:
             invalid = list(cmd)

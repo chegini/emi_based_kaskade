@@ -1993,6 +1993,19 @@ State runBddcSdc(Functional& F,
     auto const transferStart = options.profile
                              ? ProfileTimes::Clock::now()
                              : ProfileTimes::Clock::time_point{};
+    std::vector<int> compressionNodes;
+    if (options.bddcLocalCompressionBypass)
+    {
+      Kaskade::BDDC::MpiNodeTopology topology;
+      topology.configure();
+      Kaskade::BDDC::MpiDomainLayout owners;
+      owners.configure(true,subdomains.size(),options.masterWorker!=0);
+      for (std::size_t id=0; id<subdomains.size(); ++id)
+        compressionNodes.push_back(topology.leaders().at(owners.owner(id)));
+      if (mpiRankZero(true))
+        std::cout << "BDDC local compression bypass: on; mixed-owner DOFs exact on all copies; nodes="
+                  << topology.nodes() << "\n";
+    }
     if constexpr (requires(Transfer& transfer) {
                     transfer.setQuantizationBits(0);
                     transfer.setRestrictEncoding(true);
@@ -2038,10 +2051,27 @@ State runBddcSdc(Functional& F,
                           t.setExcludedLocalDofs(d);
                         })
             subdomain.transfer().setExcludedLocalDofs(interfaceAverages.cornerDofs(id));
+        if (options.bddcLocalCompressionBypass)
+          subdomain.transfer().setNodeLocalCompressionBypass(compressionNodes);
       }
     }
     if (options.profile)
       profile.transferSetup += ProfileTimes::seconds(transferStart);
+
+    if constexpr (requires(Transfer const& t) { t.nodeLocalExactDofs(); })
+      if (options.bddcLocalCompressionBypass)
+      {
+        std::uint64_t localExact=0, globalExact=0;
+        for (std::size_t id=0; id<subdomains.size(); ++id)
+          if (subdomains.has(id)) localExact+=subdomains[id].transfer().nodeLocalExactDofs();
+#ifdef KASKADE_HAVE_MPI
+        MPI_Allreduce(&localExact,&globalExact,1,MPI_UINT64_T,MPI_SUM,MPI_COMM_WORLD);
+#else
+        globalExact=localExact;
+#endif
+        if (mpiRankZero(options.mpi!=0))
+          std::cout << "BDDC local bypass protected owned DOF copies: " << globalExact << "\n";
+      }
 
     if (!options.quiet && mpiRankZero(options.mpi != 0))
       std::cout << "BDDC local and coarse setup reused for " << steps << " time steps\n";

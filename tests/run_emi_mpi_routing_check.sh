@@ -13,6 +13,9 @@ export OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader,tcp
 export OMPI_ALLOW_RUN_AS_ROOT=1 OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 unset KASKADE_FROZEN_TRANSFER_DIR KASKADE_RESTRICTION_CAPTURE KASKADE_TRANSFER_AUDIT_DIR
 check_dir=$(mktemp -d /tmp/emi-mpi-routing.XXXXXX)
+mpicxx -std=c++20 -O2 -I "$kaskade_dir" \
+  "$kaskade_dir/tests/bddcTransferOrder/bddcTransferOrder.cpp" -o "$check_dir/transfer-order"
+(cd "$check_dir" && ./transfer-order)
 mpicxx -std=c++20 -O2 -Wall -Wextra -Werror -DKASKADE_HAVE_MPI -I "$kaskade_dir" \
   "$kaskade_dir/tests/bddcMpiRouting/bddcMpiRouting.cpp" -o "$check_dir/routing"
 mpirun -np 2 "$check_dir/routing" 1

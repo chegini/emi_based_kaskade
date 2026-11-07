@@ -41,6 +41,58 @@ Stage 1 does NOT turn off local compression. Setup weight/plan exchanges and
 training-symbol gathers are also unchanged. Global scalar/correction collectives
 still occur. A two-node topology does not imply all communication is compressed.
 
+Opt-in local compression bypass (next stage)
+-------------------------------------------
+Application flag: --bddcLocalCompressionBypass 1 (default 0).
+Checker flag: --check-local-bypass (adds one bypass case per solver).
+Requires destination routing, compressed non-SDC MPI BDDC, affine ungrouped
+quantization, no compression size threshold, and histograms off.
+
+For each shared DOF, use the complete incident-subdomain owner set. If ANY two
+owners share an MPI shared-memory domain, exclude that DOF from quantization on
+EVERY copy, including remote producers/consumers. Other DOFs retain compression.
+This deliberately keeps mixed local/remote DOFs exact on remote links too.
+Sending raw originals locally but quantized copies remotely would violate
+interface continuity and restriction feedback. The conservative exact policy
+sacrifices some remote compression to preserve that consistency.
+
+All-exact packets contain only raw values, with no codec metadata. All-exact
+producers skip quantization, transforms, constant splitting, and encoding.
+If the entire MPI job occupies one shared-memory node, EMI selects the ordinary
+uncompressed transfer/solver backend for all steps, explicitly logged as
+"nodes=1; backend=uncompressed; all steps use raw transfers". Requested codec
+and warm-up options then have no work to do; solver family, tolerances, physical
+time stepping and routing remain unchanged. The separate compressed solver
+instantiation with raw packets produced roundoff-level trace differences in
+the first cluster check (10 iterations and identical byte counts, but a roughly
+4.04e-12 constant solution offset). We retain strict one-node parity checking
+by using the same numerical backend, rather than relaxing its tolerance.
+Existing exact corners are preserved. Packets combining remote-only and exact
+DOFs use the existing codec plus exact trailers. Local-only values do not enter
+the transform, quantizer range, or training symbols.
+
+Node identity comes from MPI_Comm_split_type and the actual subdomain rank
+ownership. The kernel tests use artificial maps only to cover mixed ownership
+without cluster hardware. Production never uses artificial node identities.
+MPI routing/transport remains unchanged: with self,tcp, raw same-node messages
+still use TCP. This option bypasses the codec; it does not implement a new
+shared-memory transport or remove global/coarse/setup MPI collectives.
+
+Validation: first rebuild and run 10cells on one node with two ranks and
+--check-local-bypass. All three new cases must match their uncompressed
+destination controls exactly in snapshots/traces/iterations/logical bytes.
+Then test two nodes/four ranks; require convergence, real inter-node traffic,
+and byte accounting, while REPORTING solution errors against direct,
+uncompressed, and all-compressed controls (no hidden accuracy threshold).
+Placement now changes quantization, so multi-node numerical parity with the
+old all-compressed method is not expected. Compression performance remains
+unmeasured until working shared-memory transport and timing runs are available.
+
+The build wrappers run the production transfer regression with the container's
+Dune headers before rebuilding EMI. It covers both phases, before/after/both,
+split off/on, 8/16/24 bits, raw packet sizes, no encoding on a single node,
+all-remote parity, and exact mixed-owner contributions over repeated updates.
+
 Why the local bypass is a separate numerical change
 --------------------------------------------------
 The compressed transfer keeps one reconstructed contribution per producer/DOF,
@@ -201,6 +253,31 @@ TCP-only runs are not evidence for same-node shared-memory performance.
 
 No local compression bypass is included in this checkpoint. Generated logs,
 meshes and solution files are retained outside version control.
+
+Validated local-bypass checkpoint (2026-11-07)
+--------------------------------------------
+The real Dune transfer regression, eight runner/option tests and container EMI
+build passed. All 16 cases passed in each user-run campaign:
+
+* One node/two ranks, 10cells:
+  output/emi-mpi-routing-10cells-20261107T002834Z-3601957
+* Two nodes/four ranks, 10cells:
+  output/emi-mpi-routing-10cells-20261107T003159Z-3613175
+* Two nodes/four ranks, Pepe:
+  output/emi-mpi-routing-pepe-20261107T003335Z-3618499
+
+These use self,tcp. Single-node bypass requires exact uncompressed-backend
+snapshot/trace/iteration/byte parity. Multi-node bypass checks convergence and
+topology/byte accounting and reports solution differences without an acceptance
+threshold. Kernel regressions separately cover mixed-owner copy consistency.
+Pepe inter-node logical-payload savings were 41.85% (CG/FCG) and 43.20% (FGMRES),
+relative to each uncompressed solver over its complete solve. These are not
+hardware-network measurements or repeated performance benchmarks. Same-node
+shared-memory transport remains to be restored and tested.
+
+This EMI change requires the accompanying Kaskade local-bypass transfer API
+and regression changes; the earlier destination-routing commit alone is not
+sufficient. Generated numerical results remain outside the source commit.
 
 References
 ----------
