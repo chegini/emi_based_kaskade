@@ -24,9 +24,11 @@ def arguments(argv=None):
     p.add_argument('--expected-nodes', type=int, default=1)
     p.add_argument('--slurm-container', type=Path,
                    help='Launch each solve with host srun and this Apptainer image')
-    p.add_argument('--slurm-btl', choices=['self,vader,tcp', 'self,tcp'],
+    p.add_argument('--slurm-btl', choices=['self,vader,tcp', 'self,tcp', 'self,vader'],
                    default='self,vader,tcp',
                    help='Open MPI container transports; self,tcp bypasses vader for diagnosis')
+    p.add_argument('--slurm-vader-single-copy', choices=['default', 'none'], default='default',
+                   help='none retains vader shared memory but disables single-copy mechanisms')
     p.add_argument('--kaskade', type=Path,
                    default=Path(os.environ.get('KASKADE7', '/kaskade7')))
     p.add_argument('--solvers', nargs='+', choices=['cg', 'fcg', 'fgmres'],
@@ -49,6 +51,10 @@ def arguments(argv=None):
         p.error('Slurm routing check requires equal ranks per node')
     if not a.slurm_container and a.slurm_btl != 'self,vader,tcp':
         p.error('--slurm-btl requires --slurm-container')
+    if a.slurm_btl == 'self,vader' and a.expected_nodes != 1:
+        p.error('self,vader has no inter-node transport; require --expected-nodes 1')
+    if a.slurm_vader_single_copy != 'default' and (not a.slurm_container or 'vader' not in a.slurm_btl.split(',')):
+        p.error('--slurm-vader-single-copy requires a Slurm container and vader BTL')
     if a.setup_diagnostic_only and a.check_local_bypass:
         p.error('Setup-only and local-bypass validation are separate checks')
     a.repo = a.repo.resolve()
@@ -107,6 +113,9 @@ def slurm_container_command(a, payload, nodes, ranks, mpi='none'):
     # Bind at the host path too so recorded absolute inputs/outputs remain valid.
     container_env = CONTAINER_ENV.replace('OMPI_MCA_btl=self,vader,tcp',
                                            'OMPI_MCA_btl='+a.slurm_btl)
+    if getattr(a, 'slurm_vader_single_copy', 'default') == 'none':
+        container_env = container_env.replace('exec "$@"',
+            'export OMPI_MCA_btl_vader_single_copy_mechanism=none\nexec "$@"')
     if a.setup_diagnostic_only:
         container_env = container_env.replace('exec "$@"', 'export EMI_MATERIAL_TRACE=1\nexec "$@"')
     return ['srun', '--mpi='+mpi, '--nodes='+str(nodes), '--ntasks='+str(ranks),
@@ -154,6 +163,7 @@ def main():
            'routing only; compression unchanged.'), flush=True)
     if a.slurm_container:
         print('Container Open MPI transports: '+a.slurm_btl, flush=True)
+        print('Vader single-copy selection: '+a.slurm_vader_single_copy, flush=True)
     if a.setup_diagnostic_only:
         print('Setup diagnostic: per-rank material progress ON; no direct or routing parity comparison.', flush=True)
     if a.plan_only:

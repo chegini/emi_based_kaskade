@@ -7,12 +7,35 @@ import re
 import shlex
 import subprocess
 import tempfile
+import contextlib
+import io
 from pathlib import Path
 from run_emi_mpi_routing_check import arguments, make_command, planned_modes, routing_counts, slurm_container_command
 from test_emi_compression_report import extract
 
 
 class RoutingCheck(unittest.TestCase):
+    def test_vader_two_copy_launch(self):
+        from run_emi_transport_probe import stage_arguments, bounded
+        for nodes,btl in [(1,'self,vader'),(2,'self,vader,tcp')]:
+            a=stage_arguments(Path('/shared/BDDC/emi'),Path('/shared/image.sif'),
+                              Path('/shared/kaskade'),nodes,2*nodes,btl)
+            cmd=bounded(slurm_container_command(a,['/shared/probe',str(2*nodes),str(nodes)],
+                                                nodes,2*nodes,mpi='pmix_v5'))
+            script=cmd[cmd.index('-c')+1]
+            self.assertIn('export OMPI_MCA_btl_vader_single_copy_mechanism=none\n',script)
+            self.assertIn('OMPI_MCA_btl='+btl+'\n',script)
+            self.assertIn('--mpi=pmix_v5',cmd)
+            self.assertIn('--time=00:03:00',cmd)
+            self.assertNotIn('--cleanenv',cmd)
+            if nodes==1: self.assertNotIn('tcp',script)
+        invalids=[['--slurm-vader-single-copy','none'],
+                  ['--slurm-container','/image','--slurm-btl','self,tcp','--slurm-vader-single-copy','none'],
+                  ['--slurm-container','/image','--ranks','4','--expected-nodes','2','--slurm-btl','self,vader']]
+        for invalid in invalids:
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                arguments(invalid)
+
     def test_single_node_raw_backend(self):
         repo = Path(__file__).resolve().parents[1]
         source = (repo/'EMI_model.cpp').read_text()

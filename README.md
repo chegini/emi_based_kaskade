@@ -1,5 +1,10 @@
 # EMI model with Kaskade7
 
+For colleagues running on the ZIB cluster, start with the
+[complete cluster guide](docs/zib-cluster-guide.md): container image creation,
+Apptainer conversion, source/library builds, allocations, MPI transport checks,
+Pepe validation and batch submission.
+
 ## Controlled one-step grouped prolongation experiment
 
 `tests/run_emi_grouped_prolongation_check.py` runs **10cells, one time step**

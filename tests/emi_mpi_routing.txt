@@ -285,3 +285,70 @@ MPI shared-memory grouping:
 https://www.mpi-forum.org/docs/mpi-3.1/mpi31-report/node156.htm
 MPI Alltoallv semantics:
 https://www.mpi-forum.org/docs/mpi-3.1/mpi31-report/node109.htm
+
+Pepe transport investigation and subsequent measurements
+------------------------------------------------------
+The next candidate is self,vader,tcp with the explicit setting
+OMPI_MCA_btl_vader_single_copy_mechanism=none. In Open MPI 4 this disables
+single-copy mechanisms, not the vader shared-memory BTL. It is a candidate
+workaround, not yet validated on this cluster. Do not change PMIx security
+components or rebuild the container as part of this first comparison.
+
+In an active two-node/four-task allocation, from this repository:
+python3 tests/run_emi_transport_probe.py \
+  --slurm-container "$emi_sif" --kaskade "$emi_kaskade"
+
+The probe builds a small MPI-only executable on a compute node. It first
+uses self,vader (TCP absent) on one node/two ranks, then self,vader,tcp on
+two nodes/four ranks. Both explicitly disable single-copy mechanisms.
+It verifies every payload byte in broadcasts with rotating roots, ring
+exchanges and variable-size destination exchanges, including 3 MB and 16 MB
+messages. Shared-memory topology is checked. BTL selection logs and MPI
+component information are retained. Each Slurm step has a three-minute limit;
+failure stops the sequence. This does not rebuild or execute EMI.
+
+If BOTH probe stages pass, run only the previously failing Pepe setup case:
+python3 tests/run_emi_mpi_routing_check.py \
+  --case pepe --ranks 4 --expected-nodes 2 \
+  --slurm-container "$emi_sif" --kaskade "$emi_kaskade" \
+  --slurm-btl self,vader,tcp --slurm-vader-single-copy none \
+  --setup-diagnostic-only
+
+Then validate Pepe's solver matrix with the same transport and
+--check-local-bypass, omitting --setup-diagnostic-only. Do not claim transport
+repair until the large-payload probe AND Pepe complete successfully. Keep
+self,tcp as the known working fallback. This only restores local shared
+memory; inter-node transport is still TCP, not a validated RDMA fabric path.
+
+After transport validation, prepare a separate timing campaign: one warm-up
+pair excluded, then at least five measured raw/bypass pairs alternating run
+order, same allocation, executable, rank placement and thread count. Start
+with FCG+split, 16 bits, transform-before. Keep histograms, transfer audits,
+per-rank material tracing and full-state CSV export off for timing, while
+retaining true residual checks, iterations and logical traffic counters.
+Report median and spread for application wall time and the maximum-rank
+solver wrapper separately; these include setup and are not codec bandwidth.
+Do not subtract estimated codebook time or infer wire traffic from counters.
+Any accuracy run with full-state output is separate from timing runs.
+
+Time integration starts with FGMRES+split at 1, 5 and 10 physical steps,
+dt=0.01 in model time units, with direct and same-family raw controls and
+per-step full-precision errors. FCG/CG+split is currently guarded to ONE step;
+FGMRES+split is guarded to at most TEN. Extending these limits is a separate
+implementation and validation task, not a command-line override. Record raw
+relative Euclidean error, absolute maximum error and mean offset; centered
+error is diagnostic only. These are algebraic DOF errors, not FE or trace
+Sobolev norms. Membrane-voltage errors need their own interface-jump diagnostic.
+
+The residual tolerance remains 1e-7. A scientific solution-error acceptance
+threshold has NOT been agreed. Obtain the required physical accuracy from
+Fatemeh/Martin before marking these runs scientifically accepted; convergence
+or a small centered error alone is insufficient. No new threshold is silently
+applied by the transport/routing checks.
+
+Open MPI 4 parameter implementation:
+https://github.com/open-mpi/ompi/blob/v4.1.x/opal/mca/btl/vader/btl_vader_component.c
+Shared-memory mechanism explanation (vader is the Open MPI 4 name):
+https://docs.open-mpi.org/en/main/tuning-apps/networking/shared-memory.html
+Apptainer MPI namespace constraints, including sharens limitations:
+https://apptainer.org/docs/user/latest/mpi.html

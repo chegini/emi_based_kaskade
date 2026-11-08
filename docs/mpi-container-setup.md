@@ -1,5 +1,9 @@
 # Reproducible Kaskade7 and MPI setup
 
+> For the current multi-node ZIB workflow, use the
+> [cluster guide](zib-cluster-guide.md). This older workstation guide contains
+> historical image and MPI descriptions; it is not the current cluster recipe.
+
 This document describes how to build and run the EMI example from a fresh
 login on a machine with Podman. The commands are divided into **host** and
 **container** steps. The source trees are mounted into the container, so no
