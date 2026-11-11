@@ -1,0 +1,33 @@
+Pepe 100-step compression-error experiment
+========================================
+Submit tests/submit_emi_pepe_100steps.sbatch from the EMI repository root.
+8 Gold6342 nodes, 16 ranks, 64 GB/node, six-hour job limit.
+Builds a separate executable; each trajectory has a 150-minute limit.
+
+Comparison: raw FCG (split off) versus 16-bit FCG with constant splitting,
+transform before quantization, destination routing, local bypass off.
+Both evolve their OWN state over 100 steps from identical initial conditions.
+dt=0.01, finalTime=1.0 in model time units. All steps must meet true residual
+1e-7. No direct solve and no assumed scientific solution-error threshold.
+The explicit FCG split experiment now accepts 1..100 steps; ordinary CG
+remains limited to one step and the FGMRES limit is unchanged.
+
+Outputs under output/emi-pepe-100steps-JOB/trajectory:
+ compression-error.csv: per-step global coefficient Euclidean error,
+ maximum absolute difference, mean drift, supplementary centered error,
+ iterations and true residuals. Raw error is not replaced by centered error.
+ difference-step100.csv: full-precision final DOF differences.
+ summary.json: completion state and final error.
+ fcg-uncompressed/emiStep100.vtu and fcg-before-16-split-on/emiStep100.vtu:
+ final VTK fields for visual inspection (also emiLast and earlier steps).
+
+VTK export uses seven-digit precision and nonconforming points. Numerical
+error is therefore computed from full-precision, globally indexed CSV
+snapshots, not rounded VTK point values. The norm is a coefficient norm,
+not an FE mass-weighted L2 norm or a membrane-voltage error norm. This is a
+compression sensitivity experiment, not a time-discretization accuracy
+study or performance benchmark. Check the entire curve, not just step 100.
+
+Local validation: C++ option boundary tests, generated Slurm/application
+arguments, and synthetic error calculations. Full MPI build/run is performed
+by the submitted job. A small error is an outcome to assess, not a pass rule.

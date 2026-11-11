@@ -31,6 +31,10 @@ int main()
     o.bddcRestrictCompressionBits=o.bddcProlongateCompressionBits=-1;
     o.bddcCompressionBits=bits;assert(accepts(o));
   }
+  for(int steps:{1,2,10,100}) {Options o;o.bddcFlexibleCg=1;
+    o.maximumNumberOfTimeSteps=steps;assert(accepts(o));}
+  for(int steps:{0,101}) {Options o;o.bddcFlexibleCg=1;
+    o.maximumNumberOfTimeSteps=steps;assert(!accepts(o));}
   std::vector<std::pair<int Options::*,int>> invalid={
     {&Options::bddcCgConstantSplitExperiment,-1},{&Options::bddcCgConstantSplitExperiment,2},
     {&Options::bddc,0},{&Options::sdc,1},{&Options::direct,1},{&Options::bddcUseCg,0},

@@ -16,6 +16,8 @@ import subprocess
 from analyze_emi_potential_diagnostics import read, error_metrics
 from collect_emi_scaling_smoke import collect, NUMBER
 
+LEGO_WEAK_CASES = tuple(f'weak_{n}_h16' for n in (8, 16, 32, 64, 128, 256))
+
 
 def arguments(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
@@ -48,11 +50,20 @@ def arguments(argv=None):
 
 
 def mesh_inputs(repo, case):
-    base = (repo/'input/10Cells3d_10extra' if case == '10cells'
-            else repo.parent/'input_emi_mesh/pepe_combi_domi')
-    suffixes = (['_mesh.vtu', '_list_extracellular.txt', '_list_intracellular.txt', '_early_excited.txt']
-                if case == '10cells' else
-                ['.vtu', '_extracellular.txt', '_intracellular.txt', '_excited.txt'])
+    if case in LEGO_WEAK_CASES:
+        base = repo.parent/'input_emi_mesh_blocks'/'weak_strong_scaling'/(case+'_kaskade')
+        suffixes = ['_mesh.vtu', '_list_extracellular.txt', '_list_intracellular.txt', '_early_excited.txt']
+    elif case == '10cells':
+        base = repo/'input/10Cells3d_10extra'
+        suffixes = ['_mesh.vtu', '_list_extracellular.txt', '_list_intracellular.txt', '_early_excited.txt']
+    elif case in ('pepe', 'rizzo', 'robin'):
+        base = repo.parent/'input_emi_mesh'/(case+'_combi_domi')
+        suffixes = ['.vtu', '_extracellular.txt', '_intracellular.txt', '_excited.txt']
+    elif case in ('kermit', 'gonzo', 'animal'):
+        base = repo.parent/'input_emi_mesh'/case
+        suffixes = ['_mesh.vtu', '_extracellular.txt', '_intracellular.txt', '_early_excited.txt']
+    else:
+        raise ValueError('Unknown EMI mesh: '+case)
     return dict(zip(['input', 'extra_set', 'intra_set', 'excited'],
                     [str(base)+s for s in suffixes]))
 

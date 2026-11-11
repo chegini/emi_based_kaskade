@@ -1,0 +1,130 @@
+Pepe solver and precision study (one physical step)
+=================================================
+
+Purpose: compare CG, FCG and FGMRES(30), compressed with split OFF/ON,
+at 8, 12, 16, 24 and 32 bits in both transfer directions. Default: 34 cases
+(30 compressed + 3 matched raw controls + direct). Quantized 32 bits is NOT
+an FP64/uncompressed reference.
+
+Fixed controls: transform-first, ZigZag/bit-length/Huffman enabled for
+compressed cases, destination routing, local bypass OFF, one R pass,
+true relative tolerance 1e-7, at most 1000 iterations, dt=0.01, one step,
+original excited initial state. Full-precision snapshots ON; VTK/histograms
+OFF. Raw controls have splitting OFF. Compressed CG/FCG split cases use the
+existing explicit one-step experiment gate. No multi-step support is added.
+
+Run from emiModelBddcSdc_new_scratch on the cluster login node:
+
+  mkdir -p output
+  python3 tests/run_emi_solver_study.py --plan-only
+  emi_solver_job=$(sbatch --parsable tests/submit_emi_solver_study.sbatch)
+  echo "$emi_solver_job"
+  tail -n 60 -F "output/emi-solver-study-${emi_solver_job}.log"
+
+The batch script requests 8 nodes, 16 ranks (2 per node), 1 CPU/rank,
+24 GB/node and an 8-hour allocation. Each solve has a 20-minute step limit.
+No nested salloc or mpirun inside srun. Transport is self,vader,tcp with
+Vader single-copy disabled; CPU binding is to cores. This is a correctness/
+precision study, not proof that 8 nodes are faster. With 20 subdomains and
+16 ranks, ownership/work need not be balanced. CPU inventory is saved.
+
+Use an existing current, MPI-enabled emiModel built with the same container.
+The runner does NOT rebuild the executable. If needed, build inside an
+allocation with tests/build_emi_mpi_routing_cluster.sh before submitting;
+do not rebuild or replace emiModel while any campaign is running.
+Override image/source locations using exported emi_sif and emi_kaskade.
+
+A smaller campaign or alternate fixed layout can be submitted explicitly:
+  sbatch --nodes=2 --ntasks=4 --ntasks-per-node=2 \
+    tests/submit_emi_solver_study.sbatch --bits 16 32 --solvers fcg
+
+Results in output/emi-solver-study-pepe-<timestamp>-<pid>/:
+  environment.json: matrix, settings, input/source/executable SHA256, allocation.
+  preflight.log: per-node CPU information (Slurm only).
+  summary.json: full errors, checks, iteration traces, all route counters.
+  results.csv: flat editable data for report tables/PGFPlots.
+  summary.md: concise overview.
+  <case>/command.sh, run.log and potential-state-step{0,1}.csv.
+
+Error columns use unique global algebraic potential DOFs, not FE mass norms.
+Centered error removes the arithmetic mean difference for diagnosis only;
+both centered and raw relative errors use the raw reference norm as denominator.
+Direct and matched solver-family raw references are both reported.
+PASS requires convergence, full snapshots, topology and byte accounting, but
+does not impose a scientific solution-error budget. Failed low-bit cases are
+retained, with missing final diagnostics left empty. Their last CSV iteration
+may count accepted updates rather than solver calls; the JSON retains both
+trace and summary provenance. Savings are only calculated for successful runs.
+
+All compressed failures continue to the next case. Invalid direct/raw
+references stop the campaign. Exit 0: all cases PASS; exit 1: complete campaign
+with failed configurations; exit 2: invalid reference. A nonzero Slurm job
+exit therefore does not by itself mean that the sweep stopped early: inspect
+summary.json complete/failed_cases/fatal_error and the final log message.
+Timeouts are labelled separately; they are not convergence evidence.
+
+Bytes cover logical R/P payloads, including local transfers, not all outer
+solver communication or network headers. Net savings use the complete matched
+raw solve, including iteration count. Same-rank, same-node and inter-node
+bytes are distinct. Validation times include snapshots/setup; shortlisted
+cases need a separate repeated timing campaign without snapshot output.
+
+Local orchestrator tests (no simulation or cluster required):
+  PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests \
+    -p test_emi_solver_study.py
+
+GEOMETRY FOLLOW-UP (8 November 2026)
+----------------------------------
+The runner now also accepts --case rizzo/robin/kermit/gonzo/animal and
+--split on/off/both (default both). Pepe/Rizzo/Robin use *_combi_domi.vtu
+with matching *_combi_domi tag/excitation lists. Kermit/Gonzo/Animal use
+*_mesh.vtu, *_extracellular.txt, *_intracellular.txt, *_early_excited.txt.
+Unknown mesh names are rejected; all four input paths are recorded/hashed.
+The original 34-case default is unchanged.
+
+Four solves per geometry (direct, raw FCG, split FCG at 8 and 32 bits):
+  mkdir -p output
+  sbatch --nodes=8 --ntasks=16 --ntasks-per-node=2 --mem=64G \
+    --time=06:00:00 --job-name=rizzo-fcg-study \
+    tests/submit_emi_solver_study.sbatch \
+    --case rizzo --solvers fcg --split on --bits 8 32 --case-minutes 60
+
+Use --plan-only with the Python runner to inspect the four-case matrix.
+The same syntax accepts all six biological meshes. Start with Rizzo before
+sizing the largest cases: VTU element counts are Pepe 615043, Rizzo 882469,
+Robin 1639717, Kermit 3016448, Gonzo 7705951 and Animal 14833987.
+64 GB/node and 60 minutes/solve are initial resource requests, not validated
+requirements for all meshes. The direct reference runs on one MPI rank on
+one node; increasing node count does not distribute its factorization.
+Reference failures stop that mesh campaign, rather than substituting an
+uncompressed solve as the direct reference. All comparisons remain one-step;
+no change was made to the C++ solver or the CG/FCG split safety gate.
+
+TRANSFORM-ORDER COMPARISON (8 November 2026)
+-----------------------------------------
+--transform-order before|after|both selects one pipeline per campaign.
+Default remains before. Full coding (ZigZag, bit-length, Huffman) is enabled
+in all compressed cases. The order changes only the transform placement:
+  before: floating transform -> quantization -> encode
+  after:  quantization -> reversible integer transform -> encode
+  both:   floating transform -> quantization -> integer transform -> encode
+
+To repeat the complete 34-case Pepe screen with quantize-first coding:
+  sbatch --nodes=8 --ntasks=16 --ntasks-per-node=2 \
+    --job-name=pepe-after-study tests/submit_emi_solver_study.sbatch \
+    --case pepe --solvers cg fcg fgmres --split both \
+    --bits 8 12 16 24 32 --transform-order after --iterations 1000
+
+New output directories include the transform order, timestamp and PID;
+compressed case names include before/after/both. Existing directories are
+never overwritten. Direct and raw references are repeated in every campaign.
+summary.json and environment.json record the order explicitly. The default
+34-case matrix and one-step safety gate are unchanged. Only Python driver
+changes are needed; a current emiModel already supports these pipelines.
+
+For report comparisons use identical mesh, excitation, physics, tolerance,
+rank/node layout and compression scope. Check executable/input hashes in
+both manifests. Preserve failed configurations. Compare raw/centered errors
+and complete-solve payload savings against each matched raw solver. These
+single-run validation timings are not controlled runtime evidence; use
+matched hardware and repeated measurements for a timing comparison.

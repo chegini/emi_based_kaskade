@@ -7,6 +7,10 @@ export LD_LIBRARY_PATH=/usr/lib64/mpi/gcc/openmpi4/lib64:/usr/lib64/mpi/gcc/open
 export LANG=C LC_ALL=C OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1
 python3 tests/test_emi_mpi_routing_check.py
 check_dir=$(mktemp -d /tmp/emi-routing-cluster-build.XXXXXX)
+mpicxx -std=c++20 -O2 -Wall -Wextra -Werror \
+  tests/test_emi_local_support_diagnostic.cpp -o "$check_dir/local-support"
+"$check_dir/local-support"
+CXX=mpicxx python3 tests/test_emi_local_support_extraction.py
 mpicxx -std=c++20 -O2 -I /kaskade7 \
   /kaskade7/tests/bddcTransferOrder/bddcTransferOrder.cpp -o "$check_dir/transfer-order"
 (cd "$check_dir" && ./transfer-order)

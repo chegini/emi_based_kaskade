@@ -13,7 +13,7 @@ namespace EmiBddc
   }
 
   /**
-   * Validate the explicit one-step CG/FCG constant-split experiment.
+   * Validate the explicit CG (one step) / FCG (1..100 steps) constant-split experiment.
    *
    * The existing transfer represents W*v as W*(v-c*1) + W*(c*1), and
    * quantizes only the first term. Nodal coding reconstructs Q(W*(v-c*1));
@@ -40,14 +40,16 @@ namespace EmiBddc
         !options.bddcCgOriginalResidual || options.bddcOperatorAudit ||
         options.bddcConditionEstimate || options.bddcConstantCorrection || options.masterWorker ||
         !options.bddcProlongateConstantSplit || !options.bddcCompression ||
-        options.maximumNumberOfTimeSteps != 1 || options.bddcRestrictionPasses != 1 ||
+        (options.maximumNumberOfTimeSteps < 1 ||
+         options.maximumNumberOfTimeSteps > (options.bddcFlexibleCg ? 100 : 1)) ||
+        options.bddcRestrictionPasses != 1 ||
         options.bddcRelativeTolerance != 1e-7 || rBits != pBits ||
         (rBits != 4 && rBits != 6 && rBits != 8 && rBits != 12 && rBits != 16 && rBits != 20 && rBits != 24 && rBits != 32) || options.bddcRestrictZeroPreserving ||
         options.bddcProlongateZeroPreserving || options.bddcRestrictGroupSize ||
         options.bddcProlongateGroupSize || options.bddcHistogram ||
         options.bddcCgDiagnostics || options.bddcProlongationDiagnostics)
       throw std::runtime_error("CG/FCG constant-split experiment requires compressed non-SDC CG, "
-          "original-residual rho, one time step, one restriction pass, tolerance 1e-7, "
+          "original-residual rho, CG one step or FCG 1..100 steps, one restriction pass, tolerance 1e-7, "
           "uniform 4, 6, 8, 12, 16, 20, 24 or 32-bit affine grids, split enabled and diagnostics/corrections disabled");
   }
 

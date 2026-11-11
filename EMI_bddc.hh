@@ -49,6 +49,7 @@
 #include "EMI_constant_correction.hh"
 #include "EMI_fgmres_mpi.hh"
 #include "EMI_preconditioner_probe.hh"
+#include "EMI_local_support_diagnostic.hh"
 
 namespace EmiBddc
 {
@@ -748,7 +749,8 @@ namespace EmiBddc
   }
 
   // Build additive local operators from disjoint material contributions.
-  // Their embedded sum must reproduce the global matrix exactly.
+  // Their embedded sum reproduces the assembled contributions, except for
+  // explicitly bounded and reported roundoff outside the local spaces.
   template <class Matrix, class Vector>
   void setLocalMatricesFromContributions(BddcData<Matrix,Vector>& data,
                                          std::vector<Matrix> const& contributions,
@@ -760,6 +762,8 @@ namespace EmiBddc
     if (data.localDofs.size() != contributions.size())
       throw std::runtime_error("BDDC local-space count does not match material subdomains.");
     std::vector<Matrix> localMatrices(contributions.size());
+    size_t omittedEntries = 0;
+    long double omittedAbsSumBound = 0.0L;
     for (size_t subdomain = 0; subdomain < contributions.size(); ++subdomain)
     {
       if (data.localDofs[subdomain].empty())
@@ -767,25 +771,40 @@ namespace EmiBddc
       std::set<size_t> localDofSet(data.localDofs[subdomain].begin(),
                                    data.localDofs[subdomain].end());
       auto const& contribution = contributions[subdomain];
-      for (auto row = contribution.begin(); row != contribution.end(); ++row)
-        for (auto col = row.begin(); col != row.end(); ++col)
-          if ((*col)[0][0] != 0.0)
-          {
-            if (!localDofSet.contains(row.index()) ||
-                !localDofSet.contains(col.index()))
-              throw std::runtime_error("legacy BDDC local space omits a nonzero material coupling endpoint.");
-          }
-      bool hasNonzero = false;
-      for (auto row = contribution.begin(); row != contribution.end() && !hasNonzero; ++row)
-        for (auto col = row.begin(); col != row.end(); ++col)
-          if ((*col)[0][0] != 0.0)
-          {
-            hasNonzero = true;
-            break;
-          }
-      if (!hasNonzero)
+      auto const support = checkMaterialLocalSupport(
+        contribution,localDofSet,subdomain,data.tags[subdomain]);
+      if (support.retainedMaxAbs == 0.0)
         throw std::runtime_error("BDDC material subdomain has an empty assembled operator contribution.");
+      if (support.omittedEntries)
+      {
+        omittedEntries += support.omittedEntries;
+        omittedAbsSumBound = std::nextafter(
+          omittedAbsSumBound+support.omittedAbsSumBound,
+          std::numeric_limits<long double>::infinity());
+        if (mpiRankZero(mpiEnabled))
+        {
+          std::ostringstream message;
+          message << std::setprecision(std::numeric_limits<long double>::max_digits10)
+                  << "BDDC local support roundoff: subdomain_index=" << subdomain
+                  << " material_tag=" << data.tags[subdomain]
+                  << " omitted_entries=" << support.omittedEntries
+                  << " omitted_max_abs=" << support.omittedMaxAbs
+                  << " omitted_abs_sum_bound=" << support.omittedAbsSumBound
+                  << " roundoff_budget=" << support.roundoffBudget()
+                  << " retained_max_abs=" << support.retainedMaxAbs << '\n';
+          std::cout << message.str() << std::flush;
+        }
+      }
       localMatrices[subdomain] = Matrix(data.localDofs[subdomain],contribution);
+    }
+    if (omittedEntries && mpiRankZero(mpiEnabled))
+    {
+      std::ostringstream message;
+      message << std::setprecision(std::numeric_limits<long double>::max_digits10)
+              << "BDDC local support roundoff total: omitted_entries=" << omittedEntries
+              << " omitted_abs_sum_bound=" << omittedAbsSumBound
+              << " global_operator=unchanged\n";
+      std::cout << message.str() << std::flush;
     }
 
     std::vector<std::vector<LocalDof>> occurrences(data.dofSubdomains.size());

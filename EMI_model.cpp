@@ -1043,10 +1043,10 @@ int main(int argc, char* argv[])
     ("bddcPreconditionerProbe", options.bddcPreconditionerProbe, options.bddcPreconditionerProbe,
      "diagnostic only: apply BDDC once to the first normalized RHS, write v/z/Az, do not advance state; requires FGMRES")
     ("bddcProlongateConstantSplit", options.bddcProlongateConstantSplit, options.bddcProlongateConstantSplit,
-     "float32 producer constant split; FGMRES/probe or explicit one-step CG/FCG experiment")
+     "float32 producer constant split; FGMRES/probe or explicit CG (one step) / FCG (1..100 steps) experiment")
     ("bddcCgConstantSplitExperiment", options.bddcCgConstantSplitExperiment,
      options.bddcCgConstantSplitExperiment,
-     "opt-in one-step CG/FCG split test: uniform 4, 6, 8, 12, 16, 20, 24 or 32 bits, affine grids, one R pass, tolerance 1e-7")
+     "opt-in CG one-step / FCG 1..100-step split test: uniform 4, 6, 8, 12, 16, 20, 24 or 32 bits, affine grids, one R pass, tolerance 1e-7")
     ("bddcUseCg", options.bddcUseCg, options.bddcUseCg, "use CG in BDDC coarse solve path: 0=no, 1=yes")
     ("bddcConvergenceReport", options.bddcConvergenceReport, options.bddcConvergenceReport,
      "true-residual table and CSV: -1=automatic (default), 0=off, 1=on")
@@ -1160,11 +1160,11 @@ int main(int argc, char* argv[])
   if (options.bddcProlongateConstantSplit<0 || options.bddcProlongateConstantSplit>1 ||
       (options.bddcProlongateConstantSplit && ((!options.bddcFgmres && !options.bddcCgConstantSplitExperiment) ||
        (!options.bddcPreconditionerProbe && (options.maximumNumberOfTimeSteps<1 ||
-        options.maximumNumberOfTimeSteps>10)) ||
+        options.maximumNumberOfTimeSteps>(options.bddcCgConstantSplitExperiment && options.bddcFlexibleCg ? 100 : 10))) ||
        !options.bddcCompression || options.bddcProlongateGroupSize ||
        options.bddcProlongateZeroPreserving)))
     throw std::runtime_error("Constant split requires a compressed frozen probe, FGMRES validation (1..10 steps), "
-                             "or the explicit one-step CG/FCG experiment "
+                             "or the explicit CG (one step) / FCG (1..100 steps) experiment "
                              "with ungrouped affine prolongation");
   if (options.bddcConditionEstimate != 0 && options.bddcConditionEstimate != 1)
     throw std::runtime_error("bddcConditionEstimate must be 0 or 1");
@@ -1260,7 +1260,7 @@ int main(int argc, char* argv[])
   if (options.bddcGraphLiftingBothOrders && outputRankZero)
     std::cout << "BDDC combined lifting: floating transform, quantization, reversible integer transform\n";
   if (options.bddcCgConstantSplitExperiment && outputRankZero)
-    std::cout << "BDDC CG/FCG constant-split experiment: one step; original-residual rho; "
+    std::cout << "BDDC CG/FCG constant-split experiment: requested time trajectory; original-residual rho; "
                  "unchanged recurrence and breakdown checks; convergence not guaranteed\n";
   if (outputRankZero && options.bddcProlongateGroupSize)
     std::cout << "BDDC prolongation groups: producer-order size=" << options.bddcProlongateGroupSize
