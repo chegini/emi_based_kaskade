@@ -50,3 +50,35 @@ Evidence retained under output/emi-packing-solve-6093690/validation:
 summary.csv, PASS, manifest.json and per-case commands/logs/snapshots/traces.
 The initial nonfinite Polak-Ribiere beta message in the build log comes from
 the successful breakdown-handling regression, not these full solves.
+
+Stream-length compaction extension (cluster full-solve validation passed)
+------------------------------------------------------------------------
+The same submission script now builds the updated wrapper. Formats 3/4 use
+uint16 for both Huffman/tail byte counts only when each encoded stream in a
+message is <=65535 bytes. Otherwise the message retains a previous format.
+Raw records are unchanged. Decoder expansion restores the original uint32
+length fields before the codec sees the packet. Both minVal and scale remain.
+All MPI ranks must use the same updated build; packing remains OFF by default.
+
+The adaptive candidate set includes all previous formats, so the new selection
+cannot be larger than the previous packer on identical inputs. Four bytes per
+encoded record are removed in the short-length formats, before adaptive choice.
+
+New summary columns distinguish previous_packer_bytes and
+stream_length_bytes_saved / stream_length_savings_percent from the total
+additional_savings_percent relative to unpacked routing. The previous packer
+size is evaluated on the same live packets; it is not another independent solve.
+The earlier validated results above are for the previous packer, not evidence
+for this extension. The new validation results are recorded below.
+
+Cluster validation of short stream lengths: ZIB job 6093726, 2026-11-11
+Bits order iterations off/on original_bytes previous_packer_bytes packed_bytes total_saving_% length_only_saving_%
+16 before 40/40 5857160 5626905 5432345 7.25 3.46
+16 after 41/41 6100240 5844007 5644583 7.47 3.41
+All pairs passed exact solution, convergence-trace and residual parity.
+Source/executable checks passed. Both minVal and scale are retained, with
+constant splitting OFF. Total saving is relative to compressed routed messages
+without lossless packing; length-only saving is relative to the previous packer.
+These percentages have different denominators and must not be added.
+No runtime improvement is claimed. Packing remains OFF by default.
+Evidence: output/emi-packing-solve-6093726/validation/summary.csv and PASS.

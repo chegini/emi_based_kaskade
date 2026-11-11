@@ -3,6 +3,8 @@ import io
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 import run_emi_solver_study as study
 import run_emi_lossless_fullsolve as check
@@ -25,6 +27,28 @@ class Packing(unittest.TestCase):
         for broken in (dict(last,step_length=''),dict(last,residual_norm='nan'),
                        dict(last,iteration='3')):
             with self.assertRaises(ValueError): check.validate_trace([first,broken])
+
+    def test_length_accounting_must_match_transport(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)
+            for step in (0,1):
+                (folder/f'potential-state-step{step}.csv').write_text('dof,u\n0,1\n')
+            (folder/check.FILES[2]).write_text(
+                'time_step,iteration,step_length,residual_norm,rhs_norm,relative_residual,target\n'
+                '1,0,,1,1,1,1e-7\n1,1,0.5,1e-8,1,1e-8,1e-7\n')
+            cfg=SimpleNamespace(ranks=4,expected_nodes=2,lossless_packing=1)
+            metrics=dict(errors=[],transmitted_sent_bytes=20,iterations_per_step=[1])
+            with patch.object(study,'collect',return_value=metrics), \
+                 patch.object(study,'routing_counts',return_value=[dict(bytes=20)]):
+                for summary in ('wide=96 actual=92','wide=91 actual=92',
+                                'wide=96 actual=90',''):
+                    (folder/'run.log').write_text(
+                        'BDDC packet transport bytes: original=100 actual=92 packing=1\n'+
+                        ('BDDC packet length compaction bytes: '+summary+'\n' if summary else ''))
+                    if summary=='wide=96 actual=92':
+                        self.assertEqual(check.inspect(folder,cfg,0,False)['wide_bytes'],96)
+                    else:
+                        with self.assertRaises(ValueError): check.inspect(folder,cfg,0,False)
 
     def test_parity_rejects_numerical_or_counter_changes(self):
         with tempfile.TemporaryDirectory() as tmp:

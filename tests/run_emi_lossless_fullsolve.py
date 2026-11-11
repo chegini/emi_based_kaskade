@@ -60,6 +60,14 @@ def inspect(folder, cfg, rc, timed_out):
     if len(matches) != 1 or int(matches[0][2]) != cfg.lossless_packing:
         raise ValueError('Missing, duplicate or incorrect packet transport summary')
     result['original_bytes'], result['actual_bytes'] = map(int, matches[0][:2])
+    if cfg.lossless_packing:
+        length_summary = re.findall(r'^BDDC packet length compaction bytes: wide=(\d+) actual=(\d+)$', log, re.M)
+        if len(length_summary) != 1:
+            raise ValueError('Missing or duplicate length compaction summary')
+        wide, actual = map(int, length_summary[0])
+        if actual != result['actual_bytes'] or actual > wide:
+            raise ValueError('Invalid length compaction counters')
+        result['wide_bytes'] = wide
     for step in (0, 1):
         study.read(folder/f'potential-state-step{step}.csv')
     with (folder/FILES[2]).open() as stream:
@@ -129,6 +137,10 @@ def main():
                 iterations_on=new['iterations_per_step'][0], true_residual=new['relative_residuals'][0],
                 original_routed_bytes=old['actual_bytes'], packed_routed_bytes=new['actual_bytes'],
                 additional_savings_percent=saving, parity='EXACT_SOLUTION_TRACE_AND_RESIDUALS')
+            wide = new['wide_bytes']
+            row.update(previous_packer_bytes=wide,
+                stream_length_bytes_saved=wide-new['actual_bytes'],
+                stream_length_savings_percent=100*(1-new['actual_bytes']/wide) if wide else 0)
             rows.append(row)
             with (root/'summary.csv').open('w') as stream:
                 writer = csv.DictWriter(stream, fieldnames=list(row))
