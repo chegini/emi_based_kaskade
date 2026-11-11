@@ -1,0 +1,45 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=20mm]{geometry}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\setlength{\parindent}{0pt}
+\newcommand{\panel}[4]{\begin{tikzpicture}\begin{axis}[
+width=.47\textwidth,height=6cm,title={#2},xlabel={#4},ylabel={Probability per bin (\%)},
+xmin=#3,xmax=1,ymin=0,grid=major,grid style={black!10},axis line style={black},
+legend style={font=\scriptsize,draw=none},legend pos=north east]
+\addplot[blue,thick] table[x=x,y=percent,col sep=comma]{step\onset-#1-input-\kind.csv};
+\addlegendentry{Input to transform}
+\addplot[red,dashed,thick] table[x=x,y=percent,col sep=comma]{step\onset-#1-coefficient-\kind.csv};
+\addlegendentry{Floating coefficients}
+\end{axis}\end{tikzpicture}}
+\begin{document}
+\foreach \onset in {1,6}{
+\section*{Pepe physical histograms: compression onset at time step \onset}
+@@SOLVER@@, 16-bit transform-first compression, constant splitting on.
+Each onset is a separate run; time step 6 follows five uncompressed steps.
+The first observed restriction/prolongation call is retained per producer.
+These plots show physical values, not the unsigned quantization indices.
+
+The input is already weighted and, for prolongation, centered by constant
+splitting. The coefficient is the floating input to quantization. Each direction
+uses a single common scale $M$, the largest absolute value across its input and
+coefficient populations. Shared packet copies are counted; exact corners are
+excluded. All observations enter 64 equal-width bins. Lines connect bin centres.
+
+\def\kind{signed}
+\panel{restrict}{Restriction: signed}{-1}{$y/M$}\hfill
+\panel{prolongate}{Prolongation: signed}{-1}{$y/M$}
+
+\def\kind{magnitude}
+\panel{restrict}{Restriction: magnitude}{0}{$|y|/M$}\hfill
+\panel{prolongate}{Prolongation: magnitude}{0}{$|y|/M$}
+
+A concentration near zero indicates small coefficients. It does not establish
+which basis functions have low or high spatial frequency. Absolute scales,
+population counts and source hashes are recorded in \texttt{summary.json}.
+The capture must pass exact observer-off/on solution, solver-trace and byte-count
+checks before these plotting tables are exported. These are diagnostic runs,
+not performance measurements.
+\clearpage
+}
+\end{document}

@@ -65,7 +65,7 @@ class HistogramScheduleTests(unittest.TestCase):
                 'accepted=false; '+('std::cerr << e.what() << "\\n";' if expected else '')+'}\n'+
                 f'if (accepted != {str(expected).lower()}) {{ std::cerr << '+
                 json.dumps(label)+' << "\\n"; return 1; }\n}')
-        for solver, split in [('cg','off'), ('fcg','off'), ('fgmres','off'), ('fgmres','on')]:
+        for solver, split in [('cg','off'), ('fcg','off'), ('fcg','on'), ('fgmres','off'), ('fgmres','on')]:
             for order in ('before', 'after', 'both'):
                 a = arguments(['--solver',solver,'--split',split,'--transform-order',order])
                 for name in ('direct','uncompressed','scheduled-all-raw','scheduled','scheduled-histograms'):
@@ -116,9 +116,22 @@ class HistogramScheduleTests(unittest.TestCase):
     def test_invalid_schedules(self):
         for args in [ ['--steps','0'], ['--uncompressed-steps','-1'], ['--uncompressed-steps','3'],
                       ['--histogram-steps','2'], ['--histogram-steps','4'], ['--histogram-steps','3','3'],
-                      ['--solver','fcg'], ['--steps','11'], ['--ranks','0'] ]:
+                      ['--solver','cg'], ['--solver','fcg','--steps','101'], ['--steps','11'], ['--ranks','0'] ]:
             with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 arguments(args)
+
+    def test_fcg_split_commands_at_both_onsets(self):
+        for steps in (1,6):
+            a=arguments(['--solver','fcg','--split','on','--steps',str(steps),
+                         '--uncompressed-steps',str(steps-1),'--physical-values'])
+            for name in ('direct','uncompressed','scheduled-all-raw','scheduled','scheduled-histograms'):
+                cmd=command(a,name,Path('/tmp/out'),['mpirun'])
+                def value(flag): return cmd[cmd.index('--'+flag)+1]
+                experiment='0' if name in ('direct','uncompressed') else '1'
+                self.assertEqual(value('bddcCgConstantSplitExperiment'),experiment)
+                self.assertEqual(value('bddcProlongateConstantSplit'),experiment)
+                self.assertEqual(value('bddcFgmres'),'0')
+                self.assertEqual(value('bddcFlexibleCg'),'0' if name=='direct' else '1')
 
     def test_later_steps_without_split(self):
         a = arguments(['--steps','20','--uncompressed-steps','5','--histogram-steps','20','6','10',

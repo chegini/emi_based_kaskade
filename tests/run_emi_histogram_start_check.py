@@ -33,6 +33,8 @@ def arguments(argv=None):
     p.add_argument('--split', choices=['off', 'on'], default='on')
     p.add_argument('--transform-order', choices=['before', 'after', 'both'], default='before')
     p.add_argument('--iterations', type=int, default=1000)
+    p.add_argument('--physical-values', action='store_true',
+                   help='Capture first observed R/P call physical stages; retain parity gates')
     p.add_argument('--plan-only', action='store_true')
     p.add_argument('--output', type=Path)
     a = p.parse_args(argv)
@@ -40,8 +42,10 @@ def arguments(argv=None):
         p.error('Ranks, steps and iteration limit must be positive')
     if not 0 <= a.uncompressed_steps < a.steps:
         p.error('This switch check requires 0 <= uncompressed steps < total steps')
-    if a.split == 'on' and (a.solver != 'fgmres' or a.steps > 10):
-        p.error('Multi-step split validation currently supports FGMRES with at most 10 steps; use --split off otherwise')
+    if a.split == 'on':
+        limit = 100 if a.solver == 'fcg' else 10 if a.solver == 'fgmres' else 1
+        if a.steps > limit:
+            p.error(f'{a.solver.upper()} splitting supports at most {limit} time steps')
     a.histogram_steps = sorted(a.histogram_steps or [a.steps])
     if (len(set(a.histogram_steps)) != len(a.histogram_steps) or
             any(s <= a.uncompressed_steps or s > a.steps for s in a.histogram_steps)):
@@ -87,7 +91,8 @@ def command(a, name, out, launcher):
         bddcCgOriginalResidual=int(not direct and solver != 'fgmres'),
         bddcFgmres=int(not direct and solver == 'fgmres'), bddcFgmresRestart=30,
         bddcProlongateConstantSplit=int(compressed and a.split == 'on'),
-        bddcCgConstantSplitExperiment=0, bddcConstantCorrection=0,
+        bddcCgConstantSplitExperiment=int(compressed and a.split == 'on' and solver != 'fgmres'),
+        bddcConstantCorrection=0,
         bddcRelativeTolerance=0 if direct else 1e-7, bddcIterations=a.iterations,
         bddcVerbose=0, bddcConvergenceReport=int(not direct and solver != 'fgmres'),
         bddcCompressionReport=1, bddcCompression=int(compressed),
@@ -223,6 +228,9 @@ def main(argv=None):
     env = dict(os.environ, OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')
     for key in ('KASKADE_RESTRICTION_CAPTURE', 'KASKADE_FROZEN_TRANSFER_DIR', 'KASKADE_TRANSFER_AUDIT_DIR'):
         env.pop(key, None)
+    env.pop('KASKADE_PHYSICAL_HISTOGRAM', None)
+    if a.physical_values:
+        env['KASKADE_PHYSICAL_HISTOGRAM'] = '1'
     launcher = shlex.split(env.get('MPIEXEC', 'mpirun'))
     require(bool(launcher), 'Empty MPIEXEC')
     digest = hashlib.sha256(model.read_bytes()).hexdigest()
@@ -300,6 +308,23 @@ def main(argv=None):
                 require(report['runs'][left][key] == report['runs'][right][key], 'Observer/schedule changed '+key)
         require(not (root/'scheduled'/'symbol-histograms').exists(), 'Observer-off run wrote histograms')
         report['checks']['observer'] = 'EXACT_SNAPSHOTS_TRACES_ITERATIONS_AND_BYTES'
+        if a.physical_values:
+            for step in a.histogram_steps:
+                base=root/'scheduled-histograms'/'symbol-histograms'/f'step{step}'
+                for phase in ('restrict', 'prolongate'):
+                    files=list(base.glob(f'subdomain*/physical/{phase}-exchange1-neighbor*.csv'))
+                    require(bool(files), 'Missing physical capture: '+str(base)+' '+phase)
+                    for path in files:
+                        with path.open() as stream:
+                            rows=list(csv.DictReader(stream))
+                        require(bool(rows), 'Empty physical capture: '+str(path))
+                        require([int(r['position']) for r in rows]==list(range(len(rows))),
+                                'Physical capture ordering mismatch')
+                        require(all(math.isfinite(float(r[c])) for r in rows
+                                    for c in ('input','coefficient','wire_minimum','wire_scale','wire_constant')),
+                                'Nonfinite physical capture')
+            report['checks']['physical_capture']='FIRST_CALL_BOTH_PHASES_FINITE_AND_ORDERED'
+
         report['histograms'] = summarize_histograms(root/'scheduled-histograms', a.histogram_steps)
         report['errors_vs_uncompressed'] = [dict(step=step, **error_metrics(
             read(root/'scheduled'/f'potential-state-step{step}.csv')['u'],
