@@ -42,6 +42,7 @@
 #include "EMI_bddc_condition.hh"
 #include "EMI_bddc_convergence.hh"
 #include "EMI_bddc_precision.hh"
+#include "EMI_bddc_packet_packing.hh"
 #include "EMI_bddc_step_schedule.hh"
 #include "EMI_bddc_cg_diagnostics.hh"
 #include "EMI_bddc_prolongation_diagnostics.hh"
@@ -2114,6 +2115,7 @@ State runBddcSdc(Functional& F,
                                                     options.mpi != 0,
                                                     options.masterWorker != 0);
     solver.setMpiDestinationRouting(options.bddcMpiRouting != 0);
+    configureLosslessPacketPacking(solver,options);
     if constexpr (requires { options.bddcRestrictionPasses; })
       solver.setRestrictionPasses(options.bddcRestrictionPasses);
     if (options.bddcFlexibleCg)
@@ -2744,6 +2746,11 @@ State runBddcSdc(Functional& F,
     {
       accounting.routing.add(solver.routingTraffic());
       if (finalPhase) accounting.routing.printGlobal();
+      // The retained solver covers all steps when there is no raw-prefix switch.
+      // Report transport framing separately from the existing codec payload totals.
+      if (finalPhase && !options.bddcUncompressedSteps)
+        if constexpr (requires { solver.printPacketTransport(); })
+          solver.printPacketTransport();
     }
     if (finalPhase && rankZero)
       std::cout << "BDDC outer solver logical payload bytes: " << outerTraffic.bytes

@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Matched one-time-step FCG solves: unchanged numerics, measured packet bytes."""
+import argparse
+import copy
+import csv
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shlex
+
+import run_emi_solver_study as study
+
+FILES = ('potential-state-step0.csv', 'potential-state-step1.csv',
+         'bddc-convergence-step1.csv')
+
+
+def compare(old, new):
+    for filename in FILES:
+        if (old['folder']/filename).read_bytes() != (new['folder']/filename).read_bytes():
+            raise ValueError(filename+' changed with packing')
+    for key in ('iterations_per_step', 'relative_residuals', 'original_bytes',
+                'residual_lines', 'routes', 'raw_sent_bytes', 'transmitted_sent_bytes'):
+        if old[key] != new[key]:
+            raise ValueError(key+' changed with packing')
+    if old['actual_bytes'] != old['original_bytes']:
+        raise ValueError('Baseline transport counters differ')
+    if old['original_bytes'] <= 0:
+        raise ValueError('No inter-rank packets exercised')
+    return 100*(1-new['actual_bytes']/old['actual_bytes'])
+
+
+def validate_trace(samples):
+    expected = {'time_step','iteration','step_length','residual_norm','rhs_norm','relative_residual','target'}
+    if not samples:
+        raise ValueError('Empty convergence trace')
+    for row in samples:
+        if set(row) != expected:
+            raise ValueError('Unexpected convergence trace columns')
+        for key, value in row.items():
+            # Production CSV leaves alpha absent at the initial residual.
+            if key == 'step_length' and row['iteration'] == '0' and value == '':
+                continue
+            if not math.isfinite(float(value)):
+                raise ValueError('Nonfinite convergence trace')
+    if [int(row['iteration']) for row in samples] != list(range(len(samples))):
+        raise ValueError('Missing or unordered convergence samples')
+
+
+def inspect(folder, cfg, rc, timed_out):
+    log = (folder/'run.log').read_text(errors='replace')
+    result = study.collect(log, 1, cfg.ranks, rc, 1e-7)
+    if timed_out or result['errors']:
+        raise ValueError(str(folder)+': '+str(result['errors'])+' timeout='+str(timed_out))
+    result['routes'] = study.routing_counts(log, cfg.expected_nodes)
+    if sum(r['bytes'] for r in result['routes']) != result['transmitted_sent_bytes']:
+        raise ValueError('Logical routing counters disagree')
+    matches = re.findall(r'^BDDC packet transport bytes: original=(\d+) actual=(\d+) packing=([01])$', log, re.M)
+    if len(matches) != 1 or int(matches[0][2]) != cfg.lossless_packing:
+        raise ValueError('Missing, duplicate or incorrect packet transport summary')
+    result['original_bytes'], result['actual_bytes'] = map(int, matches[0][:2])
+    for step in (0, 1):
+        study.read(folder/f'potential-state-step{step}.csv')
+    with (folder/FILES[2]).open() as stream:
+        samples = list(csv.DictReader(stream))
+    validate_trace(samples)
+    if int(samples[-1]['iteration']) != result['iterations_per_step'][0]:
+        raise ValueError('Trace iteration count differs from summary')
+    result['residual_lines'] = [s for s in log.splitlines() if s.startswith('BDDC global residual step ')]
+    result['folder'] = folder
+    return result
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--repo', type=Path, default=Path(__file__).resolve().parents[1])
+    p.add_argument('--executable', type=Path, required=True)
+    p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--kaskade', type=Path, required=True)
+    p.add_argument('--slurm-container', type=Path, required=True)
+    p.add_argument('--case', default='weak_32_h16')
+    p.add_argument('--ranks', type=int, default=4)
+    p.add_argument('--expected-nodes', type=int, default=2)
+    p.add_argument('--bits', type=int, nargs='+', choices=[8,12,16,24,32], default=[16])
+    p.add_argument('--case-minutes', type=int, default=30)
+    a = p.parse_args()
+    cfg = study.arguments(['--repo', str(a.repo), '--executable', str(a.executable),
+        '--kaskade', str(a.kaskade), '--slurm-container', str(a.slurm_container),
+        '--case', a.case, '--ranks', str(a.ranks), '--expected-nodes', str(a.expected_nodes),
+        '--bits', *map(str,a.bits), '--solvers', 'fcg', '--split', 'off',
+        '--case-minutes', str(a.case_minutes)])
+    if not os.environ.get('SLURM_JOB_ID'):
+        p.error('Run inside a Slurm allocation')
+    root = a.output.resolve()
+    root.mkdir(parents=True, exist_ok=False)
+    sources = [cfg.executable, cfg.repo/'EMI_model.cpp', *cfg.repo.glob('*.hh'),
+               Path(__file__), cfg.repo/'tests/run_emi_solver_study.py',
+               cfg.repo/'tests/run_emi_histogram_start_check.py',
+               cfg.repo/'tests/run_emi_mpi_routing_check.py']
+    sources += [cfg.kaskade/'mg'/s for s in ('bddc.hh','bddc.hpp','bddcSpaceTransfer.hh',
+                 'bddcSpaceTransfer.hpp','bddcPacketPacking.hh')]
+    sources += [Path(s) for s in study.mesh_inputs(cfg.repo, cfg.case).values()]
+    hashes = {str(s):study.digest(s) for s in sources}
+    (root/'manifest.json').write_text(json.dumps(hashes,indent=2)+'\n')
+    env = dict(os.environ, OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
+    for key in ('KASKADE_FROZEN_TRANSFER_DIR','KASKADE_TRANSFER_AUDIT_DIR'):
+        env.pop(key, None)
+    rows = []
+    for bits in a.bits:
+        for order in ('before','after'):
+            pair = []
+            for enabled in (0,1):
+                run_cfg = copy.copy(cfg)
+                run_cfg.lossless_packing = enabled
+                run_cfg.transform_order = order
+                name = f'fcg-{order}-{bits}-packing-{enabled}'
+                folder = root/name
+                folder.mkdir()
+                case = dict(name=name, solver='fcg', bits=bits, split='off', direct=False)
+                cmd = study.make_command(run_cfg, case, folder, ['mpirun'])
+                (folder/'command.sh').write_text(shlex.join(cmd)+'\n')
+                print('Running '+name, flush=True)
+                rc, timed_out, _ = study.execute(cmd, folder, run_cfg, env)
+                pair.append(inspect(folder, run_cfg, rc, timed_out))
+            old,new = pair
+            saving = compare(old,new)
+            row = dict(bits=bits, order=order, iterations_off=old['iterations_per_step'][0],
+                iterations_on=new['iterations_per_step'][0], true_residual=new['relative_residuals'][0],
+                original_routed_bytes=old['actual_bytes'], packed_routed_bytes=new['actual_bytes'],
+                additional_savings_percent=saving, parity='EXACT_SOLUTION_TRACE_AND_RESIDUALS')
+            rows.append(row)
+            with (root/'summary.csv').open('w') as stream:
+                writer = csv.DictWriter(stream, fieldnames=list(row))
+                writer.writeheader()
+                writer.writerows(rows)
+            print('PASS: '+json.dumps(row), flush=True)
+    if hashes != {str(s):study.digest(s) for s in sources}:
+        raise ValueError('Sources, input data or executable changed during validation')
+    (root/'PASS').write_text('All matched EMI FCG full-solve comparisons passed.\n')
+    print('Validation complete: '+str(root), flush=True)
+
+
+if __name__ == '__main__':
+    main()

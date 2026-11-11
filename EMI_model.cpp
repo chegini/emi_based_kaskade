@@ -99,6 +99,7 @@ struct EmiOptions
   int bddc = 0;
   int bddcCompression = 0;
   int bddcMpiRouting = 0;
+  int bddcLosslessPacking = 0;
   int bddcLocalCompressionBypass = 0;
   int bddcCompressionBits = 16;
   int bddcRestrictCompressionBits = -1;
@@ -981,6 +982,8 @@ int main(int argc, char* argv[])
     ("bddcCompression", options.bddcCompression, options.bddcCompression, "use quantized BDDC transfer: 0=no, 1=yes")
     ("bddcMpiRouting", options.bddcMpiRouting, options.bddcMpiRouting,
      "interface payload routing: 0=legacy allgather, 1=destination MPI; compression unchanged")
+    ("bddcLosslessPacking", options.bddcLosslessPacking, options.bddcLosslessPacking,
+     "lossless MPI padding removal/header sharing (0/1); preserves minVal and scale; unsplit packets only")
     ("bddcLocalCompressionBypass", options.bddcLocalCompressionBypass, options.bddcLocalCompressionBypass,
      "keep same-node shared DOFs exact on all copies, including mixed-node copies (0/1)")
     ("bddcCompressionBits", options.bddcCompressionBits, options.bddcCompressionBits, "quantization bits for compressed BDDC transfer")
@@ -1156,6 +1159,7 @@ int main(int argc, char* argv[])
   if (options.bddcPreconditionerProbe<0 || options.bddcPreconditionerProbe>1 ||
       (options.bddcPreconditionerProbe && (!options.bddcFgmres || options.writeVTK)))
     throw std::runtime_error("bddcPreconditionerProbe requires FGMRES and writeVTK=0; this is not a time-step solve");
+  EmiBddc::validateLosslessPacketPacking(options);
   EmiBddc::validateCgConstantSplitExperiment(options);
   if (options.bddcProlongateConstantSplit<0 || options.bddcProlongateConstantSplit>1 ||
       (options.bddcProlongateConstantSplit && ((!options.bddcFgmres && !options.bddcCgConstantSplitExperiment) ||

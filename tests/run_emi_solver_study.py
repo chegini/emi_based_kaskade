@@ -43,6 +43,8 @@ def arguments(argv=None):
                    help='Compressed cases only; uncompressed references always use split off')
     p.add_argument('--transform-order', choices=['before', 'after', 'both'], default='before',
                    help='One order per campaign; before remains the default')
+    p.add_argument('--lossless-packing', type=int, choices=[0, 1], default=0,
+                   help='Lossless MPI framing; compressed split-off cases only')
     p.add_argument('--iterations', type=int, default=1000)
     p.add_argument('--case-minutes', type=int, default=20,
                    help='Bound each solve; timeout is reported separately from nonconvergence')
@@ -61,6 +63,8 @@ def arguments(argv=None):
         p.error('Master-worker requires at least two ranks and --solvers cg and/or fcg; FGMRES is unsupported')
     if a.master_worker and a.split != 'off' and not a.setup_diagnostic_only:
         p.error('Master-worker with CG/FCG constant splitting is unsupported; use --split off')
+    if a.lossless_packing and (a.split != 'off' or a.setup_diagnostic_only):
+        p.error('Lossless packing requires --split off and compressed study cases')
     a.repo, a.kaskade = a.repo.resolve(), a.kaskade.resolve()
     if a.executable:
         a.executable = a.executable.resolve()
@@ -96,6 +100,8 @@ def make_command(a, case, folder, launcher):
     cmd[cmd.index('--bddcCgConstantSplitExperiment')+1] = str(int(
         compressed and cfg.split == 'on' and cfg.solver in ('cg', 'fcg')))
     cmd += ['--bddcMpiRouting', str(int(not case['direct'])), '--bddcLocalCompressionBypass', '0']
+    if getattr(a, 'lossless_packing', 0) and compressed:
+        cmd += ['--bddcLosslessPacking', '1']
     if a.setup_diagnostic_only and not a.slurm_container:
         model_index = cmd.index(str(a.repo/'emiModel'))
         cmd[model_index:model_index] = ['env', 'EMI_MATERIAL_TRACE=1']
@@ -180,6 +186,18 @@ def analyze(a, case, folder, rc, timed_out, references, baseline):
                 row[route+'_bytes'] = sum(r['bytes'] for r in row['routes'] if r['route'] == route)
         except ValueError as exc:
             row['errors'].append(str(exc))
+    packing = re.findall(r'^BDDC packet transport bytes: original=(\d+) actual=(\d+) packing=([01])$', log, re.M)
+    if packing:
+        if len(packing) != 1:
+            row['errors'].append('Duplicate packet transport summary')
+        else:
+            original, actual, enabled = map(int, packing[0])
+            row['packet_transport'] = dict(original_bytes=original, actual_bytes=actual, packing=enabled)
+            expected = int(bool(getattr(a, 'lossless_packing', 0) and case['bits'] is not None))
+            if enabled != expected:
+                row['errors'].append('Packet packing mode differs from request')
+    elif getattr(a, 'lossless_packing', 0) and case['bits'] is not None:
+        row['errors'].append('Missing packet transport summary')
     if timed_out:
         row['errors'].append('Launcher runtime limit')
     # Only complete, converged states are used as solution-accuracy evidence.
@@ -297,6 +315,10 @@ def campaign(a):
         'tests/analyze_emi_potential_diagnostics.py')]
     sources += [a.kaskade/'mg'/p for p in ('bddc.hh', 'bddc.hpp', 'bddcMpiRouting.hh',
                                           'bddcSpaceTransfer.hh', 'bddcSpaceTransfer.hpp')]
+    sources.append(a.repo/'EMI_bddc_packet_packing.hh')
+    packing_header = a.kaskade/'mg/bddcPacketPacking.hh'
+    if packing_header.is_file():
+        sources.append(packing_header)
     coarse_header = a.kaskade/'mg/bddcCoarseReduction.hh'
     if coarse_header.is_file():
         sources.append(coarse_header)

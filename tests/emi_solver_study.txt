@@ -128,3 +128,11 @@ both manifests. Preserve failed configurations. Compare raw/centered errors
 and complete-solve payload savings against each matched raw solver. These
 single-run validation timings are not controlled runtime evidence; use
 matched hardware and repeated measurements for a timing comparison.
+
+Optional lossless transport packing
+----------------------------------
+--lossless-packing 1 requires --split off and enables the application option
+--bddcLosslessPacking only for compressed cases. It preserves both quantization
+parameters. The default is 0. Packet transport counters are reported separately
+from pre-wrapper codec payload savings. See emi_lossless_fullsolve.txt for the
+matched FCG validation and current support restrictions.

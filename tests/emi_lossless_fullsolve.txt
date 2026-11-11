@@ -1,0 +1,32 @@
+EMI lossless MPI packet packing (opt-in; default OFF)
+
+The application option --bddcLosslessPacking 1 uses the Kaskade lossless
+packet wrapper. minVal, scale, quantized data and exact values are unchanged.
+Requires compressed non-SDC MPI BDDC with destination routing, no constant
+splitting, grouping, local bypass, audit/probe or raw-prefix schedule.
+Existing FCG+split studies remain unchanged and do not use this option.
+
+From the EMI repository on the cluster:
+  mkdir -p output
+  job=$(sbatch --parsable tests/submit_emi_lossless_fullsolve.sbatch)
+  job=${job%%;*}
+  printf '%s\n' "$job" > output/emi-packing-solve-job.txt
+  tail -n 80 -F "output/emi-packing-solve-${job}.log"
+
+Default: weak_32_h16, two nodes/four ranks, FCG, one time step, 16 bits,
+transform before and after quantization, split OFF. To also test 12/24 bits,
+append --bits 12 16 24 to the sbatch command. A fresh separate executable is
+built under output; the root emiModel executable is not overwritten.
+
+Every pair compares packing OFF/ON using the same executable and inputs.
+PASS requires successful true-residual checks, exact initial/final CSV
+snapshots, exact convergence traces, iterations, residual summaries and
+unchanged pre-wrapper logical byte counts. Source/input hashes are checked.
+Results: output/emi-packing-solve-JOB/validation/{summary.csv,PASS}.
+
+The additional saving uses original vs packed routed message bytes, including
+record/wrapper overhead. These are inter-rank messages, including same-node
+MPI transfers; intra-rank copies and MPI implementation framing are excluded.
+Existing compression/routing counters still describe pre-wrapper logical bytes.
+This is correctness validation, not repeated performance timing.
+EMI cluster validation is pending; Poisson parity does not prove EMI parity.
