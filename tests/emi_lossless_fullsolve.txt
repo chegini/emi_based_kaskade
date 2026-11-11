@@ -306,3 +306,49 @@ Dictionary-only percentages use the previous short-record packer as baseline;
 total percentages use original already-compressed routed messages, not raw
 doubles. Do not add percentages. minVal and scale are unchanged. No runtime
 improvement is claimed.
+
+One-byte dictionary counts (2026-11-11; cluster validated below)
+----------------------------------------------------------------
+For selected dictionaries with 1..256 entries, selector bit 0x08 adds a one-byte
+count-minus-one field to the byte-reference layout. This replaces the four-byte
+dictionary count and saves three bytes per eligible message, without another
+selector byte. Larger dictionaries keep uint32 counts and references.
+The new decoder still reads the previous layout when 0x08 is absent. Older
+decoders do not understand the new layout; update all participating ranks.
+minVal, scale, dictionary entries, symbols, exact values and record order remain
+unchanged. Base-format selection is unchanged and packing stays off by default.
+
+with_wide_dictionary_count_bytes records the preceding byte-reference layout.
+dictionary_count_bytes_saved = with_wide_dictionary_count_bytes - packed_routed_bytes
+dictionary_count_savings_percent uses with_wide_dictionary_count_bytes as baseline.
+short_dictionary_counts is the number of eligible messages; saved bytes must be
+three times this number. Dictionary-reference savings now stop at this baseline,
+so count savings are not attributed twice. Zero saving is valid for no dictionaries.
+
+Sanitizer tests passed for counts 1/256/257, raw/encoded records, repeated plans,
+truncated packets, invalid flags/references and prior-layout decoding.
+Two-rank extracted production R/P exchanges preserved packet bytes and ordering.
+EMI parser checks passed for zero/nonzero savings and invalid accounting.
+Poisson production-codec frozen replay (16 bits, s4/e32, producer_id % 4):
+before 86470 -> 86146 bytes (0.3747% additional);
+after 80695 -> 80371 bytes (0.4015% additional);
+quantization 253164 -> 252840 bytes (0.1280% additional).
+Each saves 324 bytes across 108 eligible messages. These are frozen logical
+payload totals including local records, not full-solve or network results.
+Rerun the existing full-solve submission scripts to verify iteration, solution
+and residual parity and to measure EMI savings. No runtime benefit is claimed.
+
+Cluster dictionary-count validation (2026-11-11)
+-----------------------------------------------
+Job 6093924 completed with exit 0:0. Both 16-bit FCG comparisons passed
+EXACT_SOLUTION_TRACE_AND_RESIDUALS.
+order iterations_off/on previous_bytes packed_bytes count_saved_% total_saved_%
+before 40/40 4556905 4555447 0.0320 22.2243
+after 41/41 4746903 4745409 0.0315 22.2095
+Before: 486 shortened dictionary counts saved 1458 bytes.
+After: 498 shortened dictionary counts saved 1494 bytes.
+Evidence: output/emi-packing-solve-6093924/validation/summary.csv.
+Count-only savings use the preceding byte-reference packer as denominator.
+Total savings use original already-compressed routed messages, not raw doubles.
+Do not add percentages. Both quantization parameters and numerical results are
+unchanged. No runtime improvement is claimed.

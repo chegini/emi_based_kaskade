@@ -83,10 +83,15 @@ def inspect(folder, cfg, rc, timed_out):
         if len(count_summary) != 1:
             raise ValueError('Missing/duplicate exact-count summary')
         with_counts, count_actual, count_saved = map(int, count_summary[0])
+        dict_count_summary = re.findall(r'^BDDC packet dictionary count bytes: wide=(\d+) actual=(\d+) saved=(\d+) messages=(\d+)$', log, re.M)
+        if len(dict_count_summary) != 1: raise ValueError('Missing/duplicate dictionary count summary')
+        count_wide, dc_actual, dc_saved, dc_messages = map(int, dict_count_summary[0])
+        if dc_actual != actual or count_wide < actual or count_wide-actual != dc_saved or dc_saved != 3*dc_messages:
+            raise ValueError('Invalid dictionary count accounting')
         dictionary_summary = re.findall(r'^BDDC packet dictionary reference bytes: wide=(\d+) actual=(\d+) saved=(\d+) messages=(\d+) byte_refs=(\d+) wide_refs=(\d+)$', log, re.M)
         if len(dictionary_summary) != 1: raise ValueError('Missing/duplicate dictionary reference summary')
         dict_wide, dict_actual, dict_saved, dict_messages, byte_refs, wide_refs = map(int, dictionary_summary[0])
-        if dict_actual != actual or not actual <= dict_wide or dict_wide-actual != dict_saved or dict_saved != 3*byte_refs or bool(dict_messages) != bool(byte_refs+wide_refs):
+        if dict_actual != actual or not actual <= count_wide <= dict_wide or dict_wide-count_wide != dict_saved or dict_saved != 3*byte_refs or bool(dict_messages) != bool(byte_refs+wide_refs) or dc_messages > dict_messages or dc_messages > byte_refs or bool(dc_messages) != bool(byte_refs):
             raise ValueError('Invalid dictionary reference accounting')
         record_summary = re.findall(r'^BDDC packet record length bytes: wide=(\d+) actual=(\d+) saved=(\d+) records=(\d+) shortened=(\d+) le255=(\d+) le4095=(\d+) le32767=(\d+) larger=(\d+)$', log, re.M)
         if len(record_summary) != 1:
@@ -117,7 +122,10 @@ def inspect(folder, cfg, rc, timed_out):
             with_wide_dictionary_reference_bytes=dict_wide,dictionary_reference_bytes_saved=dict_saved,
             dictionary_reference_savings_percent=100*dict_saved/dict_wide if dict_wide else 0,
             dictionary_messages=dict_messages,byte_dictionary_references=byte_refs,
-            wide_dictionary_references=wide_refs)
+            wide_dictionary_references=wide_refs,
+            with_wide_dictionary_count_bytes=count_wide,dictionary_count_bytes_saved=dc_saved,
+            dictionary_count_savings_percent=100*dc_saved/count_wide if count_wide else 0,
+            short_dictionary_counts=dc_messages)
 
     for step in (0, 1):
         study.read(folder/f'potential-state-step{step}.csv')
