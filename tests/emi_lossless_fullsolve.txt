@@ -189,7 +189,7 @@ The existing full-solve submission script tests the updated shared header. It
 requires nonzero exact-count savings and exact solution/trace/iteration parity.
 with_exact_count_packer_bytes is the previous endpoint-planned size, including
 all initial/refresh fields; packed_routed_bytes is the final actual size.
-exact_count_bytes_saved = with_exact_count_packer_bytes - packed_routed_bytes.
+For that format, exact_count_bytes_saved = with_exact_count_packer_bytes - packed_routed_bytes.
 exact_count_savings_percent uses with_exact_count_packer_bytes as denominator.
 Endpoint-ID savings now stop at with_exact_count_packer_bytes, so they do not
 count the new omission twice. Total savings still compare final bytes to the
@@ -214,3 +214,50 @@ original already-compressed routed messages. These percentages must not be
 added. Two-parameter quantization is unchanged; splitting is off. No runtime
 improvement is claimed.
 Evidence: output/emi-packing-solve-6093833/validation/summary.csv and PASS.
+
+
+Short record lengths (2026-11-11; cluster validated below)
+------------------------------------------------------------
+The optional packer now uses a uint16 tagged payload length when every compact
+record in a peer message has at most 32767 body bytes. One bit retains the
+encoded/raw flag. Selector bit 0x20 identifies this format without another byte.
+Any larger record retains uint32 lengths for the entire message. Legacy format
+0 is unchanged. The size excludes a shared-header dictionary reference.
+
+This saves two bytes per shortened record, including initial/refresh messages.
+minVal, scale, quantized symbols, exact doubles and accumulation order do not
+change. Packing remains disabled by default. All ranks need the updated decoder.
+
+The CSV now separates count reuse from this stage:
+exact_count_bytes_saved = with_exact_count_packer_bytes -
+                          with_wide_record_length_bytes
+record_length_bytes_saved = with_wide_record_length_bytes - packed_routed_bytes
+record_length_savings_percent uses with_wide_record_length_bytes as denominator.
+The final total uses original_routed_bytes; percentages must not be added.
+compact_records and shortened_records describe selected nonlegacy layouts.
+Size bins are disjoint: 0..255, 256..4095, 4096..32767, and larger.
+One oversized record can prevent shortening other small records in its message.
+
+Local sanitizer/boundary tests cover 32767/32768, all-message fallback, raw flags,
+empty and truncated packets, plan reuse and histogram accounting. Existing
+packing/count/endpoint tests and two-rank extracted production R/P exchange
+checks pass. The full-solve harness requires exact solution/trace/residual and
+iteration parity plus consistent two-bytes-per-record accounting. Previous
+cluster jobs above do not validate this newest format; rerun the submission.
+
+Cluster short-record-length validation (2026-11-11)
+--------------------------------------------------
+Job 6093871 completed with exit 0:0. Both 16-bit FCG comparisons passed
+EXACT_SOLUTION_TRACE_AND_RESIDUALS.
+order iterations_off/on wide_record_bytes packed_bytes record_saved_% total_saved_%
+before 40/40 4765977 4668697 2.04 20.29
+after 41/41 4961191 4861479 2.01 20.31
+Before: all 48640 records shortened, saving 97280 bytes; 43576 bodies
+were 0..255 bytes and 5064 were 256..4095 bytes.
+After: all 49856 records shortened, saving 99712 bytes; 44664 bodies
+were 0..255 bytes and 5192 were 256..4095 bytes.
+No record required the wide fallback in these runs.
+Evidence: output/emi-packing-solve-6093871/validation/summary.csv.
+Record-only savings use the previous wide-record-length packer; total savings
+use original already-compressed routed messages. Do not add the percentages.
+Both quantization parameters are unchanged. No runtime improvement is claimed.

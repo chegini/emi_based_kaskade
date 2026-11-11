@@ -83,8 +83,16 @@ def inspect(folder, cfg, rc, timed_out):
         if len(count_summary) != 1:
             raise ValueError('Missing/duplicate exact-count summary')
         with_counts, count_actual, count_saved = map(int, count_summary[0])
+        record_summary = re.findall(r'^BDDC packet record length bytes: wide=(\d+) actual=(\d+) saved=(\d+) records=(\d+) shortened=(\d+) le255=(\d+) le4095=(\d+) le32767=(\d+) larger=(\d+)$', log, re.M)
+        if len(record_summary) != 1:
+            raise ValueError('Missing/duplicate record length summary')
+        record_wide, record_actual, record_saved, records, shortened, tiny, small, medium, large = map(int, record_summary[0])
+        if (record_actual != actual or not actual < record_wide <= with_counts or
+                record_wide-actual != record_saved or record_saved != 2*shortened or
+                records != tiny+small+medium+large or not 0 < shortened <= tiny+small+medium):
+            raise ValueError('Invalid or unexercised short record lengths')
         if (count_actual != actual or not actual < with_counts <= explicit or
-                with_counts-actual != count_saved or count_saved % 4):
+                with_counts-record_wide != count_saved or count_saved % 4):
             raise ValueError('Invalid or unexercised exact-count omission')
         if (plan_actual != actual or not actual <= explicit <= two or
                 explicit-with_counts != omitted or ids % 8 or omitted % 8 or
@@ -95,7 +103,12 @@ def inspect(folder, cfg, rc, timed_out):
             endpoint_ids_savings_percent=100*omitted/explicit,
             endpoint_plan_messages=messages, endpoint_plan_reused_messages=reused,
             with_exact_count_packer_bytes=with_counts, exact_count_bytes_saved=count_saved,
-            exact_count_savings_percent=100*count_saved/with_counts)
+            exact_count_savings_percent=100*count_saved/with_counts,
+            with_wide_record_length_bytes=record_wide,record_length_bytes_saved=record_saved,
+            record_length_savings_percent=100*record_saved/record_wide,
+            compact_records=records,shortened_records=shortened,
+            record_bytes_0_255=tiny,record_bytes_256_4095=small,
+            record_bytes_4096_32767=medium,record_bytes_over_32767=large)
 
     for step in (0, 1):
         study.read(folder/f'potential-state-step{step}.csv')
