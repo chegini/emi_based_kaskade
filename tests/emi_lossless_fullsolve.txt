@@ -29,4 +29,24 @@ record/wrapper overhead. These are inter-rank messages, including same-node
 MPI transfers; intra-rank copies and MPI implementation framing are excluded.
 Existing compression/routing counters still describe pre-wrapper logical bytes.
 This is correctness validation, not repeated performance timing.
-EMI cluster validation is pending; Poisson parity does not prove EMI parity.
+Validated on ZIB: job 6093690, 2026-11-11
+--------------------------------------
+Configuration: weak_32_h16, two nodes/four ranks, one time step, FCG,
+16 bits, constant splitting OFF; same executable for packing OFF/ON.
+
+Order   Iterations OFF/ON   Original routed bytes   Packed bytes   Extra saving
+before       40 / 40              5857160             5626905         3.93%
+after        41 / 41              6100240             5844007         4.20%
+
+True relative residuals: before 7.63448e-08; after 9.29892e-08.
+Both comparisons passed EXACT_SOLUTION_TRACE_AND_RESIDUALS: initial/final
+snapshots, convergence traces, residual summaries and iteration counts were
+identical with packing OFF/ON. Logical payload counters were unchanged.
+The build/source and executable/input hash checks passed. Both minVal and
+scale remain present. This validates these unsplit EMI cases; it does not
+establish runtime improvement or validate packing with constant splitting.
+
+Evidence retained under output/emi-packing-solve-6093690/validation:
+summary.csv, PASS, manifest.json and per-case commands/logs/snapshots/traces.
+The initial nonfinite Polak-Ribiere beta message in the build log comes from
+the successful breakdown-handling regression, not these full solves.
