@@ -83,12 +83,17 @@ def inspect(folder, cfg, rc, timed_out):
         if len(count_summary) != 1:
             raise ValueError('Missing/duplicate exact-count summary')
         with_counts, count_actual, count_saved = map(int, count_summary[0])
+        dictionary_summary = re.findall(r'^BDDC packet dictionary reference bytes: wide=(\d+) actual=(\d+) saved=(\d+) messages=(\d+) byte_refs=(\d+) wide_refs=(\d+)$', log, re.M)
+        if len(dictionary_summary) != 1: raise ValueError('Missing/duplicate dictionary reference summary')
+        dict_wide, dict_actual, dict_saved, dict_messages, byte_refs, wide_refs = map(int, dictionary_summary[0])
+        if dict_actual != actual or not actual <= dict_wide or dict_wide-actual != dict_saved or dict_saved != 3*byte_refs or bool(dict_messages) != bool(byte_refs+wide_refs):
+            raise ValueError('Invalid dictionary reference accounting')
         record_summary = re.findall(r'^BDDC packet record length bytes: wide=(\d+) actual=(\d+) saved=(\d+) records=(\d+) shortened=(\d+) le255=(\d+) le4095=(\d+) le32767=(\d+) larger=(\d+)$', log, re.M)
         if len(record_summary) != 1:
             raise ValueError('Missing/duplicate record length summary')
         record_wide, record_actual, record_saved, records, shortened, tiny, small, medium, large = map(int, record_summary[0])
-        if (record_actual != actual or not actual < record_wide <= with_counts or
-                record_wide-actual != record_saved or record_saved != 2*shortened or
+        if (record_actual != actual or not actual <= dict_wide < record_wide <= with_counts or
+                record_wide-dict_wide != record_saved or record_saved != 2*shortened or
                 records != tiny+small+medium+large or not 0 < shortened <= tiny+small+medium):
             raise ValueError('Invalid or unexercised short record lengths')
         if (count_actual != actual or not actual < with_counts <= explicit or
@@ -108,7 +113,11 @@ def inspect(folder, cfg, rc, timed_out):
             record_length_savings_percent=100*record_saved/record_wide,
             compact_records=records,shortened_records=shortened,
             record_bytes_0_255=tiny,record_bytes_256_4095=small,
-            record_bytes_4096_32767=medium,record_bytes_over_32767=large)
+            record_bytes_4096_32767=medium,record_bytes_over_32767=large,
+            with_wide_dictionary_reference_bytes=dict_wide,dictionary_reference_bytes_saved=dict_saved,
+            dictionary_reference_savings_percent=100*dict_saved/dict_wide if dict_wide else 0,
+            dictionary_messages=dict_messages,byte_dictionary_references=byte_refs,
+            wide_dictionary_references=wide_refs)
 
     for step in (0, 1):
         study.read(folder/f'potential-state-step{step}.csv')

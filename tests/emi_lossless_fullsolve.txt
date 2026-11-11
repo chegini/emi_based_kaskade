@@ -261,3 +261,48 @@ Evidence: output/emi-packing-solve-6093871/validation/summary.csv.
 Record-only savings use the previous wide-record-length packer; total savings
 use original already-compressed routed messages. Do not add the percentages.
 Both quantization parameters are unchanged. No runtime improvement is claimed.
+
+One-byte dictionary references (2026-11-11; cluster validated below)
+--------------------------------------------------------------------
+In already-selected shared-header modes 2/4/6, dictionaries with at most 256
+entries use uint8 references instead of uint32. Selector bit 0x10 enables this
+layout without adding a byte. The dictionary count remains uint32; above 256
+entries references stay uint32. Nonshared modes and numerical bytes are unchanged.
+This stage does not change base-format selection or either quantization parameter.
+
+with_wide_dictionary_reference_bytes is the previous short-record packer size.
+dictionary_reference_bytes_saved = with_wide_dictionary_reference_bytes -
+                                    packed_routed_bytes
+dictionary_reference_savings_percent uses that baseline as denominator.
+record_length_bytes_saved now stops at with_wide_dictionary_reference_bytes.
+Each shortened reference saves exactly 3 bytes. dictionary_messages,
+byte_dictionary_references and wide_dictionary_references report applicability.
+Zero saving is valid when there are no eligible selected dictionaries.
+Initial/refresh plans remain included. Do not add stage percentages.
+
+Local tests: sanitizer boundary cases 1/256/257, mixed raw/encoded records,
+plan reuse, malformed references/selectors, truncation and exact byte recovery;
+two-rank extracted production R/P exchanges preserve bytes and ordering.
+Poisson production-codec frozen replay (16 bits, s4/e32, producer_id % 4):
+before 89710 -> 86470 bytes, additional 3.61%;
+after 83935 -> 80695 bytes, additional 3.86%.
+Each uses 108 shared messages and 1080 one-byte references; 3240 bytes saved.
+These include local replay records and are not new convergence/network results.
+Rerun the existing full-solve submission script for live solver parity and
+EMI applicability. Packing remains off by default; all ranks need the new decoder.
+
+Cluster dictionary-reference validation (2026-11-11)
+---------------------------------------------------
+Job 6093895 completed with exit 0:0. Both 16-bit FCG comparisons passed
+EXACT_SOLUTION_TRACE_AND_RESIDUALS.
+order iterations_off/on previous_bytes packed_bytes dictionary_saved_% total_saved_%
+before 40/40 4668697 4556905 2.39 22.20
+after 41/41 4861479 4746903 2.36 22.18
+Before: 486 dictionary messages, 37264 one-byte references, 111792 bytes saved.
+After: 498 dictionary messages, 38192 one-byte references, 114576 bytes saved.
+No wide dictionary references were needed.
+Evidence: output/emi-packing-solve-6093895/validation/summary.csv.
+Dictionary-only percentages use the previous short-record packer as baseline;
+total percentages use original already-compressed routed messages, not raw
+doubles. Do not add percentages. minVal and scale are unchanged. No runtime
+improvement is claimed.

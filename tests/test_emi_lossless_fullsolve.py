@@ -31,6 +31,7 @@ class Packing(unittest.TestCase):
     def test_length_accounting_must_match_transport(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp)
+            dictionary_line='BDDC packet dictionary reference bytes: wide=88 actual=88 saved=0 messages=0 byte_refs=0 wide_refs=0\n'
             record_line='BDDC packet record length bytes: wide=92 actual=88 saved=4 records=2 shortened=2 le255=2 le4095=0 le32767=0 larger=0\n'
             count_line='BDDC packet exact count omission bytes: with_counts=96 actual=88 saved=4\n'
             endpoint='BDDC packet endpoint plan bytes: explicit=104 actual=88 plan_ids=8 omitted_ids=8 plan_messages=1 reused_messages=1\n'
@@ -48,7 +49,7 @@ class Packing(unittest.TestCase):
                     (folder/'run.log').write_text(
                         'BDDC packet transport bytes: original=100 actual=88 packing=1\n'+
                         ('BDDC packet length compaction bytes: '+summary+'\n' if summary else '')+
-                        'BDDC packet tail omission bytes: two_lengths=104 actual=88\n'+endpoint+count_line+record_line)
+                        'BDDC packet tail omission bytes: two_lengths=104 actual=88\n'+endpoint+count_line+record_line+dictionary_line)
                     if summary=='wide=112 actual=88':
                         self.assertEqual(check.inspect(folder,cfg,0,False)['wide_bytes'],112)
                     else:
@@ -58,7 +59,7 @@ class Packing(unittest.TestCase):
                     (folder/'run.log').write_text(
                         'BDDC packet transport bytes: original=100 actual=88 packing=1\n'
                         'BDDC packet length compaction bytes: wide=112 actual=88\n'+
-                        ('BDDC packet tail omission bytes: '+tail+'\n' if tail else '')+endpoint+count_line+record_line)
+                        ('BDDC packet tail omission bytes: '+tail+'\n' if tail else '')+endpoint+count_line+record_line+dictionary_line)
                     if tail=='two_lengths=104 actual=88':
                         self.assertEqual(check.inspect(folder,cfg,0,False)['two_length_bytes'],104)
                     else:
@@ -72,7 +73,7 @@ class Packing(unittest.TestCase):
                     (folder/'run.log').write_text(
                         'BDDC packet transport bytes: original=120 actual=88 packing=1\n'
                         'BDDC packet length compaction bytes: wide=112 actual=88\n'
-                        'BDDC packet tail omission bytes: two_lengths=104 actual=88\n'+bad+count_line+record_line)
+                        'BDDC packet tail omission bytes: two_lengths=104 actual=88\n'+bad+count_line+record_line+dictionary_line)
                     with self.assertRaises(ValueError): check.inspect(folder,cfg,0,False)
 
                 for bad_count in ('', count_line+count_line, count_line.replace('saved=4','saved=8'),
@@ -81,7 +82,7 @@ class Packing(unittest.TestCase):
                     (folder/'run.log').write_text(
                         'BDDC packet transport bytes: original=120 actual=88 packing=1\n'
                         'BDDC packet length compaction bytes: wide=112 actual=88\n'
-                        'BDDC packet tail omission bytes: two_lengths=104 actual=88\n'+endpoint+bad_count+record_line)
+                        'BDDC packet tail omission bytes: two_lengths=104 actual=88\n'+endpoint+bad_count+record_line+dictionary_line)
                     with self.assertRaises(ValueError): check.inspect(folder,cfg,0,False)
 
                 for bad_record in ('', record_line+record_line, record_line.replace('saved=4','saved=6'),
@@ -92,8 +93,28 @@ class Packing(unittest.TestCase):
                     (folder/'run.log').write_text(
                         'BDDC packet transport bytes: original=120 actual=88 packing=1\n'
                         'BDDC packet length compaction bytes: wide=112 actual=88\n'
-                        'BDDC packet tail omission bytes: two_lengths=104 actual=88\n'+endpoint+count_line+bad_record)
+                        'BDDC packet tail omission bytes: two_lengths=104 actual=88\n'+endpoint+count_line+bad_record+dictionary_line)
                     with self.assertRaises(ValueError): check.inspect(folder,cfg,0,False)
+
+                for bad_dict in ('', dictionary_line+dictionary_line,
+                                 dictionary_line.replace('saved=0','saved=3'),
+                                 dictionary_line.replace('byte_refs=0','byte_refs=1'),
+                                 dictionary_line.replace('messages=0','messages=1')):
+                    (folder/'run.log').write_text(
+                        'BDDC packet transport bytes: original=120 actual=88 packing=1\n'
+                        'BDDC packet length compaction bytes: wide=112 actual=88\n'
+                        'BDDC packet tail omission bytes: two_lengths=104 actual=88\n'+endpoint+count_line+record_line+bad_dict)
+                    with self.assertRaises(ValueError): check.inspect(folder,cfg,0,False)
+
+                # Positive dictionary savings keep earlier stage baselines separate.
+                log=('BDDC packet transport bytes: original=120 actual=88 packing=1\n'
+                     'BDDC packet length compaction bytes: wide=112 actual=88\n'
+                     'BDDC packet tail omission bytes: two_lengths=104 actual=88\n'+endpoint+count_line+record_line)
+                log=log.replace('actual=88','actual=85')
+                log+='BDDC packet dictionary reference bytes: wide=88 actual=85 saved=3 messages=1 byte_refs=1 wide_refs=0\n'
+                (folder/'run.log').write_text(log)
+                result=check.inspect(folder,cfg,0,False)
+                self.assertEqual(result['endpoint']['dictionary_reference_bytes_saved'],3)
 
     def test_parity_rejects_numerical_or_counter_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
