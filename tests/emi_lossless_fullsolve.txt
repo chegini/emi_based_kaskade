@@ -129,3 +129,43 @@ packing; tail-only saving is relative to the two-short-length packer. These
 percentages have different denominators and must not be added. No runtime
 improvement is claimed. Binary/generated outputs are not part of this commit.
 Evidence: output/emi-packing-solve-6093741/validation/summary.csv and PASS.
+
+Endpoint-plan reuse
+---------------------------------------------
+Packing remains opt-in; minVal, scale and every reconstructed packet byte are
+unchanged. The first nonempty message per directed MPI peer and transfer phase
+carries the ordered source/destination IDs. Later messages omit the two int32
+IDs per record (8 bytes) only when the entire ordered sequence matches. A
+changed sequence refreshes the plan using explicit IDs. Empty messages retain
+the plan; empty payload records retain their positions. Raw fallbacks and
+changes of packet size do not change the endpoint identity.
+
+The selector high bit identifies implicit IDs, so no extra selector byte or
+setup collective is introduced. Both ends must use the updated implementation;
+plans rely on reliable ordered delivery on the same phase/peer channel.
+Restriction and prolongation have separate plans.
+
+The existing submission script builds a fresh executable and checks exact
+solution, residual-trace and iteration parity. It now requires both plan
+establishment and reuse. endpoint_plan_id_bytes counts IDs actually sent in
+initial/refresh messages; it is already INCLUDED in packed_routed_bytes, not an
+additional charge. endpoint_ids_bytes_saved equals explicit_id_packer_bytes
+minus packed_routed_bytes. Its percentage uses the explicit-ID packer as the
+denominator. Tail-length savings stop at explicit_id_packer_bytes, avoiding
+double counting the new endpoint savings. Total additional_savings_percent
+continues to compare the original compressed routed messages with the final
+packed messages. These are application transport bytes, not total network
+traffic. Previous cluster results above validate the earlier format only.
+
+Cluster endpoint-plan validation (2026-11-11)
+-------------------------------------------
+Job 6093777: COMPLETED, exit 0:0. Fresh production build and source hashes passed.
+Every packing-off/on pair passed EXACT_SOLUTION_TRACE_AND_RESIDUALS.
+bits order iterations_off/on original_routed explicit_ids packed endpoint_saved_% total_saved_%
+16 before 40/40 5857160 5335065 4955673 7.11 15.39
+16 after 41/41 6100240 5544871 5155751 7.02 15.48
+Initial/refresh plan IDs are included in packed bytes. Endpoint-only savings
+use explicit-ID packed bytes as the denominator; total savings use original
+compressed routed bytes. These percentages must not be added. Two-parameter
+quantization remains unchanged; splitting is off. No runtime gain is claimed.
+Evidence: output/emi-packing-solve-6093777/validation/summary.csv and PASS.

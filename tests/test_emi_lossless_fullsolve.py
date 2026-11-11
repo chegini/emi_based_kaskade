@@ -31,6 +31,7 @@ class Packing(unittest.TestCase):
     def test_length_accounting_must_match_transport(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp)
+            endpoint='BDDC packet endpoint plan bytes: explicit=100 actual=92 plan_ids=8 omitted_ids=8 plan_messages=1 reused_messages=1\n'
             for step in (0,1):
                 (folder/f'potential-state-step{step}.csv').write_text('dof,u\n0,1\n')
             (folder/check.FILES[2]).write_text(
@@ -40,26 +41,37 @@ class Packing(unittest.TestCase):
             metrics=dict(errors=[],transmitted_sent_bytes=20,iterations_per_step=[1])
             with patch.object(study,'collect',return_value=metrics), \
                  patch.object(study,'routing_counts',return_value=[dict(bytes=20)]):
-                for summary in ('wide=96 actual=92','wide=91 actual=92',
-                                'wide=96 actual=90',''):
+                for summary in ('wide=112 actual=92','wide=91 actual=92',
+                                'wide=112 actual=90',''):
                     (folder/'run.log').write_text(
                         'BDDC packet transport bytes: original=100 actual=92 packing=1\n'+
                         ('BDDC packet length compaction bytes: '+summary+'\n' if summary else '')+
-                        'BDDC packet tail omission bytes: two_lengths=94 actual=92\n')
-                    if summary=='wide=96 actual=92':
-                        self.assertEqual(check.inspect(folder,cfg,0,False)['wide_bytes'],96)
+                        'BDDC packet tail omission bytes: two_lengths=104 actual=92\n'+endpoint)
+                    if summary=='wide=112 actual=92':
+                        self.assertEqual(check.inspect(folder,cfg,0,False)['wide_bytes'],112)
                     else:
                         with self.assertRaises(ValueError): check.inspect(folder,cfg,0,False)
-                for tail in ('two_lengths=94 actual=92','two_lengths=91 actual=92',
-                             'two_lengths=97 actual=92','two_lengths=94 actual=90',''):
+                for tail in ('two_lengths=104 actual=92','two_lengths=91 actual=92',
+                             'two_lengths=113 actual=92','two_lengths=104 actual=90',''):
                     (folder/'run.log').write_text(
                         'BDDC packet transport bytes: original=100 actual=92 packing=1\n'
-                        'BDDC packet length compaction bytes: wide=96 actual=92\n'+
-                        ('BDDC packet tail omission bytes: '+tail+'\n' if tail else ''))
-                    if tail=='two_lengths=94 actual=92':
-                        self.assertEqual(check.inspect(folder,cfg,0,False)['two_length_bytes'],94)
+                        'BDDC packet length compaction bytes: wide=112 actual=92\n'+
+                        ('BDDC packet tail omission bytes: '+tail+'\n' if tail else '')+endpoint)
+                    if tail=='two_lengths=104 actual=92':
+                        self.assertEqual(check.inspect(folder,cfg,0,False)['two_length_bytes'],104)
                     else:
                         with self.assertRaises(ValueError): check.inspect(folder,cfg,0,False)
+
+                # Endpoint accounting must be present, consistent, and actually reused.
+                for bad in ('', endpoint+endpoint, endpoint.replace('explicit=100','explicit=101'),
+                            endpoint.replace('actual=92','actual=91'),
+                            endpoint.replace('plan_ids=8','plan_ids=7'),
+                            endpoint.replace('reused_messages=1','reused_messages=0')):
+                    (folder/'run.log').write_text(
+                        'BDDC packet transport bytes: original=120 actual=92 packing=1\n'
+                        'BDDC packet length compaction bytes: wide=112 actual=92\n'
+                        'BDDC packet tail omission bytes: two_lengths=104 actual=92\n'+bad)
+                    with self.assertRaises(ValueError): check.inspect(folder,cfg,0,False)
 
     def test_parity_rejects_numerical_or_counter_changes(self):
         with tempfile.TemporaryDirectory() as tmp:

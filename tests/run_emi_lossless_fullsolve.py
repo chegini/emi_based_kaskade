@@ -75,6 +75,19 @@ def inspect(folder, cfg, rc, timed_out):
         if tail_actual != actual or not actual <= two <= wide:
             raise ValueError('Invalid tail omission counters')
         result['two_length_bytes'] = two
+        plans = re.findall(r'^BDDC packet endpoint plan bytes: explicit=(\d+) actual=(\d+) plan_ids=(\d+) omitted_ids=(\d+) plan_messages=(\d+) reused_messages=(\d+)$', log, re.M)
+        if len(plans) != 1:
+            raise ValueError('Missing/duplicate endpoint plan summary')
+        explicit, plan_actual, ids, omitted, messages, reused = map(int, plans[0])
+        if (plan_actual != actual or not actual <= explicit <= two or
+                explicit-actual != omitted or ids % 8 or omitted % 8 or
+                not all((ids, omitted, messages, reused))):
+            raise ValueError('Invalid or unexercised endpoint plans')
+        result['endpoint'] = dict(explicit_id_packer_bytes=explicit,
+            endpoint_plan_id_bytes=ids, endpoint_ids_bytes_saved=omitted,
+            endpoint_ids_savings_percent=100*omitted/explicit,
+            endpoint_plan_messages=messages, endpoint_plan_reused_messages=reused)
+
     for step in (0, 1):
         study.read(folder/f'potential-state-step{step}.csv')
     with (folder/FILES[2]).open() as stream:
@@ -146,11 +159,13 @@ def main():
                 additional_savings_percent=saving, parity='EXACT_SOLUTION_TRACE_AND_RESIDUALS')
             wide = new['wide_bytes']
             two = new['two_length_bytes']
+            explicit = new['endpoint']['explicit_id_packer_bytes']
             row.update(previous_packer_bytes=wide,
                 stream_length_bytes_saved=wide-two,
                 stream_length_savings_percent=100*(1-two/wide) if wide else 0,
-                two_length_packer_bytes=two,tail_length_bytes_saved=two-new['actual_bytes'],
-                tail_length_savings_percent=100*(1-new['actual_bytes']/two) if two else 0)
+                two_length_packer_bytes=two,tail_length_bytes_saved=two-explicit,
+                tail_length_savings_percent=100*(1-explicit/two) if two else 0)
+            row.update(new['endpoint'])
             rows.append(row)
             with (root/'summary.csv').open('w') as stream:
                 writer = csv.DictWriter(stream, fieldnames=list(row))
