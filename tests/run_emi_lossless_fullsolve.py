@@ -68,6 +68,13 @@ def inspect(folder, cfg, rc, timed_out):
         if actual != result['actual_bytes'] or actual > wide:
             raise ValueError('Invalid length compaction counters')
         result['wide_bytes'] = wide
+        tail_summary = re.findall(r'^BDDC packet tail omission bytes: two_lengths=(\d+) actual=(\d+)$', log, re.M)
+        if len(tail_summary) != 1:
+            raise ValueError('Missing or duplicate tail omission summary')
+        two, tail_actual = map(int, tail_summary[0])
+        if tail_actual != actual or not actual <= two <= wide:
+            raise ValueError('Invalid tail omission counters')
+        result['two_length_bytes'] = two
     for step in (0, 1):
         study.read(folder/f'potential-state-step{step}.csv')
     with (folder/FILES[2]).open() as stream:
@@ -138,9 +145,12 @@ def main():
                 original_routed_bytes=old['actual_bytes'], packed_routed_bytes=new['actual_bytes'],
                 additional_savings_percent=saving, parity='EXACT_SOLUTION_TRACE_AND_RESIDUALS')
             wide = new['wide_bytes']
+            two = new['two_length_bytes']
             row.update(previous_packer_bytes=wide,
-                stream_length_bytes_saved=wide-new['actual_bytes'],
-                stream_length_savings_percent=100*(1-new['actual_bytes']/wide) if wide else 0)
+                stream_length_bytes_saved=wide-two,
+                stream_length_savings_percent=100*(1-two/wide) if wide else 0,
+                two_length_packer_bytes=two,tail_length_bytes_saved=two-new['actual_bytes'],
+                tail_length_savings_percent=100*(1-new['actual_bytes']/two) if two else 0)
             rows.append(row)
             with (root/'summary.csv').open('w') as stream:
                 writer = csv.DictWriter(stream, fieldnames=list(row))

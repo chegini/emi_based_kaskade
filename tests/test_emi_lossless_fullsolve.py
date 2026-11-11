@@ -44,9 +44,20 @@ class Packing(unittest.TestCase):
                                 'wide=96 actual=90',''):
                     (folder/'run.log').write_text(
                         'BDDC packet transport bytes: original=100 actual=92 packing=1\n'+
-                        ('BDDC packet length compaction bytes: '+summary+'\n' if summary else ''))
+                        ('BDDC packet length compaction bytes: '+summary+'\n' if summary else '')+
+                        'BDDC packet tail omission bytes: two_lengths=94 actual=92\n')
                     if summary=='wide=96 actual=92':
                         self.assertEqual(check.inspect(folder,cfg,0,False)['wide_bytes'],96)
+                    else:
+                        with self.assertRaises(ValueError): check.inspect(folder,cfg,0,False)
+                for tail in ('two_lengths=94 actual=92','two_lengths=91 actual=92',
+                             'two_lengths=97 actual=92','two_lengths=94 actual=90',''):
+                    (folder/'run.log').write_text(
+                        'BDDC packet transport bytes: original=100 actual=92 packing=1\n'
+                        'BDDC packet length compaction bytes: wide=96 actual=92\n'+
+                        ('BDDC packet tail omission bytes: '+tail+'\n' if tail else ''))
+                    if tail=='two_lengths=94 actual=92':
+                        self.assertEqual(check.inspect(folder,cfg,0,False)['two_length_bytes'],94)
                     else:
                         with self.assertRaises(ValueError): check.inspect(folder,cfg,0,False)
 

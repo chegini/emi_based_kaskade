@@ -82,3 +82,50 @@ without lossless packing; length-only saving is relative to the previous packer.
 These percentages have different denominators and must not be added.
 No runtime improvement is claimed. Packing remains OFF by default.
 Evidence: output/emi-packing-solve-6093726/validation/summary.csv and PASS.
+
+Omitted tail-length field (cluster full-solve validation passed)
+---------------------------------------------------------------
+Formats 5/6 extend 3/4: retain the uint16 Huffman length but omit the uint16
+tail length. Exact values prevent deriving that length from the body boundary
+alone. For an encoded record, the existing uint32 original-slot-count field
+therefore stores the exact-double count instead; its width does not change.
+Raw records keep the original slot-count meaning and their bytes unchanged.
+
+After restoring any shared affine header, the compact encoded body contains:
+  minVal + scale: 8 bytes; Huffman length: 2 bytes;
+  Huffman stream H; tail stream T; E exact doubles (8*E bytes).
+The envelope supplies the compact body boundary and E. Thus:
+  T = compact body bytes - 10 - H - 8*E.
+Checked subtraction rejects impossible counts/lengths; T must fit uint16.
+The decoder restores the two uint32 lengths, zero padding to eight-byte
+alignment, exact values and original slot count before the numerical codec.
+Sender-side comparison still requires exact original packet bytes and order.
+
+Two bytes per encoded record are saved relative to formats 3/4. Existing
+formats remain candidates, so adaptive packing cannot exceed the previous
+best size. Large streams retain previous formats. No quantization setting,
+minVal, scale, tolerance, solver or splitting configuration is changed.
+
+The existing full-solve submission script rebuilds this version. New output:
+  two_length_packer_bytes: best size using modes 0..4 on the same live packets;
+  tail_length_bytes_saved: two_length_packer_bytes minus packed_routed_bytes;
+  tail_length_savings_percent: percentage relative to two_length_packer_bytes.
+The stream_length_* columns isolate shortening both lengths (wide to short),
+while tail_length_* isolate omission (two short lengths to one). Total saving
+remains relative to compressed routed messages without lossless packing.
+The raw transport length-compaction log line includes both length changes.
+Previous cluster results above concern earlier formats. Fresh full-solve
+validation of tail omission is recorded below.
+
+Cluster validation of tail omission: ZIB job 6093741, 2026-11-11
+Bits order iterations off/on original_bytes two_length_bytes packed_bytes total_saving_% tail_only_saving_%
+16 before 40/40 5857160 5432345 5335065 8.91 1.79
+16 after 41/41 6100240 5644583 5544871 9.10 1.77
+All pairs passed exact solution, convergence-trace and residual parity.
+Source/executable checks passed; iterations were unchanged. Both minVal and
+scale are retained, constant splitting is OFF, and packing remains opt-in.
+Total saving is relative to compressed routed messages without lossless
+packing; tail-only saving is relative to the two-short-length packer. These
+percentages have different denominators and must not be added. No runtime
+improvement is claimed. Binary/generated outputs are not part of this commit.
+Evidence: output/emi-packing-solve-6093741/validation/summary.csv and PASS.
