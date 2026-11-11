@@ -79,14 +79,23 @@ def inspect(folder, cfg, rc, timed_out):
         if len(plans) != 1:
             raise ValueError('Missing/duplicate endpoint plan summary')
         explicit, plan_actual, ids, omitted, messages, reused = map(int, plans[0])
+        count_summary = re.findall(r'^BDDC packet exact count omission bytes: with_counts=(\d+) actual=(\d+) saved=(\d+)$', log, re.M)
+        if len(count_summary) != 1:
+            raise ValueError('Missing/duplicate exact-count summary')
+        with_counts, count_actual, count_saved = map(int, count_summary[0])
+        if (count_actual != actual or not actual < with_counts <= explicit or
+                with_counts-actual != count_saved or count_saved % 4):
+            raise ValueError('Invalid or unexercised exact-count omission')
         if (plan_actual != actual or not actual <= explicit <= two or
-                explicit-actual != omitted or ids % 8 or omitted % 8 or
+                explicit-with_counts != omitted or ids % 8 or omitted % 8 or
                 not all((ids, omitted, messages, reused))):
             raise ValueError('Invalid or unexercised endpoint plans')
         result['endpoint'] = dict(explicit_id_packer_bytes=explicit,
             endpoint_plan_id_bytes=ids, endpoint_ids_bytes_saved=omitted,
             endpoint_ids_savings_percent=100*omitted/explicit,
-            endpoint_plan_messages=messages, endpoint_plan_reused_messages=reused)
+            endpoint_plan_messages=messages, endpoint_plan_reused_messages=reused,
+            with_exact_count_packer_bytes=with_counts, exact_count_bytes_saved=count_saved,
+            exact_count_savings_percent=100*count_saved/with_counts)
 
     for step in (0, 1):
         study.read(folder/f'potential-state-step{step}.csv')

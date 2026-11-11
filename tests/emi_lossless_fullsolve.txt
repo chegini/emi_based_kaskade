@@ -150,7 +150,8 @@ solution, residual-trace and iteration parity. It now requires both plan
 establishment and reuse. endpoint_plan_id_bytes counts IDs actually sent in
 initial/refresh messages; it is already INCLUDED in packed_routed_bytes, not an
 additional charge. endpoint_ids_bytes_saved equals explicit_id_packer_bytes
-minus packed_routed_bytes. Its percentage uses the explicit-ID packer as the
+minus with_exact_count_packer_bytes (or packed_routed_bytes before count
+omission was added). Its percentage uses the explicit-ID packer as the
 denominator. Tail-length savings stop at explicit_id_packer_bytes, avoiding
 double counting the new endpoint savings. Total additional_savings_percent
 continues to compare the original compressed routed messages with the final
@@ -169,3 +170,47 @@ use explicit-ID packed bytes as the denominator; total savings use original
 compressed routed bytes. These percentages must not be added. Two-parameter
 quantization remains unchanged; splitting is off. No runtime gain is claimed.
 Evidence: output/emi-packing-solve-6093777/validation/summary.csv and PASS.
+
+Exact-double count reuse
+--------------------------------------------------------
+The generic transport decoder does not directly inspect an interface mask.
+Instead it learns exact-double counts from validated existing packet fields,
+separately per restriction/prolongation phase and directed MPI peer. The sender
+checks the count extracted from every actual encoded packet on every call.
+When ordered endpoints and encoded/raw modes/counts match, formats 5/6 omit
+four bytes per encoded record. A reserved selector bit identifies this layout;
+no extra selector byte or setup message is added. Raw records keep explicit
+slot counts, including empty raw records. Changed counts/modes refresh count
+knowledge without unnecessarily retransmitting unchanged endpoint IDs. Changed
+endpoints refresh both plans. Empty messages retain plans. Wide-length and
+legacy formats remain fallbacks. No numerical parameter or value is modified.
+
+The existing full-solve submission script tests the updated shared header. It
+requires nonzero exact-count savings and exact solution/trace/iteration parity.
+with_exact_count_packer_bytes is the previous endpoint-planned size, including
+all initial/refresh fields; packed_routed_bytes is the final actual size.
+exact_count_bytes_saved = with_exact_count_packer_bytes - packed_routed_bytes.
+exact_count_savings_percent uses with_exact_count_packer_bytes as denominator.
+Endpoint-ID savings now stop at with_exact_count_packer_bytes, so they do not
+count the new omission twice. Total savings still compare final bytes to the
+original compressed routed messages. Initial plan costs are already included.
+
+Packing remains disabled by default. Constant splitting/grouping restrictions
+are unchanged. All MPI ranks must use this updated decoder. These tests cover
+scalar packets; they do not claim compatibility with unsupported layouts.
+Earlier cluster jobs above validate previous formats; the count-omission
+validation results are recorded below.
+
+Cluster exact-count validation (2026-11-11)
+-------------------------------------------
+Job 6093833: COMPLETED, exit 0:0. All matched full-solve comparisons passed
+EXACT_SOLUTION_TRACE_AND_RESIDUALS; iterations were unchanged.
+bits order iterations_off/on original_routed previous_packer packed count_saved_% total_saved_%
+16 before 40/40 5857160 4955673 4765977 3.83 18.63
+16 after 41/41 6100240 5155751 4961191 3.77 18.67
+Initial/refresh count fields are included in packed bytes. Count-only savings
+use the previous endpoint-planned packer as denominator; total savings use
+original already-compressed routed messages. These percentages must not be
+added. Two-parameter quantization is unchanged; splitting is off. No runtime
+improvement is claimed.
+Evidence: output/emi-packing-solve-6093833/validation/summary.csv and PASS.
