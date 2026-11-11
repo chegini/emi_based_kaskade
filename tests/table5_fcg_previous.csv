@@ -1,0 +1,6 @@
+solver,bits,kpair,ebefore,sbefore,eafter,safter
+FCG,8,55 / 60,\ensuremath{3.07\times10^{-6}},79.92,\ensuremath{1.59\times10^{-6}},78.78
+FCG,12,78 / 44,\ensuremath{9.88\times10^{-6}},59.71,\ensuremath{1.42\times10^{-6}},77.68
+FCG,16,45 / 44,\ensuremath{4.30\times10^{-6}},69.99,\ensuremath{1.99\times10^{-7}},71.08
+FCG,24,42 / 41,\ensuremath{6.79\times10^{-7}},59.33,\ensuremath{7.69\times10^{-8}},60.72
+FCG,32,42 / 42,\ensuremath{7.05\times10^{-8}},46.69,\ensuremath{1.42\times10^{-7}},47.12

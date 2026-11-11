@@ -23,6 +23,7 @@ def block(source, anchor):
 
 
 PREAMBLE = r'''
+#include "mg/bddcPacketPacking.hh"
 #include <array>
 #include <cassert>
 #include <cmath>
@@ -38,6 +39,9 @@ struct Timings {
  void start(char const*) {} void stop(char const*) {}
 };
 struct MockDomain {
+ // Match the production timing API with instrumentation disabled for this trace test.
+ double packetSolveSeconds=0;
+ PacketPacking::WallTimer timePacketSolve() { return {packetSolveSeconds,false}; }
  std::vector<double> trace;
  double rho=2,curvature=5;
  int size() const { return 2; }
@@ -114,7 +118,7 @@ def main():
         cpp.write_text(PREAMBLE+event+'\nstd::function<void(DiagnosticEvent const&)> diagnosticObserver_;\n'
                        +CHECKS+'namespace Kaskade::BDDC {\n'+method+'\n}\n'+MAIN)
         subprocess.run(shlex.split(os.environ.get('CXX','c++'))+
-                       ['-std=c++20','-O2',str(cpp),'-o',str(executable)],check=True)
+                       ['-std=c++20','-O2','-I'+str(args.kaskade_root),str(cpp),'-o',str(executable)],check=True)
         subprocess.run([str(executable)],check=True)
 
 

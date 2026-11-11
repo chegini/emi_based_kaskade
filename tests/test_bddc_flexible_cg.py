@@ -12,6 +12,7 @@ import tempfile
 from test_bddc_cg_observer import block
 
 PREAMBLE = r'''
+#include "mg/bddcPacketPacking.hh"
 #include <array>
 #include <cassert>
 #include <cmath>
@@ -68,6 +69,9 @@ struct Timings {
  void start(char const*) {} void stop(char const*) {}
 };
 struct Domain {
+ // Match the production timing API with instrumentation disabled for this recurrence test.
+ double packetSolveSeconds=0;
+ PacketPacking::WallTimer timePacketSolve() { return {packetSolveSeconds,false}; }
  S s; bool variable=false,invalid=false;
  int restrictions=0,prolongations=0;
  int size() const { return 2; } // avoid the production one-subdomain direct-solve shortcut
@@ -167,7 +171,7 @@ def main():
     cpp=PREAMBLE+event+'\nstd::function<void(DiagnosticEvent const&)> diagnosticObserver_;\n};\n'+ '\n'.join(methods)+MAIN
     with tempfile.TemporaryDirectory(prefix='bddc-flexible-') as folder:
         src=Path(folder)/'test.cpp';exe=Path(folder)/'test';src.write_text(cpp)
-        subprocess.run(shlex.split(os.environ.get('CXX','c++'))+['-std=c++20','-O2',str(src),'-o',str(exe)],check=True)
+        subprocess.run(shlex.split(os.environ.get('CXX','c++'))+['-std=c++20','-O2','-I'+str(args.kaskade_root),str(src),'-o',str(exe)],check=True)
         subprocess.run([str(exe)],check=True)
 
 if __name__=='__main__':main()
