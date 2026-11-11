@@ -1,0 +1,79 @@
+Repeated packing benchmark (2026-11-11)
+========================================
+Purpose: fixed-workload strong scaling at 2/4/8 nodes; compare packing off/on.
+Both cases retain full compression with minVal + scale. Packing off is not
+uncompressed floating-point communication. Two ranks/node, one CPU/rank, fixed
+block placement, Gold6342 constraint, exclusive allocations, no local bypass,
+master-worker off, constant splitting off, 16 bits, before/after quantization.
+
+Defaults:
+ EMI: weak_32_h16, FCG, one physical time step, tolerance 1e-7.
+ Poisson: 2D, subres=16, elmres=32, CG, tolerance 1e-7.
+Mesh/problem stays fixed across node counts. Per job/order: one off/on validation
+pair with exact snapshot/trace comparison; one excluded warm-up pair; six measured
+pairs alternating off/on then on/off. Thus 32 solves per allocation, 24 measured.
+There is no direct-reference solve here: the control is matched compressed
+packing-off. Measured runs must match validation iterations/residual logs and bytes.
+Measured runs disable solution snapshots and convergence CSVs; exact final-vector
+comparison is performed on the separate validation pair, not claimed for timed files.
+
+Instrumentation:
+ KASKADE_PACKET_TIMING=1 is exported on every application rank by the launcher.
+ solve_s: maximum across ranks of accumulated BDDCSolver::solve() wall seconds;
+ includes compression, communication, coarse work and sender verification inside
+ those calls; excludes construction/setup and caller-side residual checks/output.
+ pack_s: record-copy and compact-format construction/search; no sender verification.
+ unpack_s: received compact-packet reconstruction.
+ verify_s: existing sender byte/order roundtrip assertion (retained, not bypassed).
+ exchange_s: destination-exchange helper including count exchange, buffer handling
+ and MPI waiting, not pure network-transfer time.
+ Timers add no per-iteration collectives. Each rank accumulates locally and reduces
+ once when reporting. Individual phase maxima may come from different ranks and
+ must not be summed or subtracted to infer another phase's critical path.
+ Wrapper timing is secondary, includes setup and residual checks. Launcher timing
+ includes startup; neither should be mislabeled as the iteration-kernel time.
+ Bytes are sent routed inter-rank message bytes, including intra-node MPI traffic,
+ excluding same-rank transfers, MPI framing, unrelated collectives/coarse traffic.
+ Timers are opt-in; ordinary runs are unchanged. All measured runs use timers.
+
+Build:
+ Fresh isolated application build in each job; same binary for all off/on pairs.
+ Poisson benchmark explicitly builds application code with -O2 -DNDEBUG, unlike
+ the earlier debug validation builds. EMI uses its existing optimized builder.
+ The installed Kaskade library is not rebuilt. Allocation, build commands,
+ source/mesh/executable hashes are retained; sources must remain unchanged during
+ each job. Keep sources fixed until all three node-count jobs finish.
+ The PMIx/container launch follows the existing EMI multi-node tests.
+ Build and live runs still require cluster validation; local tests do not
+ substitute for the full FE build.
+
+Run from the model repository:
+ mkdir -p output
+ for nodes in 2 4 8; do
+   sbatch --nodes="$nodes" --ntasks="$((2*nodes))" \
+     --ntasks-per-node=2 tests/submit_emi_packing_benchmark.sbatch
+ done
+
+Options passed after the sbatch script: --repeats 6 --warmups 1 --bits 16,
+--timeout 1800, --case weak_32_h16 (EMI), --subres 16 --elmres 32 (Poisson).
+Change sizes only consistently across node counts. Default six pairs balances
+the run order; an even repeat count is preferable. The script reserves four hours.
+
+Results: output/emi-packing-benchmark-JOB/results/
+ manifest.json: settings/allocation/source hashes.
+ runs.csv: only measured runs, with phase times, iterations/residual and byte counts.
+ summary.csv: median, min/max, IQR, paired solver speedup and byte savings.
+ validation-/warmup- folders: retained but excluded from timing summaries.
+ PASS: created only after validation, measured-run checks and final hash check.
+ A missing PASS or failure invalidates the corresponding benchmark.
+
+Combine completed node counts:
+ python3 /data/numerik/people/fchegini/kaskade7_new/tools/summarize_bddc_packing_benchmarks.py \
+   output/emi-packing-benchmark-JOB2/results \
+   output/emi-packing-benchmark-JOB4/results \
+   output/emi-packing-benchmark-JOB8/results
+
+Speedup is median of paired off_time/on_time; >1 favors packing. Report spread,
+wrapper timings and verification overhead as well as the median. Byte savings
+alone do not establish a runtime improvement. No benchmark results are available
+until the cluster jobs complete.
