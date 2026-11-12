@@ -124,6 +124,7 @@ struct EmiOptions
   int bddcCompressionMinInterfaceSize = 0;
   int bddcCompressionThresholdInterfaceTypes = Kaskade::BDDC::EDGE;
   int bddcGraphLifting = 1;
+  int bddcGraphLiftingLevels = 1; // 0=recursive HB; 1=legacy single stage
   int bddcGraphLiftingAfterQuantization = 0;
   int bddcGraphLiftingBothOrders = 0;
   int bddcExcludeCornersFromCompression = 0;
@@ -1021,6 +1022,7 @@ int main(int argc, char* argv[])
     ("bddcCompressionThresholdInterfaceTypes", options.bddcCompressionThresholdInterfaceTypes,
      options.bddcCompressionThresholdInterfaceTypes,
      "interface type mask for the size threshold: 2=edge, 4=face, 0=all")
+    ("bddcGraphLiftingLevels", options.bddcGraphLiftingLevels, options.bddcGraphLiftingLevels, "HB prediction stages: 1=legacy, 0=recursive, 2..64=maximum stages")
     ("bddcGraphLifting", options.bddcGraphLifting, options.bddcGraphLifting, "use graph-lifting transform in compressed BDDC transfer: 0=none, 1=graph lifting")
     ("bddcGraphLiftingAfterQuantization", options.bddcGraphLiftingAfterQuantization, options.bddcGraphLiftingAfterQuantization, "apply reversible integer graph lifting after quantization: 0=no, 1=yes")
     ("bddcGraphLiftingBothOrders", options.bddcGraphLiftingBothOrders, options.bddcGraphLiftingBothOrders, "explicitly combine floating lifting before quantization and reversible integer lifting after it")
@@ -1212,6 +1214,8 @@ int main(int argc, char* argv[])
       !EmiBddc::validDirectionalCompressionBits(options.bddcProlongateCompressionBits))
     throw std::runtime_error("Directional compression bits must be -1 (inherit) or 1..32");
 
+  if (options.bddcGraphLiftingLevels<0 || options.bddcGraphLiftingLevels>64)
+    throw std::invalid_argument("bddcGraphLiftingLevels must be 0..64");
   if (options.bddcGraphLiftingBothOrders<0 || options.bddcGraphLiftingBothOrders>1 ||
       (options.bddcGraphLiftingBothOrders &&
        (!options.bddc || !options.bddcCompression || options.sdc || options.direct ||

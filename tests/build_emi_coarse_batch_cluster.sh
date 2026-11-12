@@ -18,6 +18,10 @@ mpicxx -std=c++20 -O2 -Wall -Wextra -Werror -I /kaskade7 tests/test_constant_spl
 mpicxx -std=c++20 -O2 -Wall -Wextra -Werror -I /kaskade7 \
   tests/test_small_metadata_packing.cpp -o "$emi_build/small-metadata-test"
 "$emi_build/small-metadata-test"
+mpicxx -std=c++20 -O2 -Wall -Wextra -Werror -I /kaskade7 \
+  tests/test_multilevel_hb.cpp -o "$emi_build/multilevel-hb-test"
+"$emi_build/multilevel-hb-test"
+CXX=mpicxx python3 tests/test_multilevel_hb_transfer.py --kaskade-root /kaskade7
 CXX=mpicxx python3 tests/test_bddc_flexible_cg.py --kaskade-root /kaskade7
 CXX=mpicxx python3 tests/test_emi_local_support_extraction.py
 cd "$emi_build"

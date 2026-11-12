@@ -1359,6 +1359,7 @@ namespace EmiBddc
                                  : Kaskade::BDDC::TransformType::NONE);
       transfer.setRestrictEncoding(options.bddcHuffman != 0);
       transfer.setProlongateEncoding(options.bddcHuffman != 0);
+      transfer.setGraphLiftingLevels(options.bddcGraphLiftingLevels);
       transfer.setRestrictTransform(options.bddcGraphLifting != 0);
       transfer.setProlongateTransform(options.bddcGraphLifting != 0);
       transfer.setTransformBeforeAndAfterQuantization(options.bddcGraphLiftingBothOrders != 0);
@@ -2054,6 +2055,7 @@ State runBddcSdc(Functional& F,
                                                : Kaskade::BDDC::TransformType::NONE);
         subdomain.transfer().setRestrictEncoding(options.bddcHuffman != 0);
         subdomain.transfer().setProlongateEncoding(options.bddcHuffman != 0);
+        subdomain.transfer().setGraphLiftingLevels(options.bddcGraphLiftingLevels);
         subdomain.transfer().setRestrictTransform(options.bddcGraphLifting != 0);
         subdomain.transfer().setProlongateTransform(options.bddcGraphLifting != 0);
         subdomain.transfer().setTransformBeforeAndAfterQuantization(options.bddcGraphLiftingBothOrders != 0);
@@ -2262,6 +2264,7 @@ State runBddcSdc(Functional& F,
                   << "\nuncompressed_starting_steps=" << options.bddcUncompressedSteps
                   << "\nsolver=" << (options.bddcFgmres ? "fgmres" : options.bddcFlexibleCg ? "fcg" : "cg")
                   << "\nconstant_split=" << options.bddcProlongateConstantSplit
+                  << "\ngraph_lifting_levels=" << options.bddcGraphLiftingLevels
                   << "\ngraph_lifting=" << options.bddcGraphLifting
                   << "\ninteger_lifting=" << options.bddcGraphLiftingAfterQuantization
                   << "\ncombined_lifting=" << options.bddcGraphLiftingBothOrders

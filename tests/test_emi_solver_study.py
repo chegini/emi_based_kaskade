@@ -17,6 +17,17 @@ def value(cmd, key):
 
 
 class SolverStudy(unittest.TestCase):
+    def test_hb_depth_only_applies_to_compressed_cases(self):
+        a=study.arguments(['--solvers','fcg','--split','on','--lifting-levels','0'])
+        for case in study.planned_cases(a):
+            cmd=study.make_command(a,case,Path('/tmp/result'),['mpirun'])
+            if case['bits'] is None:
+                self.assertNotIn('--bddcGraphLiftingLevels',cmd)
+            else:
+                self.assertEqual(value(cmd,'bddcGraphLiftingLevels'),'0')
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            study.arguments(['--lifting-levels','-1'])
+
     def test_separate_executable_in_serial_and_slurm_commands(self):
         for container in ([], ['--slurm-container', '/image.sif']):
             a = study.arguments(['--repo', '/repo', '--executable',

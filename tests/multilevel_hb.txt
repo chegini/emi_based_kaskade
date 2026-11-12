@@ -1,0 +1,59 @@
+Optional multilevel HB experiment
+================================
+
+HB is hierarchical-basis prediction, not an orthogonal wavelet transform.
+There is no coarse update. Default bddcGraphLiftingLevels=1 retains the existing
+single stage. 0 recurses; 2..64 caps the total number of prediction stages.
+Poisson uses the equivalent --graphLiftingLevels option.
+
+The existing first split and weights are unchanged. Coarse graphs are formed
+by symbolic elimination of fine nodes (neighbor fill-in), within each floating
+owner-set group or integer peer interface. Components are never joined by the
+new coarsening. Coarser predictors use unit-weight averages and BFS partitions.
+Stop at <=2 coarse nodes or when no further fine nodes can be selected.
+This does not assert vanishing first moments on arbitrary irregular graphs.
+Dense graphs can produce dense setup plans; setup cost must be measured too.
+
+Fine coefficients are stored in dependency order. Forward floating prediction
+uses original coarse values; inverse walks details backwards using restored
+coarse values. Quantize-first integer prediction uses the same ordering and
+modular arithmetic, preserving nodal symbols exactly. Floating-before quantizing
+may alter quantization error, FCG iterations and convergence. Depth 1 setup
+serialization remains version 1; multilevel plans use version 2 with dependency
+validation. All ranks must use the rebuilt executable. Plans are setup data;
+there is no new per-iteration hierarchy metadata.
+
+From emiModelBddcSdc_new_scratch on HTC:
+  mkdir -p output
+  sbatch --nodes=8 --ntasks=16 --ntasks-per-node=2 tests/submit_emi_multilevel_hb.sbatch
+
+This builds a separate binary and compares depths 1 and 0 on the same Pepe mesh,
+FCG with one previous direction, split ON, packing ON, exact corners, both
+transform orders and 8/12/16/24/32 bits. It first requires exact 16-bit packing
+OFF/ON parity independently at each depth. This does NOT require the different
+HB depths to have identical solutions. Precision failures are retained.
+
+Read output/emi-multilevel-hb-JOB/hb-comparison.csv for matched iterations,
+relative errors, actual routed R/P bytes and savings. Exported setup bytes exclude
+allgather replication and MPI framing; R/P bytes exclude setup, codebooks/coarse
+traffic and validation. Wrapper timings include snapshots and are not repeated
+performance measurements. Never infer speedup or improved accuracy from bytes.
+
+From poisson_new_scratch:
+  mkdir -p output
+  sbatch --nodes=2 --ntasks=4 --ntasks-per-node=2 tests/submit_poisson_multilevel_hb.sbatch
+
+This separately builds Poisson and compares both depths, both orders, all five
+precisions with FCG, packing ON, split OFF, 4x4 subdomains and 32 intervals per side.
+Read output/poisson-hb-JOB/levels-{1,0}/summary.csv. Do not compare those percentages
+directly to Pepe. Sources must remain unchanged during either batch campaign.
+
+Local tests (KASKADE7 points at the mounted library):
+  c++ -std=c++20 -O2 -Wall -Wextra -Werror -I "$KASKADE7" tests/test_multilevel_hb.cpp -o /tmp/test-hb
+  /tmp/test-hb
+  python3 tests/test_multilevel_hb_transfer.py --kaskade-root "$KASKADE7"
+
+Tests cover recursive path structure, fixed-width integer wraparound/zigzag,
+floating reconstruction, malformed plans, disconnected nodes, overlapping
+owner sets, different receiver graphs and stale setup. Synthetic linear-path
+coefficient concentration is a mechanism check, not a predicted solver ratio.

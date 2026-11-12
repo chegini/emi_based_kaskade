@@ -160,6 +160,7 @@ def main():
     p.add_argument('--ranks', type=int, default=4)
     p.add_argument('--expected-nodes', type=int, default=2)
     p.add_argument('--bits', type=int, nargs='+', choices=[8,12,16,24,32], default=[16])
+    p.add_argument('--lifting-levels', type=int, choices=range(65), default=1)
     p.add_argument('--split', choices=['off','on'], default='off')
     p.add_argument('--case-minutes', type=int, default=30)
     a = p.parse_args()
@@ -167,7 +168,7 @@ def main():
         '--kaskade', str(a.kaskade), '--slurm-container', str(a.slurm_container),
         '--case', a.case, '--ranks', str(a.ranks), '--expected-nodes', str(a.expected_nodes),
         '--bits', *map(str,a.bits), '--solvers', 'fcg', '--split', a.split,
-        '--case-minutes', str(a.case_minutes)])
+        '--case-minutes', str(a.case_minutes), '--lifting-levels', str(a.lifting_levels)])
     if not os.environ.get('SLURM_JOB_ID'):
         p.error('Run inside a Slurm allocation')
     root = a.output.resolve()

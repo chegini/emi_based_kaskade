@@ -45,6 +45,8 @@ def arguments(argv=None):
                    help='One order per campaign; before remains the default')
     p.add_argument('--lossless-packing', type=int, choices=[0, 1], default=0,
                    help='Lossless MPI framing; compressed cases; splitting supported')
+    p.add_argument('--lifting-levels', type=int, choices=range(65), default=1,
+                   help='HB stages: 1=legacy, 0=recursive')
     p.add_argument('--iterations', type=int, default=1000)
     p.add_argument('--case-minutes', type=int, default=20,
                    help='Bound each solve; timeout is reported separately from nonconvergence')
@@ -100,6 +102,8 @@ def make_command(a, case, folder, launcher):
     cmd[cmd.index('--bddcCgConstantSplitExperiment')+1] = str(int(
         compressed and cfg.split == 'on' and cfg.solver in ('cg', 'fcg')))
     cmd += ['--bddcMpiRouting', str(int(not case['direct'])), '--bddcLocalCompressionBypass', '0']
+    if compressed:
+        cmd += ['--bddcGraphLiftingLevels', str(getattr(a, 'lifting_levels', 1))]
     if getattr(a, 'lossless_packing', 0) and compressed:
         cmd += ['--bddcLosslessPacking', '1']
     if a.setup_diagnostic_only and not a.slurm_container:
