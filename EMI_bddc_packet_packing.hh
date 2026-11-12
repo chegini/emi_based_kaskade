@@ -13,10 +13,10 @@ namespace EmiBddc
     if (!o.bddcLosslessPacking) return;
     if (!o.bddc || !o.mpi || !o.bddcMpiRouting || !o.bddcCompression ||
         o.sdc || o.direct || o.bddcOperatorAudit || o.bddcPreconditionerProbe ||
-        o.bddcProlongateConstantSplit || o.bddcRestrictGroupSize ||
+        o.bddcRestrictGroupSize ||
         o.bddcProlongateGroupSize || o.bddcLocalCompressionBypass || o.bddcUncompressedSteps)
       throw std::invalid_argument("Lossless packing requires compressed non-SDC MPI BDDC "
-          "with destination routing, no audit/probe, constant splitting, grouping, "
+          "with destination routing, no audit/probe, grouping, "
           "local bypass or raw-prefix schedule; quantization parameters are unchanged");
   }
 

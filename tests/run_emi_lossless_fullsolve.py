@@ -83,10 +83,16 @@ def inspect(folder, cfg, rc, timed_out):
         if len(count_summary) != 1:
             raise ValueError('Missing/duplicate exact-count summary')
         with_counts, count_actual, count_saved = map(int, count_summary[0])
+        small_summary = re.findall(r'^BDDC packet small metadata bytes: previous=(\d+) actual=(\d+) saved=(\d+) messages=(\d+)$', log, re.M)
+        if len(small_summary) != 1:
+            raise ValueError('Missing/duplicate small-metadata summary')
+        previous_small, small_actual, small_saved, small_messages = map(int, small_summary[0])
+        if small_actual != actual or previous_small-actual != small_saved or small_saved < 0:
+            raise ValueError('Invalid small-metadata accounting')
         dict_count_summary = re.findall(r'^BDDC packet dictionary count bytes: wide=(\d+) actual=(\d+) saved=(\d+) messages=(\d+)$', log, re.M)
         if len(dict_count_summary) != 1: raise ValueError('Missing/duplicate dictionary count summary')
         count_wide, dc_actual, dc_saved, dc_messages = map(int, dict_count_summary[0])
-        if dc_actual != actual or count_wide < actual or count_wide-actual != dc_saved or dc_saved != 3*dc_messages:
+        if dc_actual != actual or count_wide < actual or count_wide-previous_small != dc_saved or dc_saved != 3*dc_messages:
             raise ValueError('Invalid dictionary count accounting')
         dictionary_summary = re.findall(r'^BDDC packet dictionary reference bytes: wide=(\d+) actual=(\d+) saved=(\d+) messages=(\d+) byte_refs=(\d+) wide_refs=(\d+)$', log, re.M)
         if len(dictionary_summary) != 1: raise ValueError('Missing/duplicate dictionary reference summary')
@@ -125,7 +131,11 @@ def inspect(folder, cfg, rc, timed_out):
             wide_dictionary_references=wide_refs,
             with_wide_dictionary_count_bytes=count_wide,dictionary_count_bytes_saved=dc_saved,
             dictionary_count_savings_percent=100*dc_saved/count_wide if count_wide else 0,
-            short_dictionary_counts=dc_messages)
+            short_dictionary_counts=dc_messages,
+            before_small_metadata_bytes=previous_small,
+            small_metadata_bytes_saved=small_saved,
+            small_metadata_saving_percent=100*small_saved/previous_small if previous_small else 0,
+            small_metadata_messages=small_messages)
 
     for step in (0, 1):
         study.read(folder/f'potential-state-step{step}.csv')
@@ -150,12 +160,13 @@ def main():
     p.add_argument('--ranks', type=int, default=4)
     p.add_argument('--expected-nodes', type=int, default=2)
     p.add_argument('--bits', type=int, nargs='+', choices=[8,12,16,24,32], default=[16])
+    p.add_argument('--split', choices=['off','on'], default='off')
     p.add_argument('--case-minutes', type=int, default=30)
     a = p.parse_args()
     cfg = study.arguments(['--repo', str(a.repo), '--executable', str(a.executable),
         '--kaskade', str(a.kaskade), '--slurm-container', str(a.slurm_container),
         '--case', a.case, '--ranks', str(a.ranks), '--expected-nodes', str(a.expected_nodes),
-        '--bits', *map(str,a.bits), '--solvers', 'fcg', '--split', 'off',
+        '--bits', *map(str,a.bits), '--solvers', 'fcg', '--split', a.split,
         '--case-minutes', str(a.case_minutes)])
     if not os.environ.get('SLURM_JOB_ID'):
         p.error('Run inside a Slurm allocation')
@@ -184,7 +195,7 @@ def main():
                 name = f'fcg-{order}-{bits}-packing-{enabled}'
                 folder = root/name
                 folder.mkdir()
-                case = dict(name=name, solver='fcg', bits=bits, split='off', direct=False)
+                case = dict(name=name, solver='fcg', bits=bits, split=a.split, direct=False)
                 cmd = study.make_command(run_cfg, case, folder, ['mpirun'])
                 (folder/'command.sh').write_text(shlex.join(cmd)+'\n')
                 print('Running '+name, flush=True)

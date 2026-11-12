@@ -16,7 +16,7 @@ int main() {
   EmiBddc::validateLosslessPacketPacking(o);
   for (auto field : {&Options::bddc, &Options::mpi, &Options::bddcMpiRouting, &Options::bddcCompression,
       &Options::sdc, &Options::direct, &Options::bddcOperatorAudit, &Options::bddcPreconditionerProbe,
-      &Options::bddcProlongateConstantSplit, &Options::bddcRestrictGroupSize,
+      &Options::bddcRestrictGroupSize,
       &Options::bddcProlongateGroupSize, &Options::bddcLocalCompressionBypass, &Options::bddcUncompressedSteps}) {
     auto bad=o; bad.*field=!(bad.*field);
     bool rejected=false;
@@ -25,6 +25,8 @@ int main() {
     bad.bddcLosslessPacking=0;
     EmiBddc::validateLosslessPacketPacking(bad);
   }
+  o.bddcProlongateConstantSplit=1;
+  EmiBddc::validateLosslessPacketPacking(o);
   NewSolver modern;
   EmiBddc::configureLosslessPacketPacking(modern,o); assert(modern.enabled);
   OldSolver old;

@@ -44,7 +44,7 @@ def arguments(argv=None):
     p.add_argument('--transform-order', choices=['before', 'after', 'both'], default='before',
                    help='One order per campaign; before remains the default')
     p.add_argument('--lossless-packing', type=int, choices=[0, 1], default=0,
-                   help='Lossless MPI framing; compressed split-off cases only')
+                   help='Lossless MPI framing; compressed cases; splitting supported')
     p.add_argument('--iterations', type=int, default=1000)
     p.add_argument('--case-minutes', type=int, default=20,
                    help='Bound each solve; timeout is reported separately from nonconvergence')
@@ -63,8 +63,8 @@ def arguments(argv=None):
         p.error('Master-worker requires at least two ranks and --solvers cg and/or fcg; FGMRES is unsupported')
     if a.master_worker and a.split != 'off' and not a.setup_diagnostic_only:
         p.error('Master-worker with CG/FCG constant splitting is unsupported; use --split off')
-    if a.lossless_packing and (a.split != 'off' or a.setup_diagnostic_only):
-        p.error('Lossless packing requires --split off and compressed study cases')
+    if a.lossless_packing and a.setup_diagnostic_only:
+        p.error('Lossless packing requires compressed study cases')
     a.repo, a.kaskade = a.repo.resolve(), a.kaskade.resolve()
     if a.executable:
         a.executable = a.executable.resolve()

@@ -1,0 +1,47 @@
+FCG constant splitting and lossless metadata packing
+====================================================
+
+Run from the EMI repository on HTC:
+  mkdir -p output
+  sbatch --nodes=8 --ntasks=16 --ntasks-per-node=2 tests/submit_emi_split_packing.sbatch
+
+No installer or source archive is required. The script uses this checkout and
+emi_kaskade (default /data/numerik/people/fchegini/kaskade7_new), builds a new
+executable in output/emi-split-packing-JOB/build and verifies source hashes.
+Keep sources unchanged while the job runs; all ranks require the new decoder.
+
+Same Pepe case as the prior 8-node experiment 6109337:
+  FCG, one previous direction, one step, 20 subdomains,
+  8/12/16/24/32 bits, before/after, constant splitting on/off, packing on.
+First, exact packing off/on parity is required at 16 bits for both splitting
+settings and both orders. The subsequent precision sweep retains failed cases.
+In particular, previous 8-bit split-off cases broke down; a final failure flag
+does not necessarily mean the campaign was interrupted.
+
+Read output/emi-split-packing-JOB/packed-byte-summary.csv:
+  previous_packed_routed_bytes: prior full packer on the SAME packet stream
+  new_metadata_bytes_saved: previous packed bytes minus actual bytes
+  new_metadata_saving_percent: reduction relative to previous packed bytes
+  total_saving_gain_percentage_points: additional saving / raw solve bytes * 100
+  total_routed_saving_percent: overall reduction versus raw complete solve
+  logical_inter_node_saving_percent: Table 5's separate logical metric
+
+New format 7 compares complete message sizes with all existing packing layouts.
+For eligible messages it omits the CSP1 marker, stores Huffman lengths in one
+byte (<=255) and tagged record lengths in one byte (body <=127).
+It retains two-byte lengths or previous formats where needed. The existing
+one-byte message selector carries these flags. Constants, exact corners,
+quantization parameters, streams and reconstructed padding remain bitwise exact.
+Minimum fixed fields: 10 bytes per ordinary encoded record, 14 for split
+prolongation (including its 4-byte numerical constant). Add streams, exact
+corners and one selector byte per message. Larger records need wider fields.
+
+Local standalone regression:
+  c++ -std=c++20 -O2 -Wall -Wextra -Werror -I "$KASKADE7" tests/test_small_metadata_packing.cpp -o /tmp/small-metadata-test
+  /tmp/small-metadata-test
+  python3 tests/make_constant_split_exchange_test.py --kaskade-root "$KASKADE7" --output-source /tmp/split-exchange.cpp
+  mpicxx -std=c++20 -O2 -DKASKADE_HAVE_MPI -I "$KASKADE7" /tmp/split-exchange.cpp -o /tmp/split-exchange
+  mpiexec -n 4 /tmp/split-exchange
+
+Do not infer solver speedup from byte reduction. Full FE build/parity and the
+measured workload savings must be checked on HTC.

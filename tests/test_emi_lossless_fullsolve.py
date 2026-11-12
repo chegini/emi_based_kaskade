@@ -11,13 +11,16 @@ import run_emi_lossless_fullsolve as check
 
 
 class Packing(unittest.TestCase):
-    def test_option_only_compressed_unsplit_cases(self):
+    def test_option_only_compressed_cases(self):
         cfg=study.arguments(['--solvers','fcg','--split','off','--bits','16','--lossless-packing','1'])
         for case in study.planned_cases(cfg):
             cmd=study.make_command(cfg,case,Path('/tmp/check'),['mpirun'])
             self.assertEqual('--bddcLosslessPacking' in cmd, case['bits'] is not None)
-        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            study.arguments(['--lossless-packing','1','--split','on'])
+        cfg=study.arguments(['--solvers','fcg','--lossless-packing','1','--split','on'])
+        case=study.planned_cases(cfg)[2]
+        cmd=study.make_command(cfg,case,Path('/tmp/check'),['mpirun'])
+        self.assertIn('--bddcLosslessPacking',cmd)
+        self.assertEqual(case['split'],'on')
 
     def test_initial_trace_has_no_step_length(self):
         first=dict(time_step='1', iteration='0', step_length='', residual_norm='1',
@@ -31,7 +34,7 @@ class Packing(unittest.TestCase):
     def test_length_accounting_must_match_transport(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp)
-            dict_count_line='BDDC packet dictionary count bytes: wide=88 actual=88 saved=0 messages=0\n'
+            dict_count_line='BDDC packet dictionary count bytes: wide=88 actual=88 saved=0 messages=0\nBDDC packet small metadata bytes: previous=88 actual=88 saved=0 messages=0\n'
             dictionary_line='BDDC packet dictionary reference bytes: wide=88 actual=88 saved=0 messages=0 byte_refs=0 wide_refs=0\n'
             record_line='BDDC packet record length bytes: wide=92 actual=88 saved=4 records=2 shortened=2 le255=2 le4095=0 le32767=0 larger=0\n'
             count_line='BDDC packet exact count omission bytes: with_counts=96 actual=88 saved=4\n'
@@ -113,11 +116,21 @@ class Packing(unittest.TestCase):
                      'BDDC packet tail omission bytes: two_lengths=104 actual=88\n'+endpoint+count_line+record_line)
                 log=log.replace('actual=88','actual=82')
                 log+='BDDC packet dictionary reference bytes: wide=88 actual=82 saved=3 messages=1 byte_refs=1 wide_refs=0\n'
-                log+='BDDC packet dictionary count bytes: wide=85 actual=82 saved=3 messages=1\n'
+                log+='BDDC packet dictionary count bytes: wide=85 actual=82 saved=3 messages=1\nBDDC packet small metadata bytes: previous=82 actual=82 saved=0 messages=0\n'
                 (folder/'run.log').write_text(log)
                 result=check.inspect(folder,cfg,0,False)
                 self.assertEqual(result['endpoint']['dictionary_reference_bytes_saved'],3)
                 self.assertEqual(result['endpoint']['dictionary_count_bytes_saved'],3)
+                # New savings must not be counted as dictionary savings.
+                smaller=log.replace('actual=82','actual=78').replace(
+                    'previous=82 actual=78 saved=0 messages=0',
+                    'previous=82 actual=78 saved=4 messages=1')
+                (folder/'run.log').write_text(smaller)
+                result=check.inspect(folder,cfg,0,False)
+                self.assertEqual(result['endpoint']['small_metadata_bytes_saved'],4)
+                self.assertEqual(result['endpoint']['dictionary_count_bytes_saved'],3)
+                (folder/'run.log').write_text(smaller.replace('saved=4 messages=1','saved=5 messages=1'))
+                with self.assertRaises(ValueError): check.inspect(folder,cfg,0,False)
                 for bad in ('', dict_count_line+dict_count_line, dict_count_line.replace('saved=0','saved=3'),dict_count_line.replace('messages=0','messages=1')):
                     (folder/'run.log').write_text(
                         'BDDC packet transport bytes: original=120 actual=88 packing=1\n'

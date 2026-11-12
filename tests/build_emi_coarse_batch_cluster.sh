@@ -13,6 +13,11 @@ cp /kaskade7/mg/bddc.hh /kaskade7/mg/bddc.hpp \
   /kaskade7/mg/bddcCoarseReduction.hh "$emi_build/source-mg/"
 mpicxx -std=c++20 -O2 -Wall -Wextra -Werror -I /kaskade7 \
   tests/test_bddc_coarse_reduction.cpp -o "$emi_build/coarse-reduction-test"
+mpicxx -std=c++20 -O2 -Wall -Wextra -Werror -I /kaskade7 tests/test_constant_split_packing.cpp -o "$emi_build/split-packet-test"
+"$emi_build/split-packet-test"
+mpicxx -std=c++20 -O2 -Wall -Wextra -Werror -I /kaskade7 \
+  tests/test_small_metadata_packing.cpp -o "$emi_build/small-metadata-test"
+"$emi_build/small-metadata-test"
 CXX=mpicxx python3 tests/test_bddc_flexible_cg.py --kaskade-root /kaskade7
 CXX=mpicxx python3 tests/test_emi_local_support_extraction.py
 cd "$emi_build"
