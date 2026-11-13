@@ -32,6 +32,7 @@ for name in names:
     methods.append(source[start:pos])
 fixture=r"""
 #include "mg/bddcLiftingPlan.hh"
+#include "mg/bddcRecenter.hh"
 #include <map>
 #include <set>
 #include <queue>
@@ -46,6 +47,8 @@ struct SpaceTransferDataCompression {
   std::vector<std::vector<int>> interface_graph;
   std::vector<std::vector<Scalar>> interface_graph_weights;
   unsigned graph_lifting_levels=1;
+  bool graph_lifting_path_hierarchy=false;
+  bool transform_first_recentering=false;
   bool producer_lifting_setup_stale=false, require_producer_lifting_plans=true;
   bool transform_after_quantization_restrict=true,transform_after_quantization_prolongate=true;
   mutable std::map<std::vector<int>,Plan> local_float_plans,local_integer_plans;
@@ -108,6 +111,18 @@ int main() {
   sender.producer_lifting_setup_stale=true;
   bool rejected=false;try {sender.floatLiftingPlan(sender.globalIndex);} catch(std::runtime_error const&) {rejected=true;}
   check(rejected);
+ }
+ // Exercise the production selector and owner-group mapping for corrected paths.
+ for(unsigned depth:{0u,1u,2u,3u}) {
+  auto t=make(depth);t.graph_lifting_path_hierarchy=true;
+  std::vector<double> x(31);for(int i=0;i<31;++i)x[i]=2+.125*i;
+  auto c=t.floatLift(x,t.globalIndex,false);
+  auto p=t.floatLiftingPlan(t.globalIndex);
+  for(int f:p.fine)check(std::abs(c[f])<1e-12);
+  check(t.floatLift(c,t.globalIndex,true)==x);
+  auto idx=t.localIfs[1];auto plan=t.integerLiftingPlan(idx);
+  std::vector<std::uint32_t> u(idx.size());for(std::size_t i=0;i<u.size();++i)u[i]=i%2?0xffffffffu:i;
+  check(plan.inverse<1>(plan.forward<1>(u,true),true)==u);
  }
  std::cout<<"PASS: production hierarchy, owner-group restriction, remote plans, integer/floating inverse and stale setup rejection.\n";
 }

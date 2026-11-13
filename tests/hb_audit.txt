@@ -1,0 +1,78 @@
+Graph-lifting audit, 13 November 2026
+===================================
+Local completed checks:
+- test_multilevel_hb_reference.cpp checks a seven-node path against hand-written
+  square/ramp/constant coefficients, neighborhoods, unit weights and inverse.
+  For x=[0,1,4,9,16,25,36], depth one coefficients are
+  [0,-1,4,-1,16,-1,36]; depth two coefficients are
+  [0,-1,-4,-1,16,-1,20]. Final roots are positions 0 and 4.
+- The right endpoint has only node 4 as a coarse neighbor. Thus even the ramp
+  [0,1,2,3,4,5,6] has final endpoint detail 2. This is a boundary-prediction
+  limitation; constants are reproduced, but linear trends are not preserved
+  at every boundary. Invertibility alone does not establish compressibility.
+- Production extracted-method checks pass for path/irregular graphs, owner
+  groups, imported remote plans, integer/floating inverse and stale setup.
+
+Optimization review (no numerical behavior changed):
+- Symbolic elimination can create dense coarse graphs, increasing both setup
+  work and the number of terms in a predictor. It is not a sparse geometric
+  multilevel interpolation construction.
+- integerLiftingPlan returns a plan by value, including cached plans, so its
+  vectors are copied during packet processing. Floating plans return references.
+- Setup serialization stores every neighbor ID and every double weight,
+  including unit weights. Setup uses MPI_Allgatherv, so plans are replicated.
+- Existing measurements: quantization-first at 16 bits saves packet bytes but
+  exported setup grows from 3,575,668 to 43,233,672 bytes; these counts exclude
+  allgather replication. A larger setup cannot be inferred to be amortized by
+  the single-step packet savings.
+- Before-quantization HB modifies coefficient range and inverse error
+  propagation. A common affine quantization range covers the coarse values
+  and details. Negative and large coarse-level details can widen that range.
+  This is a plausible mechanism, not yet a proven cause of the FCG breakdown.
+
+Compact replay, revised after job 6143753
+----------------------------------------
+The eight-node capture completed and produced 1280 buffers. Preserve the directory
+output/emi-hb-audit-6143753/inputs. The revised job reuses those exact files.
+No new solver capture is needed. From the EMI repository:
+  scancel 6143753
+  sbatch tests/submit_emi_hb_audit.sbatch
+
+The restart allocates ONE node/ONE task for offline computation. The saved inputs
+come from EIGHT nodes/SIXTEEN ranks; this does not become a one-node solver case.
+It applies production quantization/encoding to saved directed packet inputs and
+checks reconstruction. It does not measure live MPI performance.
+
+By default, select calls 1,2,3 from BOTH R and P, with every producer included:
+120 saved buffers for 20 subdomains. Input hashes and symlink targets are recorded.
+This is an early-call sample, not the entire 32-call trajectory. Override with
+HB_AUDIT_CALLS=1..32 and HB_CAPTURE_INPUTS=/path/to/prior/inputs when appropriate.
+
+The live capture was 32-bit nodal-quantization-only FCG with splitting OFF.
+Both orders at depths 1,2,3,0 and bits 8,16 replay precisely the same sampled
+inputs. The replay does not apply the lossless wrapper or constant splitting.
+Compare replay depths to one another, not directly to packed routed-byte totals
+or to solver convergence on a split-ON compressed trajectory.
+
+Expensive diagnostic hierarchy probes are cached per mode/producer/depth;
+coefficient-level assignments are cached per mode/producer/peer. All graphs,
+interface memberships and exact masks are checked before cache reuse.
+Neither states nor codebooks are reused between distinct captured transfer calls.
+
+Output under output/emi-hb-audit-JOB:
+- packet-depths.csv: summed logical packet bytes by depth/order/phase and errors.
+- coefficient-levels.csv: coefficient count, range, RMS and raw tail bits by level.
+- replay-bBITS-dDEPTH/level-stats.csv: compact per-packet/per-level statistics.
+- packets.csv and codebooks.csv retain framing, padding, exact-data, plans and
+  reconstruction errors. No per-coefficient stages.csv or levels.csv is emitted.
+- The log announces every replay, transfer group and mode.
+
+Raw tail bits exclude Huffman bits/framing/padding. Those costs are included in
+actual packet byte counts by depth. Setup plans and codebooks are reported
+separately. Timings include diagnostics and are not performance benchmarks.
+
+Local checks: hand reference, extracted production methods, balanced sampling,
+missing-producer rejection and compact summary arithmetic passed. The actual
+compact C++ aggregation block was compiled and checked on explicit coefficients.
+The complete Dune executable still needs the container build in the restart job.
+Existing production algorithms and numerical settings were not changed.
