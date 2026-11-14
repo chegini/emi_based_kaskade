@@ -28,6 +28,14 @@ def build(kaskade,exe):
       calls+=phase[static_cast<unsigned>(TransferTiming::Stage::PacketExchange)][0].calls;
     require(calls==8,"Missing or extra destination-exchange timer calls");
   }
+  if(routed.packetByteDetailEnabled) {
+    auto const& b=routed.packetPhaseBytes;
+    require(b[0]+b[2]==routed.packetOriginalBytes,"Phase original bytes differ");
+    require(b[1]+b[3]==routed.packetSentBytes,"Phase packed bytes differ");
+    unsigned long long totals[4]={b[0],b[1],b[2],b[3]};
+    MPI_Allreduce(MPI_IN_PLACE,totals,4,MPI_UNSIGNED_LONG_LONG,MPI_SUM,MPI_COMM_WORLD);
+    require(totals[1]>0 && totals[3]>0,"Missing global R/P phase bytes");
+  }
   if(routed.nodeTopology.nodes()==1)
     require(routed.packetInterNodeSentBytes==0,"Same-node packets counted as inter-node");
   std::array<std::uint64_t,6> total{};''')

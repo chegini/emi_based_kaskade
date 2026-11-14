@@ -81,7 +81,7 @@ def summarize(root):
     controls={(r['configuration'],r['tier'],r['repeat']):r for r in measured}
     optimized=[]
     for row in measured:
-        if not row.get('optimization',0):continue
+        if not row.get('optimization',0) or not row.get('baseline_name'):continue
         baseline=controls.get((row['baseline_name'],row['tier'],row['repeat']))
         if baseline is None:continue
         optimized.append(dict(configuration=row['configuration'],tier=row['tier'],repeat=row['repeat'],
@@ -112,7 +112,8 @@ def summarize(root):
     for (name,tier),selected in sorted(groups.items()):
         valid=[r for r in selected if (tier,r['repeat']) in raw]
         header=dict(configuration=name,tier=tier,n=len(valid),expected_n=manifest['detail_repeats'] if tier==2 else repeats,
-                    bits=selected[0]['bits'],depth=selected[0]['depth'],variant=selected[0]['variant'])
+                    bits=selected[0]['bits'],depth=selected[0]['depth'],variant=selected[0]['variant'],
+                    split=selected[0].get('split','off'),optimization=selected[0].get('optimization',0))
         header['complete']=header['n']==header['expected_n']
         metrics={
             'trajectory_s':[r['simulation_s'] for r in valid],

@@ -1225,9 +1225,9 @@ int main(int argc, char* argv[])
   if (options.bddcTransformFirstRecentering &&
       (!options.bddcCompression || !options.bddcGraphLifting || options.bddcGraphLiftingAfterQuantization ||
        options.bddcGraphLiftingBothOrders || !options.bddcHuffman || !options.bddcBitlength ||
-       options.bddcProlongateConstantSplit || options.bddcRestrictGroupSize || options.bddcProlongateGroupSize ||
+       options.bddcRestrictGroupSize || options.bddcProlongateGroupSize ||
        options.bddcRestrictZeroPreserving || options.bddcProlongateZeroPreserving))
-    throw std::invalid_argument("EMI recentering requires unsplit, ungrouped affine method B with bitlength coding");
+    throw std::invalid_argument("EMI recentering requires ungrouped affine method B with bitlength coding");
   if ((options.bddcTimeStudy || options.bddcReuseLiftingPlans || options.bddcTransformFirstRecentering) &&
       (!options.bddc || options.sdc || options.direct || !options.bddcFlexibleCg ||
        !options.bddcUseCg || options.bddcRelativeTolerance<=0 ||

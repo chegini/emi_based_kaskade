@@ -33,6 +33,7 @@ class TimeStudy
     int step=0, calls=0;
     double wall=0, fcg=0, relative=0;
     Packet packet{};
+    std::array<std::uint64_t,4> phaseBytes{};
   };
   struct StageRow
   {
@@ -48,6 +49,7 @@ class TimeStudy
   double fcgSeconds=0;
   unsigned call=0;
   Packet previousPacket{};
+  std::array<std::uint64_t,4> previousPhaseBytes{};
   Counters stepProfile{}, previousCall{};
   std::vector<Row> rows;
   std::vector<StageRow> stages;
@@ -84,11 +86,12 @@ public:
   void setWork(std::uint64_t subdomains, std::uint64_t dofs, std::uint64_t global)
   { ownedSubdomains=subdomains; ownedDofs=dofs; globalDofs=global; }
 
-  void setupComplete(Packet const& packet)
+  void setupComplete(Packet const& packet, std::array<std::uint64_t,4> const& phaseBytes={})
   {
     if (!enabled) return;
     applicationSetup=elapsed(applicationStart==Clock::time_point{} ? setupStart : applicationStart);
-    rows.push_back({0,0,elapsed(setupStart),0,0,packet});
+    rows.push_back({0,0,elapsed(setupStart),0,0,packet,phaseBytes});
+    previousPhaseBytes=phaseBytes;
     if (Kaskade::BDDC::TransferTiming::mode())
       profile(0,0,Kaskade::BDDC::TransferTiming::snapshot());
     previousPacket=packet;
@@ -125,12 +128,16 @@ public:
     }
   }
 
-  void endStep(int step, int calls, double relative, Packet const& packet)
+  void endStep(int step, int calls, double relative, Packet const& packet,
+               std::array<std::uint64_t,4> const& phaseBytes={})
   {
     if (!enabled) return;
     double wall=elapsed(stepStart);
     if (calls!=static_cast<int>(call)) throw std::runtime_error("Incomplete FCG timing calls");
-    rows.push_back({step,calls,wall,fcgSeconds,relative,difference(packet,previousPacket)});
+    auto phaseDelta=phaseBytes;
+    for(unsigned i=0;i<4;++i) phaseDelta[i]-=previousPhaseBytes[i];
+    previousPhaseBytes=phaseBytes;
+    rows.push_back({step,calls,wall,fcgSeconds,relative,difference(packet,previousPacket),phaseDelta});
     previousPacket=packet;
     if (Kaskade::BDDC::TransferTiming::mode())
       profile(step,0,Kaskade::BDDC::TransferTiming::difference(
@@ -153,13 +160,15 @@ public:
     if (!total) throw std::runtime_error("Cannot write simulation timing "+stem);
     std::ofstream out(stem+".csv");
     out << "step,calls,wall_s,fcg_s,relative_residual,original_bytes,packed_bytes,"
-           "pack_s,unpack_s,exchange_s,verify_s,packet_solve_s,inter_node_packed_bytes\n" << std::setprecision(17);
+           "pack_s,unpack_s,exchange_s,verify_s,packet_solve_s,inter_node_packed_bytes,restrict_original_bytes,restrict_packed_bytes,prolongate_original_bytes,prolongate_packed_bytes\n" << std::setprecision(17);
     for (auto const& row:rows)
     {
       out << row.step << ',' << row.calls << ',' << row.wall << ',' << row.fcg << ','
           << row.relative << ',' << std::get<0>(row.packet) << ',' << std::get<1>(row.packet);
       for (double value:std::get<2>(row.packet)) out << ',' << value;
-      out << ',' << std::get<3>(row.packet) << '\n';
+      out << ',' << std::get<3>(row.packet);
+      for(auto value:row.phaseBytes) out << ',' << value;
+      out << '\n';
     }
     out.close();
     if (!out) throw std::runtime_error("Cannot write timestep timings "+stem);

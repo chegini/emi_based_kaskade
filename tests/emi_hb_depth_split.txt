@@ -1,0 +1,129 @@
+EMI 16-bit depth / splitting / recentering experiment
+===================================================
+
+Purpose
+-------
+Use the same fixed-topology Pepe mesh and physical time integration as the
+previous 6167505 pilot. Depth caps 1,2,3,4 apply to BOTH restriction and
+prolongation. A quantizes before modular integer lifting; B lifts before the
+unchanged affine quantizer. Splitting is prolongation only. A uses its existing
+integer/zigzag representation and has no recentering mode. B has all four
+split OFF/ON x recenter OFF/ON combinations. No adaptive encoding selection.
+
+There are 24 compressed configurations plus one matched raw FCG control.
+Masks are A=5 (reference cache + exact fill acceleration), B=4 (exact fill
+acceleration); the floating B accessor already returns a reference. These
+explicit opt-in masks preserve the predictors and quantized results.
+Default production options are unchanged. No wavelet coarse update is added.
+
+Split-compatible reversible recentering
+--------------------------------------
+The existing split computes a producer constant and transforms the weighted
+residual relative to that constant. We retain that operation and its CSP1
+prefix (uint32 marker + float32 constant, 8 bytes), the affine float32 minimum
+and scale, exact corners and quantizer arithmetic. Recenter only the resulting
+uint32 coefficient codes, modulo uint32, followed by reversible zigzag. Undo
+it BEFORE the unchanged dequantizer and floating inverse. Add the original
+producer-weighted constant at the existing point after inverse lifting.
+No new per-packet field is needed. FLP3 setup agreement distinguishes split
+recentered peers; FLP1/FLP2 remain unchanged for existing configurations.
+Mismatched setup is rejected. Toggling split after setup with recentering marks
+the exchanged setup stale. Raw fallbacks retain original codes.
+
+Correctness gates
+-----------------
+The batch rebuilds the actual EMI executable and compiles the full production
+SpaceTransferDataCompression template, Quantizer, Huffman and PacketPacking.
+check_emi_split_recenter.py uses identical fixed inputs for recenter OFF/ON,
+all depths, split OFF/ON, bits 8/12/16/24/32, irregular producer topology,
+varying weights, zero buffers, partial/all exact corners and raw fallback.
+It requires byte-exact reconstructed states, original uint32 code equality on
+sender/receiver, unchanged constants/corners and stateless/planned packet
+roundtrips. Successful temporary traces are removed; failure traces are kept.
+The previous constant-split regression is also run.
+
+Before timing, every A/B configuration validates uncached versus cached full
+states and residual traces, and each recentered B validates against the same
+split/depth B. A also requires exact depth-one states/residual traces at every
+depth within the same split setting. Every timed repeat must reproduce bytes, iteration counts
+and final residuals per timestep. Full residual traces remain in validation
+folders. Splitting and floating depth can change quantization inputs and FCG
+trajectories; parity is required for implementation/recentering changes,
+not between different split/depth numerical representations.
+
+Timing
+------
+Default: 3 physical timesteps, dt=0.01, FCG with one previous direction,
+relative tolerance 1e-7, 2 nodes / 4 ranks, 16 bits, unchanged corner policy.
+Three repeats and one warmup per configuration, randomized within each repeat.
+Mode 0 is the primary runtime endpoint; mode 1 separately measures aggregate
+codec/communication cost. Per-level kernel clocks require optional mode 2
+(EMI_HB_TIERS='0 1 2') and perturb small kernels. Setup graph inventories run
+only during correctness validation, never the primary timed runs.
+
+Depth/split mode validates 41 trajectories and measures 200 warmup/repeat
+trajectories with default tiers 0/1 (241 total), plus native gates. Runtime
+cannot be promised; use a 24-hour allocation and inspect the scratch log.
+Do not compare whole batch elapsed time with solver trajectory time.
+
+Run on HTC from the EMI repository root
+--------------------------------------
+hb_out=/scratch/htc/fchegini/emi-hb
+mkdir -p "$hb_out"
+EMI_HB_STEPS=3 sbatch --nodes=2 --ntasks=4 --ntasks-per-node=2 \
+  --output="$hb_out/emi-hb-depth-split-%j.log" \
+  --error="$hb_out/emi-hb-depth-split-%j.log" \
+  tests/submit_emi_hb_depth_split.sbatch
+
+Replace JOBID with the returned number:
+tail -n 40 -F /scratch/htc/fchegini/emi-hb/emi-hb-depth-split-JOBID.log
+
+Results
+-------
+/scratch/htc/fchegini/emi-hb/emi-hb-depth-split-JOBID/results/
+  depth-split-report.txt          compact comparison and observed rankings
+  depth-split-comparison.csv      primary runtime, error, iterations, bytes/iter
+  phase-comparison.csv            routed bytes and codec/MPI time for R versus P
+  depth-split-paired.csv          raw, depth1, split and recenter paired differences
+  timestep-comparison.csv         timestep bytes, iterations and runtime
+  components-by-step-level-rank.csv  nested mode1 (optional mode2) profiles
+  interface-level-shrinkage.csv   active/coarse/detail DOFs per constructed stage
+  interface-plan-inventory.csv    requested versus actual depth, storage, identities
+  interface-depth-summary.csv     fraction of constructed graphs reaching depth cap
+  runs.json/errors.json           complete gates and failed trajectories
+  validate-*/                     exact state snapshots and full residual histories
+
+Bytes are routed application payloads (including same-node inter-rank MPI and
+packet metadata), not NIC wire bytes. Full-run savings use the matched complete
+raw solve. Bytes/iteration divide by actual FCG counts; iteration changes are
+reported explicitly. Exported prediction-plan setup bytes are separate from
+R/P packet bytes. Setup is amortized only within the retained-topology run.
+
+Graph inventory is per constructed owner-group graph/cache entry, not unique
+geometric face. Source rank/process/plan ID + producer/consumer + union/peer
+role identify it. Containing interface DOFs include exact corners; group_graph
+DOFs are the coefficients of that actual predictor. Successful active=C+D
+stages shrink to C; terminal failed splits do not count as a new level.
+There can be repeated subgraphs across union/peer caches. Do not sum them as
+unique physical interface DOFs. Process high-water RSS is not level-local
+allocated memory; plan_storage_bytes is a capacity estimate.
+
+Total state error is relative to uncompressed FCG; exact transform/quantizer
+reconstruction equivalence is a separate gate. No new scientific acceptance
+threshold is imposed. MPI time includes waits/collectives; packet_exchange is
+the narrower routed exchange. Timers are nested, and independent rank maxima
+must not be added to infer critical-path runtime. Means, SD and exploratory
+paired 95% Student t intervals are reported; three repeats do not resolve all
+small differences.
+
+Larger mesh / scaling (after reviewing this pilot)
+------------------------------------------------
+Select the candidate using the state-error requirement, exact gates, paired
+runtime interval, full-run bytes and actual graph shrinkage. Preserve raw and
+single-stage controls. Do not declare the minimum-byte configuration fastest.
+The existing time-study harness supports fixed larger meshes and weak_<2*ranks>
+_h16 families. A separate selected-candidate scaling campaign will be prepared
+from the measured winner; the 24-case depth matrix should not be blindly
+repeated at large scale. No larger-mesh result or speedup is claimed before
+those cluster runs finish. Keep large generated outputs on scratch; preserve
+compact reports/source hashes in backed-up storage.

@@ -31,6 +31,8 @@ def arguments(argv=None):
     p.add_argument('--bits',type=int,nargs='+',choices=[8,12,16,24,32],default=[16])
     p.add_argument('--lifting-optimizations',type=int,nargs='+',choices=range(8),default=[0])
     p.add_argument('--hierarchy-profile',action='store_true',help='Separate diagnostic run; setup CSV I/O perturbs timings')
+    p.add_argument('--depth-split-study',action='store_true',help='A split OFF/ON and all four B split/recenter combinations')
+    p.add_argument('--interface-inventory',action='store_true',help='Setup graph inventory during validation only')
     p.add_argument('--depths',type=int,nargs='+',choices=range(65),default=[1,4])
     p.add_argument('--repeats',type=int,default=3)
     p.add_argument('--detail-repeats',type=int,default=3)
@@ -48,12 +50,21 @@ def arguments(argv=None):
     if 0 not in a.lifting_optimizations or len(set(a.lifting_optimizations))!=len(a.lifting_optimizations):p.error('Unique optimizations including original 0 required')
     if a.lifting_optimizations[0]!=0:p.error('Original optimization 0 must come first for exact validation')
     if 1 not in a.depths:p.error('Depth 1 baseline is required')
+    if a.depth_split_study and a.depths[0]!=1:p.error('Depth/split study requires depth 1 first for method-A exact validation')
+    if a.depth_split_study and a.lifting_optimizations!=[0]:p.error('Depth/split mode selects validated masks A=5 and B=4 itself')
     if a.scaling=='weak' and a.case!=f'weak_{2*a.ranks}_h16':
         p.error('Weak family requires weak_<2*ranks>_h16; two cells/rank, fixed h16')
     return a
 
 
 def configurations(a):
+    if getattr(a,'depth_split_study',False):
+        # A already has reversible integer lifting/zigzag; recentering is a B representation.
+        return [dict(name='raw',variant='raw',bits=None,depth=1,optimization=0,split='off')]+[
+            dict(name=f'{v}-b{b}-d{d}-split-{split}',baseline_name=None,
+                 variant=v,bits=b,depth=d,split=split,optimization=5 if v=='A' else 4)
+            for b in a.bits for d in a.depths for split in ['off','on']
+            for v in ['A','B','B-recenter']]
     return [dict(name='raw',variant='raw',bits=None,depth=1,optimization=0)]+[
         dict(name=f'{v}-b{b}-d{d}'+(f'-o{o}' if o else ''),
              baseline_name=f'{v}-b{b}-d{d}',variant=v,bits=b,depth=d,optimization=o)
@@ -64,13 +75,13 @@ def configurations(a):
 def command(a,case,folder,*,validation=False,reuse=True):
     repo=Path(__file__).resolve().parents[1]
     cfg=study.arguments(['--repo',str(repo),'--case',a.case,'--solvers','fcg',
-        '--split','off','--bits',str(case['bits'] or 16),
+        '--split',case.get('split','off'),'--bits',str(case['bits'] or 16),
         '--ranks',str(a.ranks),'--expected-nodes',str(a.nodes),
         '--slurm-container',str(a.slurm_container),'--kaskade',str(a.kaskade),
         '--executable',str(a.executable),'--case-minutes',str(a.case_minutes)])
     cfg.steps=a.steps;cfg.lifting_levels=case['depth'];cfg.lossless_packing=1
     cfg.transform_order='after' if case['variant']=='A' else 'before'
-    mode=dict(case,solver='fcg',split='off',direct=False)
+    mode=dict(case,solver='fcg',direct=False);mode['split']=case.get('split','off')
     result=study.make_command(cfg,mode,folder,['mpirun'])
     for flag,value in [('potentialDiagnostics',int(validation)),('bddcConvergenceReport',int(validation))]:
         result[result.index('--'+flag)+1]=str(value)
@@ -90,7 +101,7 @@ def profiles(folder,ranks,steps):
         with (folder/f'hb-time-rank-{rank}.csv').open() as f:rows=list(csv.DictReader(f))
         require([int(r['step']) for r in rows]==list(range(steps+1)),'Incomplete timestep records')
         for row in rows:
-            row={k:(int(v) if k in ['step','calls','original_bytes','packed_bytes','inter_node_packed_bytes'] else float(v)) for k,v in row.items()}
+            row={k:(int(v) if k in ['step','calls'] or k.endswith('_bytes') else float(v)) for k,v in row.items()}
             require(all(math.isfinite(v) and v>=0 for v in row.values()),'Invalid timestep sample')
             rank_rows.append(dict(rank=rank,**row))
         with (folder/f'hb-time-rank-{rank}-stages.csv').open() as f:
@@ -127,7 +138,7 @@ def main(argv=None):
         executable_sha256=executable_hash,
         input_sha256={k:digest(Path(v)) for k,v in mesh_inputs(repo,a.case).items()},
         allocation={k:os.environ.get(k) for k in ['SLURM_JOB_ID','SLURM_JOB_NODELIST']},
-        notes=['Generic hierarchy, no coarse update. Splitting OFF for recentering compatibility.',
+        notes=['Generic hierarchy, no coarse update. Explicit split field; original study defaults OFF.',
                'Actual routed bytes include same-node inter-rank MPI; not all network wire bytes.',
                'Live A/B/depth trajectories can differ; compare state error and actual FCG counts.',
                'Validation snapshots/traces enabled only for validation runs.',
@@ -148,7 +159,7 @@ def main(argv=None):
         folder=root/name;folder.mkdir()
         cfg,cmd=command(a,case,folder,validation=validation,reuse=reuse)
         optimization=str(case.get('optimization',0))
-        prefix=str(folder/'lifting-setup') if a.hierarchy_profile else ''
+        prefix=str(folder/'lifting-setup') if a.hierarchy_profile or (a.interface_inventory and validation and reuse) else ''
         runenv=dict(env,KASKADE_LIFTING_OPTIMIZATION=optimization,
                    APPTAINERENV_KASKADE_LIFTING_OPTIMIZATION=optimization,
                    KASKADE_LIFTING_PROFILE_PREFIX=prefix,
@@ -177,6 +188,9 @@ def main(argv=None):
             require(len(packet)==1,'Missing transport bytes')
             row['packed_bytes']=int(packet[0][1])
             require(sum(r['packed_bytes'] for r in rows)==row['packed_bytes'],'Per-step transport accounting differs')
+            if a.depth_split_study:
+                require(all(r['restrict_packed_bytes']+r['prolongate_packed_bytes']==r['packed_bytes'] for r in rows),
+                        'Per-phase transport accounting differs')
             require(int(packet[0][2])==int(case['bits'] is not None),'Wrong packing mode')
             if reuse and tier>0 and case['bits'] is not None:
                 require(not any(r['stage']=='plan_setup' and r['step']>0 for r in stages),'Hierarchy rebuilt during timesteps')
@@ -186,6 +200,7 @@ def main(argv=None):
             row['residual_history']=[r['relative_residual'] for r in rows if r['rank']==0 and r['step']>0]
             if not validation:
                 ref=validated[case['name']]
+                require(row['packed_bytes']==ref['packed_bytes'],'Repeat/timer changed packed byte count')
                 require(row['iterations_per_step']==ref['iterations_per_step'] and row['residual_history']==ref['residual_history'],
                         'Profiling/repeat changed convergence trajectory')
             row['hierarchy_setup_payload']=[dict(rank=int(rank),local=int(local),exported=int(remote)) for rank,local,remote in
@@ -200,19 +215,24 @@ def main(argv=None):
     for case in cases[1:]:
         if case['variant']=='B-recenter' and case['name'].replace('B-recenter','B') in failed:
             failed.add(case['name']);continue
-        if case.get('optimization',0) and case['baseline_name'] not in validated:
+        if not a.depth_split_study and case.get('optimization',0) and case['baseline_name'] not in validated:
             failed.add(case['name']);continue
         original=None
-        if case['variant']!='B-recenter' and not case.get('optimization',0):original=run(case,0,-1,validation=True,reuse=False,suffix='-uncached')
+        if case['variant']!='B-recenter' and (a.depth_split_study or not case.get('optimization',0)):original=run(case,0,-1,validation=True,reuse=False,suffix='-uncached')
         current=run(case,2,-1,validation=True)
         if current['status']!='PASS' or original and original['status']!='PASS':
             failed.add(case['name']);continue
-        baseline=validated[case['baseline_name']] if case.get('optimization',0) else original or validated[case['name'].replace('B-recenter','B')]
-        if case.get('optimization',0):
+        baseline=validated[case['baseline_name']] if case.get('optimization',0) and not a.depth_split_study else original or validated[case['name'].replace('B-recenter','B')]
+        if case.get('optimization',0) and not a.depth_split_study:
             require(current['packed_bytes']==baseline['packed_bytes'],'Plan optimization changed packed byte count')
             require(current['iterations_per_step']==baseline['iterations_per_step'],'Plan optimization changed FCG iterations')
         require(exact_trajectory(Path(baseline['folder']),Path(current['folder']),a.steps),
                 'CACHE/RECENTERING CHANGED SOLUTION OR RESIDUAL TRACE: '+case['name'])
+        if a.depth_split_study and case['variant']=='A' and case['depth']!=1:
+            first=validated[case['name'].replace('-d'+str(case['depth'])+'-','-d1-')]
+            require(exact_trajectory(Path(first['folder']),Path(current['folder']),a.steps),
+                    'INTEGER LIFTING DEPTH CHANGED METHOD A RECONSTRUCTION: '+case['name'])
+            current['exact_depth_parity']='EXACT_METHOD_A_DEPTH1_STATES_AND_RESIDUAL_TRACES'
         current['exact_parity']='EXACT_ALL_TIMESTEP_STATES_AND_RESIDUAL_TRACES'
         validated[case['name']]=current
         for step in range(a.steps+1):
@@ -238,6 +258,9 @@ def main(argv=None):
         (root/(name+'.json')).write_text(json.dumps(rows,allow_nan=False)+'\n')
     import summarize_emi_hb_time_study as summarize
     summarize.summarize(root)
+    if a.depth_split_study:
+        import summarize_emi_hb_depth_split
+        summarize_emi_hb_depth_split.summarize(root)
     complete=all(r['status']=='PASS' for r in records) and not failed
     (root/('PASS' if complete else 'FAIL')).write_text('All requested configurations completed.\n' if complete else 'Inspect retained failed configurations; no speed claims for these.\n')
     print('Results: '+str(root),flush=True)

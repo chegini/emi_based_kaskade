@@ -2263,7 +2263,7 @@ State runBddcSdc(Functional& F,
                 << "after interior elimination; fixed SPD preconditioner assumed, "
                 << "not the exact condition number of A\n";
 
-    if (timeStudy) timeStudy->setupComplete(solver.packetTransportSnapshot());
+    if (timeStudy) timeStudy->setupComplete(solver.packetTransportSnapshot(),solver.packetPhaseSnapshot());
 
     for (int step = firstStep; step < firstStep+steps; ++step)
     {
@@ -2749,7 +2749,7 @@ State runBddcSdc(Functional& F,
 
       Kaskade::component<0>(state) += Kaskade::component<0>(stepState);
       if (timeStudy)
-        timeStudy->endStep(step+1,solveCalls,trueResult.measured.relative(),solver.packetTransportSnapshot());
+        timeStudy->endStep(step+1,solveCalls,trueResult.measured.relative(),solver.packetTransportSnapshot(),solver.packetPhaseSnapshot());
       capturePotentialState(options.potentialDiagnostics != 0,rankZero,options.mpi != 0,
                             options.outputDir,step+1,globalMatrix,
                             boost::fusion::at_c<0>(state.data).coefficients(),stepVector,rhs);

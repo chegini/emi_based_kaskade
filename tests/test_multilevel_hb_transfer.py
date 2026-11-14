@@ -49,6 +49,7 @@ namespace Kaskade::BDDC {
 template<int m,class Scalar,class TransmissionScalar,class quantizedScalar,class StorageType>
 struct SpaceTransferDataCompression {
   using Plan=IntegerLiftingPlan<Scalar>;
+  int id=0;
   std::vector<int> globalIndex;
   std::vector<char> excludedGlobal;
   std::map<int,std::vector<int>> localIfs;
@@ -58,6 +59,7 @@ struct SpaceTransferDataCompression {
   bool graph_lifting_path_hierarchy=false;
   bool reuse_lifting_plans=false;
   bool transform_first_recentering=false;
+  bool prolongate_constant_split=false;
   bool producer_lifting_setup_stale=false, require_producer_lifting_plans=true;
   bool transform_after_quantization_restrict=true,transform_after_quantization_prolongate=true;
   mutable std::map<std::vector<int>,Plan> local_float_plans,local_integer_plans,local_group_plans;

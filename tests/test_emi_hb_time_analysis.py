@@ -31,7 +31,9 @@ class Analysis(unittest.TestCase):
                         rows.append(dict(step=step,calls=2 if step else 0,wall_s=1.,fcg_s=.5 if step else 0,
                             relative_residual=1e-8 if step else 0,original_bytes=100 if step else 0,
                             packed_bytes=row_bytes if step else 0,pack_s=0,unpack_s=0,exchange_s=0,
-                            verify_s=0,packet_solve_s=0,inter_node_packed_bytes=row_bytes if step else 0))
+                            verify_s=0,packet_solve_s=0,inter_node_packed_bytes=row_bytes if step else 0,
+                            restrict_original_bytes=60 if step else 0,prolongate_original_bytes=40 if step else 0,
+                            restrict_packed_bytes=row_bytes*6//10 if step else 0,prolongate_packed_bytes=row_bytes*4//10 if step else 0))
                     with (folder/f'hb-time-rank-{rank}.csv').open('w',newline='') as f:
                         w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
                     (folder/f'hb-time-rank-{rank}-total.csv').write_text('simulation_s,application_compute_s,application_setup_s\n3,4,2\n')
@@ -81,7 +83,9 @@ class Analysis(unittest.TestCase):
                         rows.append(dict(step=step,calls=2 if step else 0,wall_s=1.,fcg_s=.5 if step else 0,
                             relative_residual=1e-8 if step else 0,original_bytes=100 if step else 0,
                             packed_bytes=row_bytes if step else 0,pack_s=0,unpack_s=0,exchange_s=0,
-                            verify_s=0,packet_solve_s=0,inter_node_packed_bytes=row_bytes if step else 0))
+                            verify_s=0,packet_solve_s=0,inter_node_packed_bytes=row_bytes if step else 0,
+                            restrict_original_bytes=60 if step else 0,prolongate_original_bytes=40 if step else 0,
+                            restrict_packed_bytes=row_bytes*6//10 if step else 0,prolongate_packed_bytes=row_bytes*4//10 if step else 0))
                     with (folder/f'hb-time-rank-{rank}.csv').open('w',newline='') as f:
                         w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
                     (folder/f'hb-time-rank-{rank}-total.csv').write_text('simulation_s,application_compute_s,application_setup_s\n3,4,2\n')
@@ -116,6 +120,25 @@ class Analysis(unittest.TestCase):
             self.assertEqual(len(comparisons),54)
             self.assertTrue(all(r['packed_bytes_equal']=='True' and r['iterations_equal']=='True' for r in comparisons))
             self.assertTrue(all(float(r['simulation_difference_s_mean'])==0 for r in comparisons))
+            # New depth/split study uses the same validators and accounting, with
+            # explicit split ON/OFF and recenter parity within each B trajectory.
+            with patch.dict('os.environ',SLURM_JOB_NUM_NODES='2'),patch.object(run.study,'execute',fake_execute),\
+                 patch.object(run,'collect',fake_collect),patch.object(run,'routing_counts',return_value=[]),\
+                 patch.object(run,'mesh_inputs',return_value={'input':str(payload)}),contextlib.redirect_stdout(io.StringIO()):
+                status=run.main(['--executable',str(exe),'--kaskade','/tmp/k',
+                    '--slurm-container','/tmp/s','--output',str(root/'depth-results'),
+                    '--ranks','2','--nodes','2','--steps','2','--tiers','0','1',
+                    '--depth-split-study','--depths','1','2','3','4'])
+            self.assertEqual(status,0)
+            with (root/'depth-results/depth-split-comparison.csv').open() as f:depth=list(csv.DictReader(f))
+            self.assertEqual(len(depth),25)
+            self.assertTrue(all(r['exact_implementation_parity']=='EXACT_ALL_TIMESTEP_STATES_AND_RESIDUAL_TRACES' for r in depth if r['method']!='raw'))
+            with (root/'depth-results/phase-comparison.csv').open() as f:phases=list(csv.DictReader(f))
+            self.assertEqual(len(phases),50)
+            self.assertEqual(float(phases[0]['packed_bytes_mean']),120.) # A restriction: 30/rank/step x 4
+            self.assertEqual({(r['depth_cap'],r['split'],r['recenter']) for r in depth if r['method'].startswith('B')},
+                {(str(d),s,r) for d in range(1,5) for s in ['off','on'] for r in ['False','True']})
+
 
     def test_thresholds_and_uncertainty(self):
         self.assertEqual(report.projected_break_even(10.,2.),6)
@@ -147,6 +170,17 @@ class Analysis(unittest.TestCase):
         with self.assertRaises(SystemExit),contextlib.redirect_stderr(io.StringIO()):
             run.arguments(['--executable','/tmp/e','--kaskade','/tmp/k',
                 '--slurm-container','/tmp/s','--output','/tmp/o','--scaling','weak','--case','weak_32_h16'])
+
+    def test_depth_split_commands(self):
+        a=run.arguments(['--executable','/tmp/e','--kaskade','/tmp/k','--slurm-container','/tmp/s',
+            '--output','/tmp/o','--depth-split-study','--depths','1','2','3','4'])
+        for case in run.configurations(a)[1:]:
+            _,cmd=run.command(a,case,Path('/tmp/o')/case['name'])
+            value=lambda flag:cmd[cmd.index('--'+flag)+1]
+            self.assertEqual(value('bddcProlongateConstantSplit'),str(int(case['split']=='on')))
+            self.assertEqual(value('bddcGraphLiftingLevels'),str(case['depth']))
+            self.assertEqual(value('bddcTransformFirstRecentering'),str(int(case['variant']=='B-recenter')))
+            self.assertEqual(case['optimization'],5 if case['variant']=='A' else 4)
 
     def test_rank_max_after_accumulation_and_prefix(self):
         # Unequal rank setup/step work: adding separate maxima would fabricate

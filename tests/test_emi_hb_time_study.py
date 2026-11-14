@@ -31,7 +31,7 @@ int main(int argc,char** argv) {
    {Context phase(true);Scope q(Stage::Quantize,1);Scope net(Stage::PacketExchange,1);}
    run.endCall(step);
   }
-  run.endStep(step,3,1e-8,P{100u*step,40u*step,{.01*step,.02*step,.03*step,.04*step,.05*step},20u*step});
+  run.endStep(step,3,1e-8,P{100u*step,40u*step,{.01*step,.02*step,.03*step,.04*step,.05*step},20u*step},{60u*step,24u*step,40u*step,16u*step});
  }
  run.write(argv[1],0);
 }''')
@@ -48,6 +48,8 @@ int main(int argc,char** argv) {
                 self.assertEqual([int(r['step']) for r in rows],[0,1,2])
                 self.assertEqual([int(r['packed_bytes']) for r in rows],[0,40,40])
                 self.assertEqual([int(r['calls']) for r in rows],[0,3,3])
+                self.assertEqual([int(r['restrict_packed_bytes']) for r in rows],[0,24,24])
+                self.assertEqual([int(r['prolongate_packed_bytes']) for r in rows],[0,16,16])
                 self.assertFalse((target/'disabled').exists())
                 with (target/'hb-time-rank-0-stages.csv').open() as f:stages=list(csv.DictReader(f))
                 if mode=='0':self.assertEqual(stages,[])
