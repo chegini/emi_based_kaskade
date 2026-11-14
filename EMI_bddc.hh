@@ -13,6 +13,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <numeric>
 #include <set>
@@ -39,6 +40,7 @@
 #include "utilities/threading.hh"
 
 #include "EMI_bddc_stopping.hh"
+#include "EMI_bddc_time_study.hh"
 #include "EMI_bddc_condition.hh"
 #include "EMI_bddc_convergence.hh"
 #include "EMI_bddc_precision.hh"
@@ -1360,6 +1362,11 @@ namespace EmiBddc
       transfer.setRestrictEncoding(options.bddcHuffman != 0);
       transfer.setProlongateEncoding(options.bddcHuffman != 0);
       transfer.setGraphLiftingLevels(options.bddcGraphLiftingLevels);
+      if constexpr (requires { options.bddcTransformFirstRecentering; options.bddcReuseLiftingPlans; })
+      {
+        transfer.setTransformFirstRecentering(options.bddcTransformFirstRecentering != 0);
+        transfer.setReuseLiftingPlans(options.bddcReuseLiftingPlans != 0);
+      }
       transfer.setRestrictTransform(options.bddcGraphLifting != 0);
       transfer.setProlongateTransform(options.bddcGraphLifting != 0);
       transfer.setTransformBeforeAndAfterQuantization(options.bddcGraphLiftingBothOrders != 0);
@@ -1967,6 +1974,10 @@ State runBddcSdc(Functional& F,
     using TransmissionScalar = double;
     using BddcSubdomain = Kaskade::BDDC::Subdomain<1,double,double,Transfer>;
 
+    std::unique_ptr<TimeStudy> timeStudy;
+    if constexpr (requires { options.bddcTimeStudy; })
+      if (options.bddcTimeStudy) timeStudy=std::make_unique<TimeStudy>(true);
+
     Kaskade::BDDC::InterfaceAverages<1,int> interfaceAverages(data.sharedDofs,
                                                               data.subdomainSizes,
                                                               options.bddcInterfaceTypes,
@@ -1998,6 +2009,13 @@ State runBddcSdc(Functional& F,
                                                                options.assemblyThreads,
                                                                options.mpi != 0,
                                                                options.masterWorker != 0);
+    if (timeStudy)
+    {
+      std::uint64_t owned=0, localDofs=0;
+      for (size_t id=0; id<subdomains.size(); ++id)
+        if (subdomains.has(id)) { ++owned; localDofs+=data.localDofs[id].size(); }
+      timeStudy->setWork(owned,localDofs,nDofs);
+    }
     // Configure every owned subdomain, including the uncompressed control.
     // This persists across resetForNewRhs(), without changing transfer settings.
     for (size_t id = 0; id < subdomains.size(); ++id)
@@ -2056,6 +2074,11 @@ State runBddcSdc(Functional& F,
         subdomain.transfer().setRestrictEncoding(options.bddcHuffman != 0);
         subdomain.transfer().setProlongateEncoding(options.bddcHuffman != 0);
         subdomain.transfer().setGraphLiftingLevels(options.bddcGraphLiftingLevels);
+        if constexpr (requires { options.bddcTransformFirstRecentering; options.bddcReuseLiftingPlans; })
+        {
+          subdomain.transfer().setTransformFirstRecentering(options.bddcTransformFirstRecentering != 0);
+          subdomain.transfer().setReuseLiftingPlans(options.bddcReuseLiftingPlans != 0);
+        }
         subdomain.transfer().setRestrictTransform(options.bddcGraphLifting != 0);
         subdomain.transfer().setProlongateTransform(options.bddcGraphLifting != 0);
         subdomain.transfer().setTransformBeforeAndAfterQuantization(options.bddcGraphLiftingBothOrders != 0);
@@ -2214,8 +2237,9 @@ State runBddcSdc(Functional& F,
       }
 #ifdef KASKADE_HAVE_MPI
       if (options.mpi != 0)
-        MPI_Allreduce(localStep.data(),globalStep.data(),static_cast<int>(nDofs),
-                      MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+        Kaskade::BDDC::TransferTiming::measure(Kaskade::BDDC::TransferTiming::Stage::Mpi,[&]
+        { return MPI_Allreduce(localStep.data(),globalStep.data(),static_cast<int>(nDofs),
+                               MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD); },1);
       else
 #endif
         globalStep = localStep;
@@ -2239,8 +2263,11 @@ State runBddcSdc(Functional& F,
                 << "after interior elimination; fixed SPD preconditioner assumed, "
                 << "not the exact condition number of A\n";
 
+    if (timeStudy) timeStudy->setupComplete(solver.packetTransportSnapshot());
+
     for (int step = firstStep; step < firstStep+steps; ++step)
     {
+      if (timeStudy) timeStudy->beginStep();
       if (!histogramSteps.empty())
       {
         bool const capture=std::binary_search(histogramSteps.begin(),histogramSteps.end(),step+1);
@@ -2349,7 +2376,8 @@ State runBddcSdc(Functional& F,
         if (relativeStopping && options.mpi != 0)
         {
           double norms[2] = {measured.absolute,measured.rhsNorm};
-          MPI_Bcast(norms,2,MPI_DOUBLE,0,MPI_COMM_WORLD);
+          Kaskade::BDDC::TransferTiming::measure(Kaskade::BDDC::TransferTiming::Stage::Mpi,[&]
+          { return MPI_Bcast(norms,2,MPI_DOUBLE,0,MPI_COMM_WORLD); },1);
           outerTraffic.add(sizeof(norms),outerRanks);
           measured = {norms[0],norms[1]};
         }
@@ -2528,7 +2556,9 @@ State runBddcSdc(Functional& F,
           {
             auto const start = options.profile ? ProfileTimes::Clock::now()
                                                : ProfileTimes::Clock::time_point{};
+            if (timeStudy) timeStudy->beginCall();
             double const internalNorm = solver.solve();
+            if (timeStudy) timeStudy->endCall(step+1);
             if (options.bddcProlongationDiagnostics)
               checkCgDiagnosticOutput(prolongationDiagnostics.good());
             if (options.bddcCgDiagnostics)
@@ -2718,6 +2748,8 @@ State runBddcSdc(Functional& F,
         boost::fusion::at_c<0>(stepState.data).coefficients()[i] = stepVector[i];
 
       Kaskade::component<0>(state) += Kaskade::component<0>(stepState);
+      if (timeStudy)
+        timeStudy->endStep(step+1,solveCalls,trueResult.measured.relative(),solver.packetTransportSnapshot());
       capturePotentialState(options.potentialDiagnostics != 0,rankZero,options.mpi != 0,
                             options.outputDir,step+1,globalMatrix,
                             boost::fusion::at_c<0>(state.data).coefficients(),stepVector,rhs);
@@ -2730,6 +2762,15 @@ State runBddcSdc(Functional& F,
         else
           std::cout << ", residual=" << residual << "\n";
       }
+    }
+
+    if (timeStudy)
+    {
+      int studyRank=0;
+#ifdef KASKADE_HAVE_MPI
+      if (options.mpi) MPI_Comm_rank(MPI_COMM_WORLD,&studyRank);
+#endif
+      timeStudy->write(options.outputDir,studyRank);
     }
 
     if (finalPhase && options.bddcConstantCorrection && rankZero)

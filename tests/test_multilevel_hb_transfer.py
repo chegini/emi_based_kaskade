@@ -16,7 +16,8 @@ p.add_argument('--kaskade-root',type=Path,required=True)
 a=p.parse_args()
 source=(a.kaskade_root/'mg/bddcSpaceTransfer.hpp').read_text()
 names=['buildTwoLevelSplit','graphLiftingPlan','floatLiftingPlan','floatLift',
-       'integerLiftingPlan','exportIntegerLiftingPlan','importIntegerLiftingPlan']
+       'integerLiftingPlan','cachedIntegerLiftingPlan','applyIntegerGraphLiftingTransform',
+       'inverseIntegerGraphLiftingTransform','exportIntegerLiftingPlan','importIntegerLiftingPlan']
 methods=[]
 for name in names:
     import re
@@ -30,6 +31,12 @@ for name in names:
         elif source[pos]=='}':depth-=1
         pos+=1
     methods.append(source[start:pos])
+header=(a.kaskade_root/'mg/bddcSpaceTransfer.hh').read_text()
+start=header.index('    void prepareIntegerLiftingPlans()')
+brace=header.index('{',start);pos=brace+1;depth=1
+while depth:
+    depth+=(header[pos]=='{')-(header[pos]=='}');pos+=1
+prepare=header[start:pos]
 fixture=r"""
 #include "mg/bddcLiftingPlan.hh"
 #include "mg/bddcRecenter.hh"
@@ -43,16 +50,19 @@ template<int m,class Scalar,class TransmissionScalar,class quantizedScalar,class
 struct SpaceTransferDataCompression {
   using Plan=IntegerLiftingPlan<Scalar>;
   std::vector<int> globalIndex;
+  std::vector<char> excludedGlobal;
   std::map<int,std::vector<int>> localIfs;
   std::vector<std::vector<int>> interface_graph;
   std::vector<std::vector<Scalar>> interface_graph_weights;
   unsigned graph_lifting_levels=1;
   bool graph_lifting_path_hierarchy=false;
+  bool reuse_lifting_plans=false;
   bool transform_first_recentering=false;
   bool producer_lifting_setup_stale=false, require_producer_lifting_plans=true;
   bool transform_after_quantization_restrict=true,transform_after_quantization_prolongate=true;
-  mutable std::map<std::vector<int>,Plan> local_float_plans,local_integer_plans;
+  mutable std::map<std::vector<int>,Plan> local_float_plans,local_integer_plans,local_group_plans;
   std::map<int,Plan> producer_float_plans,producer_lifting_plans;
+"""+prepare+r"""
   void ensureInterfaceGraph() const {}
   bool floatLifting(bool) const {return true;}
   std::vector<int> filteredLocalIdx(int peer) const {return localIfs.at(peer);}
@@ -61,6 +71,9 @@ struct SpaceTransferDataCompression {
   Plan graphLiftingPlan(std::vector<int> const&) const;
   Plan const& floatLiftingPlan(std::vector<int> const&,int=-1) const;
   std::vector<Scalar> floatLift(std::vector<Scalar> const&,std::vector<int> const&,bool,int=-1) const;
+  Plan const& cachedIntegerLiftingPlan(std::vector<int> const&,int=-1) const;
+  std::vector<quantizedScalar> applyIntegerGraphLiftingTransform(std::vector<quantizedScalar> const&,std::vector<int> const&,bool) const;
+  std::vector<quantizedScalar> inverseIntegerGraphLiftingTransform(std::vector<quantizedScalar> const&,std::vector<int> const&,bool,int=-1) const;
   Plan integerLiftingPlan(std::vector<int> const&,int=-1) const;
   std::vector<unsigned char> exportIntegerLiftingPlan(int) const;
   void importIntegerLiftingPlan(int,std::vector<unsigned char> const&);
@@ -81,6 +94,23 @@ T make(unsigned depth) {
  return t;
 }
 int main() {
+ // Prewarm BOTH depth-1 and multilevel production plans on fixed topology.
+ for (unsigned depth:{1u,4u}) {
+  auto t=make(depth);auto expected=t.graphLiftingPlan(t.localIfs.at(1)).pack();
+  t.reuse_lifting_plans=true;t.prepareIntegerLiftingPlans();
+  check(t.integerLiftingPlan(t.localIfs.at(1)).pack()==expected);
+  auto before=Kaskade::BDDC::TransferTiming::snapshot();
+  for (int repeat=0;repeat<3;++repeat) {
+   (void)t.floatLiftingPlan(t.globalIndex);
+   for (auto const& entry:t.localIfs) {
+    (void)t.integerLiftingPlan(entry.second);(void)t.floatLiftingPlan(entry.second);
+   }
+  }
+  auto delta=Kaskade::BDDC::TransferTiming::difference(Kaskade::BDDC::TransferTiming::snapshot(),before);
+  for (auto const& phase:delta)
+   check(phase[static_cast<unsigned>(Kaskade::BDDC::TransferTiming::Stage::PlanSetup)][0].calls==0);
+ }
+
  for(unsigned depth:{0u,1u,2u,4u}) for(bool irregular:{false,true}) {
   auto sender=make(depth),receiver=make(1);
   if(irregular) for(int i=2;i<31;i+=3) {
@@ -105,6 +135,14 @@ int main() {
    std::vector<std::uint32_t> u(idx.size());
    for(std::size_t i=0;i<u.size();++i) u[i]=i%2 ? 0xffffffffu : i;
    auto plan=sender.integerLiftingPlan(idx);
+   auto const& stable=sender.cachedIntegerLiftingPlan(idx);
+   auto saved=stable.pack();
+   (void)sender.cachedIntegerLiftingPlan(sender.globalIndex);
+   check(&stable==&sender.cachedIntegerLiftingPlan(idx));
+   check(saved==stable.pack());
+   auto transformed=sender.applyIntegerGraphLiftingTransform(u,idx,true);
+   check(transformed==plan.forward<1>(u,true));
+   check(receiver.inverseIntegerGraphLiftingTransform(transformed,idx,true,0)==u);
    check(receiver.integerLiftingPlan(idx,0).inverse<1>(plan.forward<1>(u,true),true)==u);
   }
   if(depth==0 && !irregular) check(sender.integerLiftingPlan(sender.globalIndex).coarse.size()==2);
@@ -136,7 +174,7 @@ while depth:
     pos+=1
 fixture=fixture.replace('  void ensureInterfaceGraph() const {}',header[start:pos]+'\n  void ensureInterfaceGraph() const {}')
 fixture=fixture.replace('  sender.producer_lifting_setup_stale=true;',
-    '  sender.setGraphLiftingLevels(depth==1 ? 0 : 1); check(sender.local_float_plans.empty() && sender.local_integer_plans.empty());')
+    '  sender.setGraphLiftingLevels(depth==1 ? 0 : 1); check(sender.local_float_plans.empty() && sender.local_integer_plans.empty() && sender.local_group_plans.empty());')
 
 with tempfile.TemporaryDirectory(prefix='hb-transfer-') as folder:
     src=Path(folder)/'test.cpp';exe=Path(folder)/'test'

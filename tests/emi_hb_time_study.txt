@@ -1,0 +1,191 @@
+Fixed-topology EMI multilevel HB amortization experiment
+======================================================
+
+Status and scope
+----------------
+This is a new experiment, not a numerical result inferred from Poisson.
+Do not edit these source trees while a campaign is running; source hashes
+are checked before and after the experiment.
+It uses the non-SDC semi-implicit Euler EMI trajectory, fixed mesh, fixed dt,
+fixed local matrices, fixed constraints/ownership and one retained BDDC solver.
+It does not claim to evaluate SDC sweeps, adaptive meshes, or changing matrices.
+FGMRES, adaptive active sets and raw-prefix type switches are deliberately rejected.
+Generic graph HB is used: arbitrary EMI interfaces need not be disjoint paths.
+There is prediction but no wavelet coarse-update stage.
+
+New switches, all OFF by default:
+  --bddcReuseLiftingPlans 1
+  --bddcTransformFirstRecentering 1   (method B only, affine/unsplit/ungrouped)
+  --bddcTimeStudy 1
+
+Reuse precomputes producer-union and neighbor predictors during the original
+domain setup; the existing setup exchange distributes producer plans. It also
+caches the legacy depth-1 integer predictor so both depths pay setup once.
+Changing topology/corners still invalidates the plans. The study requires ZERO
+plan_setup events during profiled timesteps and rejects a run that rebuilds.
+No predictor coefficients or quantizer arithmetic change. Method A never uses
+recentering. Per-packet adaptive recentering is a separate future experiment;
+these comparisons retain A, B/off and B/on as independent configurations.
+
+Protocol and physical controls
+------------------------------
+Depths 1 and 4, uncompressed FCG, same initial state, dt=0.01, tolerance=1e-7,
+one previous FCG direction, exact corners, destination MPI, no local bypass,
+and compressed packets with lossless packing. Constant splitting is OFF because
+the existing reversible recentering protocol does not support split packets.
+This is not directly comparable to split-ON Table 5. Lower bits can fail;
+failures remain in runs.json and do not yield a compression/runtime claim.
+
+Validation first runs the SAME binary with reuse OFF and ON for both A and B.
+All timestep state snapshots and residual traces must match exactly. B/on then
+must match B/off exactly at the same precision/depth. Trajectory error against
+uncompressed FCG is reported for every physical step; this is not a direct
+solution scientific-acceptance threshold or a transform-only reconstruction error.
+Per-repeat residual histories and iteration counts must match validation.
+A/B and different floating HB depths may follow different evolving trajectories;
+identical mesh/physics/initial states do not imply identical later FCG buffers.
+These live stage timings measure real simulation cost, not a fixed-buffer kernel
+benchmark. Cache and recentering pairs must preserve all inputs/states exactly.
+Timing runs disable potential snapshots and convergence CSV writing. Required
+true-residual checks/stopping remain active. Validation retains complete traces.
+
+Timing and accounting
+---------------------
+Mode 0: no transfer/packet observers, outer setup/step/solve-call clocks only.
+Mode 1: aggregate compression, decompression, MPI and destination-exchange clocks.
+Mode 2: detailed forward/inverse per-level lifting, scalar quantization,
+dequantization, Huffman encode/decode and recenter/uncenter observers as well.
+Mode 0 gives primary runtime evidence. Mode 1/2 runtime changes quantify observer
+overhead. Scalar timers are raw perturbed observations, not unbiased kernel costs.
+Use detailed measurements to locate costs, not to replace mode-0 wall results.
+
+Each process retains cumulative counters but emits per-step and per-solve-call
+differences AFTER all timesteps. Full-step counters cover ALL exchanges; only
+the first TWO FCG calls per timestep retain separate call profiles, bounding
+observer overhead and output size. There is no profiling I/O or new collective in
+an iteration. Rank maxima are taken AFTER summing work on each rank, rather
+than adding maxima of different stages. MPI waiting can overlap other ranks'
+computation; component maxima and nested stages cannot be summed to reconstruct
+the end-to-end wall time. Thread-local stage sums are work, not critical-path
+wall time when multiple worker threads run (the study uses one worker/core).
+
+Setup wall includes local factors, weights, hierarchy, producer-plan exchange
+and coarse factorization. plan_setup isolates hierarchy construction work;
+setup payload logs exclude MPI replication/framing. Initial Huffman training and
+lossless packet-plan discovery remain in the FIRST timestep and are reported as
+startup, not falsely counted as pre-run setup. Later codebook rebuild events,
+if any, remain visible in timestep profiles. The setup is not repeated per RHS.
+
+Step wall includes RHS assembly/restart, FCG, correction assembly and true-residual
+checks. Solve-call wall covers only solver.solve(). Packet exchange time covers
+destination byte exchange separately from compression, packing, unpacking and
+sender parity verification. MPI stage includes instrumented solver collectives
+and caller true-residual collectives. Setup MPI instrumentation is not exhaustive;
+use measured setup WALL to include every setup operation.
+Trajectory wall starts at retained-BDDC setup and stops before profiler-file I/O.
+Application COMPUTE wall starts before mesh/material/matrix assembly (after CLI
+validation) and stops before profiler I/O/final reporting. Model setup is reported
+separately as application_setup_s. The ordinary application wall, including final
+reporting/profiler writes, is retained separately as reported_application_wall_s.
+Launcher wall includes process/container startup and is reported separately.
+
+Packed bytes count routed inter-rank application buffers (same-node included),
+including packet framing. Separate per-step inter_node_packed_bytes excludes
+same-node traffic. Neither includes MPI protocol/NIC headers or all coarse,
+training and residual-collective traffic. These other MPI costs stay in measured
+runtime. Setup bytes are not divided into per-iteration compression savings.
+Per-exchange component averages divide phase/rank/step work by the observed
+destination-exchange count. Raw operation counts (scalar, interface, codec)
+are retained and must not be mistaken for network-message counts.
+
+Repetition and break-even
+-------------------------
+At least 3 independent complete trajectories per tier, with one excluded warmup
+trajectory and randomized configuration order. Every new trajectory pays setup
+once, then reuses it across its physical timesteps. Warmups do not discard
+startup costs within a measured trajectory. Repeat IDs pair raw and compressed
+runs at the same mesh/rank count. Report mean, sample SD and exploratory paired
+95% Student-t intervals; these intervals are not multiplicity-adjusted.
+
+For N steps use the actually observed prefix wall on each rank, including setup:
+  D(N) = max_rank[S_c + sum(t_c[s],s=1..N)]
+       - max_rank[S_r + sum(t_r[s],s=1..N)].
+Negative means compression is faster. The report finds the first prefix whose
+benefit persists through all remaining measured prefixes, for both means and CIs.
+Each prefix uses its ACTUAL FCG counts and evolving RHS; fewer bytes are not
+assumed to imply fewer or faster iterations.
+
+A conditional extrapolation separates first-step startup from post-first-step
+mean cost: D(N) ~= D_startup - N*g, with g=t_raw,steady-t_compressed,steady.
+For g>0, the smallest integer N with D(N)<0 is floor(D_startup/g)+1, at least 1.
+For g<=0 there is no amortization of a positive startup penalty. An unresolved
+steady-gain CI gives no reliable threshold. Extrapolation assumes stationarity
+and must be checked by longer REAL trajectories; cardiac state/FCG counts vary.
+The same reasoning on FCG-call costs uses the measured compressed/raw iteration
+ratio: gain per raw iteration = t_raw/iteration - rho*t_compressed/iteration.
+Changes in linear-algebra work and global residual checks are included in actual
+trajectory prefixes; a bandwidth-only model cannot replace those measurements.
+
+Running on HTC from the EMI repository
+-------------------------------------
+Pilot, 16 bits, 2 nodes / 4 ranks, 10 physical timesteps, all timing tiers:
+  mkdir -p output
+  sbatch tests/submit_emi_hb_time_study.sbatch
+
+Short first gate (3 steps), before allocating a long scaling campaign:
+  EMI_HB_STEPS=3 sbatch tests/submit_emi_hb_time_study.sbatch
+
+All requested precisions (much larger campaign; choose an adequate job limit):
+  EMI_HB_BITS="8 12 16 24 32" sbatch tests/submit_emi_hb_time_study.sbatch
+
+Strong scaling: SAME weak_32_h16 mesh at every rank count.
+  for nodes in 2 4 8; do
+    sbatch --nodes="$nodes" --ntasks="$((2*nodes))" --ntasks-per-node=2 \
+      tests/submit_emi_hb_time_study.sbatch strong weak_32_h16
+  done
+
+Weak scaling: two LEGO cells per MPI rank, fixed h16 mesh resolution; selected
+automatically as weak_8_h16 / weak_16_h16 / weak_32_h16 at 4/8/16 ranks.
+  for nodes in 2 4 8; do
+    sbatch --nodes="$nodes" --ntasks="$((2*nodes))" --ntasks-per-node=2 \
+      tests/submit_emi_hb_time_study.sbatch weak
+  done
+
+Compare actual measured DOFs/rank in the weak family: cell count alone is not
+proof of identical work. Boundaries and the replicated global EMI matrix can
+limit weak scaling independently of compression. The report retains this ratio
+and actual owned local DOFs per rank (min/mean/max), including shared copies,
+to expose ownership imbalance instead of assuming ideal work from cell counts.
+All jobs request the same CPU class, one core per rank and exclusive nodes.
+Record the actual allocation; collect multiple allocations for production claims.
+Use EMI_HB_STEPS=50 or 100 to validate any projected long-trajectory threshold;
+EMI_HB_REPEATS / EMI_HB_DETAIL_REPEATS change repeat counts (minimum 3).
+
+Log: output/emi-hb-time-JOBID.log
+Results: output/emi-hb-time-JOBID/results/
+  combined-comparison.csv           mode-0 runtime with separate mode-1/2 components
+  timestep-comparison.csv            per-physical-step overhead, bytes and FCG counts
+  comparison.csv                    bytes, error, iterations, setup and runtime CIs
+  observed-prefixes.csv             measured prefix differences and intervals
+  components-by-step-level-rank.csv  operation counts and per-exchange timings
+  report.txt                        interpretation and conditional threshold
+  runs.json / steps.json / stages.json / errors.json
+  validate-*/                       full physical state and residual histories
+  t*-r*-*/hb-time-rank-*.csv         rank-local raw measurements
+  t*-r*-*/hb-time-rank-*-stages.csv  step rows (call=0) and first-two-call rows
+
+The analyzer can also read completed per-rank files before the job finishes:
+  python3 tests/summarize_emi_hb_time_study.py output/emi-hb-time-JOBID/results
+Incomplete repeat groups are marked incomplete and cannot produce a recommendation.
+
+Aggregate completed strong/weak results without rerunning the solver:
+  python3 tests/summarize_emi_hb_time_study.py \
+    output/emi-hb-time-JOB1/results output/emi-hb-time-JOB2/results \
+    output/emi-hb-time-JOB3/results --scaling-output output/emi-hb-scaling.csv
+
+Strong efficiency is (T_base/T_p)/(p/p_base). Weak efficiency is T_base/T_p,
+with actual DOFs/rank reported alongside. Compare every compressed configuration
+against RAW at the SAME rank count first. Recommend a configuration only after
+checking exact parity, trajectory accuracy, convergence and resolved application
+as well as retained-BDDC runtime benefit. No runtime benefit is claimed before
+these cluster measurements complete.

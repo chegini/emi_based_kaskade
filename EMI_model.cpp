@@ -125,6 +125,9 @@ struct EmiOptions
   int bddcCompressionThresholdInterfaceTypes = Kaskade::BDDC::EDGE;
   int bddcGraphLifting = 1;
   int bddcGraphLiftingLevels = 1; // 0=recursive HB; 1=legacy single stage
+  int bddcTransformFirstRecentering = 0;
+  int bddcReuseLiftingPlans = 0;
+  int bddcTimeStudy = 0; // Fixed-topology, non-SDC FCG observers only.
   int bddcGraphLiftingAfterQuantization = 0;
   int bddcGraphLiftingBothOrders = 0;
   int bddcExcludeCornersFromCompression = 0;
@@ -1022,6 +1025,9 @@ int main(int argc, char* argv[])
     ("bddcCompressionThresholdInterfaceTypes", options.bddcCompressionThresholdInterfaceTypes,
      options.bddcCompressionThresholdInterfaceTypes,
      "interface type mask for the size threshold: 2=edge, 4=face, 0=all")
+    ("bddcTransformFirstRecentering", options.bddcTransformFirstRecentering, 0, "Opt-in reversible method-B code recentering; exact original reconstruction")
+    ("bddcReuseLiftingPlans", options.bddcReuseLiftingPlans, 0, "Precompute and reuse fixed-topology predictor plans, including single stage")
+    ("bddcTimeStudy", options.bddcTimeStudy, 0, "Fixed-topology FCG setup/step/call timings; no change to stopping")
     ("bddcGraphLiftingLevels", options.bddcGraphLiftingLevels, options.bddcGraphLiftingLevels, "HB prediction stages: 1=legacy, 0=recursive, 2..64=maximum stages")
     ("bddcGraphLifting", options.bddcGraphLifting, options.bddcGraphLifting, "use graph-lifting transform in compressed BDDC transfer: 0=none, 1=graph lifting")
     ("bddcGraphLiftingAfterQuantization", options.bddcGraphLiftingAfterQuantization, options.bddcGraphLiftingAfterQuantization, "apply reversible integer graph lifting after quantization: 0=no, 1=yes")
@@ -1214,6 +1220,20 @@ int main(int argc, char* argv[])
       !EmiBddc::validDirectionalCompressionBits(options.bddcProlongateCompressionBits))
     throw std::runtime_error("Directional compression bits must be -1 (inherit) or 1..32");
 
+  for (int value:{options.bddcTransformFirstRecentering,options.bddcReuseLiftingPlans,options.bddcTimeStudy})
+    if (value!=0 && value!=1) throw std::invalid_argument("HB study switches must be 0 or 1");
+  if (options.bddcTransformFirstRecentering &&
+      (!options.bddcCompression || !options.bddcGraphLifting || options.bddcGraphLiftingAfterQuantization ||
+       options.bddcGraphLiftingBothOrders || !options.bddcHuffman || !options.bddcBitlength ||
+       options.bddcProlongateConstantSplit || options.bddcRestrictGroupSize || options.bddcProlongateGroupSize ||
+       options.bddcRestrictZeroPreserving || options.bddcProlongateZeroPreserving))
+    throw std::invalid_argument("EMI recentering requires unsplit, ungrouped affine method B with bitlength coding");
+  if ((options.bddcTimeStudy || options.bddcReuseLiftingPlans || options.bddcTransformFirstRecentering) &&
+      (!options.bddc || options.sdc || options.direct || !options.bddcFlexibleCg ||
+       !options.bddcUseCg || options.bddcRelativeTolerance<=0 ||
+       options.bddcUncompressedSteps || options.bddcPreconditionerProbe || options.bddcCgDiagnostics ||
+       options.bddcProlongationDiagnostics || options.algebraicAdaptivity))
+    throw std::invalid_argument("Fixed-topology HB study requires non-SDC FCG without raw-prefix switches or probes");
   if (options.bddcGraphLiftingLevels<0 || options.bddcGraphLiftingLevels>64)
     throw std::invalid_argument("bddcGraphLiftingLevels must be 0..64");
   if (options.bddcGraphLiftingBothOrders<0 || options.bddcGraphLiftingBothOrders>1 ||
@@ -1329,6 +1349,7 @@ int main(int argc, char* argv[])
   using LeafView = Grid::LeafGridView;
 
   boost::timer::cpu_timer totalTimer;
+  if (options.bddcTimeStudy) EmiBddc::TimeStudy::beginApplication();
   EmiBddc::PhaseProfile phaseProfile(options.profile != 0,options.mpi != 0);
   using Phase = EmiBddc::EmiPhase;
   phaseProfile.next(Phase::threadPool);

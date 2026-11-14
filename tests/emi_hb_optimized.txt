@@ -1,0 +1,106 @@
+Fixed-topology EMI lifting implementation performance comparison
+==============================================================
+
+Purpose and controls
+--------------------
+This experiment keeps methods A (quantize first), B (transform first), and
+B+recenter supported. No prediction weights, graph edges, quantization grids,
+recenter mapping, packet layout, or solver recurrence is changed. All new
+optimizations are opt-in. KASKADE_LIFTING_OPTIMIZATION defaults to 0.
+
+Options are a process-wide bit mask, read once per MPI process:
+  0 original implementation
+  1 cached integer plans consumed by const reference
+  2 identical floating owner-group subplans memoized during setup
+  4 redundant fill-in tree insertions skipped with a bounded bitmap
+  5 reference + fill acceleration
+  7 all three
+
+References are synchronous and never survive topology/corner/weight/depth
+invalidation or setup preparation. The original by-value accessor remains.
+All ranks must use the same mask. Use --bddcReuseLiftingPlans 1, as the harness
+does, to prewarm both single-stage and multilevel plans once on fixed topology.
+Subgroup scratch is freed after prewarming composite plans. The fill bitmap
+uses at most 64 MiB per graph and falls back on oversized graphs/allocation
+failure. Account for concurrent setup workers when budgeting this scratch.
+The optimization does not remove mathematical fill-in or the storage needed
+for the original dense predictors. Large-interface fill can still be costly.
+
+KASKADE_TRANSFER_TIMING=1 adds a plan_copy stage measuring real legacy copies.
+KASKADE_LIFTING_PROFILE_PREFIX=/writable/path/prefix writes setup graph counts,
+fill/insert counters, predictor storage estimates, and whole-process RSS high
+water marks to prefix-host-HOST-rank-RANK-pid-PID.csv. A row's RSS may be inherited from earlier
+levels. It is not an isolated per-level peak. Setup profile I/O perturbs setup;
+use it only in separate diagnostic runs, never primary wall measurements.
+The --hierarchy-profile harness mode runs validation only and skips performance
+reports. A/B have different predictors; identical reconstructed values are
+required across optimization masks, not across the two numerical methods.
+
+Validation and analysis
+-----------------------
+The same executable runs all masks; baseline 0 is validated first. Every
+optimized mask must match its baseline at the same method/bits/depth exactly:
+all timestep states, complete residual CSV traces, iterations and packed byte
+totals. The existing reuse on/off and B recentering parity checks remain.
+Measured repeats must retain the validation iteration/residual trajectory.
+All masks/configurations are shuffled together within each repeat and timing
+tier. At least three repeats plus one excluded warmup are required. Primary
+mode 0 provides speed evidence; 1/2 provide aggregate/detailed kernel observers.
+The recorder includes per-process peak RSS at the end of the trajectory,
+including one-time setup and any earlier application high-water allocation.
+Report rank maximum, not sum of maxima. Missing legacy RSS data are unavailable.
+
+Output includes the existing combined-comparison.csv, per-step/level/phase
+components, errors, residual histories, iteration totals and raw break-even
+models. optimization-comparison.csv adds paired original-versus-optimized
+setup/application/trajectory/RSS differences, sample SD and exploratory 95%
+Student-t intervals. Negative time differences favor the optimization. These
+intervals are not corrected for multiple comparisons. Do not add nested codec
+stages or stage rank maxima to MPI time. MPI waits overlap other-rank work.
+
+Pilot from EMI repository on HTC (outputs on scratch to avoid /data quota)
+--------------------------------------------------------------------
+  hb_home="/scratch/htc/$USER/emi-hb"
+  mkdir -p "$hb_home"
+  EMI_HB_STEPS=3 EMI_HB_OPTIMIZATIONS="0 1 4 5" \
+    sbatch --nodes=2 --ntasks=4 --ntasks-per-node=2 \
+    --output="$hb_home/emi-hb-opt-%j.log" \
+    --error="$hb_home/emi-hb-opt-%j.log" tests/submit_emi_hb_optimized.sbatch
+
+Scratch is explicitly bound into each build/test/application container. Keep
+important final results backed up elsewhere; scratch is temporary storage.
+The default is 16 bits, depths 1 and 4, tiers 0/1, three repetitions and one
+warmup. To isolate subgroup caching as well, set EMI_HB_OPTIMIZATIONS="0 1 2 4 5 7".
+A native 180-graph/depth regression checks all 8 masks before a live run starts.
+Source hashes are checked before and after the campaign. Do not edit code while
+it runs. A fresh executable is built outside the production directory.
+
+Separate setup graph diagnosis (not a runtime comparison):
+  EMI_HB_PROFILE_SETUP=1 EMI_HB_OPTIMIZATIONS="0 7" \
+    sbatch --output="$hb_home/emi-hb-opt-%j.log" \
+    --error="$hb_home/emi-hb-opt-%j.log" tests/submit_emi_hb_optimized.sbatch
+
+Once the pilot validates, use one large fixed mesh for strong scaling:
+  for nodes in 2 4 8; do
+    EMI_HB_OPTIMIZATIONS="0 5 7" \
+      sbatch --nodes="$nodes" --ntasks="$((2*nodes))" --ntasks-per-node=2 \
+      --output="$hb_home/emi-hb-opt-%j.log" \
+      --error="$hb_home/emi-hb-opt-%j.log" \
+      tests/submit_emi_hb_optimized.sbatch strong weak_32_h16
+  done
+
+Weak scaling changes the mesh as weak_<2*ranks>_h16, two cells per rank:
+  for nodes in 2 4 8; do
+    EMI_HB_OPTIMIZATIONS="0 5 7" \
+      sbatch --nodes="$nodes" --ntasks="$((2*nodes))" --ntasks-per-node=2 \
+      --output="$hb_home/emi-hb-opt-%j.log" \
+      --error="$hb_home/emi-hb-opt-%j.log" \
+      tests/submit_emi_hb_optimized.sbatch weak
+  done
+
+Verify actual DOFs/rank and memory fit; cell counts alone are not equal work.
+After runtime/correctness gates, EMI_HB_BITS="8 12 16 24 32" adds precision cases.
+EMI_HB_TIERS="0 1 2" includes detailed lifting/quantization/Huffman/recenter
+observers. These are larger campaigns; choose resources/time limits accordingly.
+The original study's mesh, Euler trajectory and break-even limitations apply;
+see emi_hb_time_study.txt. No live speedup is assumed from native microbenchmarks.
