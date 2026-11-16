@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 from run_emi_histogram_start_check import arguments, command, collect_bddc_run, snapshots_equal, summarize_histograms
-from test_emi_compression_report import extract
+from test_emi_compression_report import extract, kaskade_include
 from test_emi_scaling_smoke import log as solver_log
 
 
@@ -47,8 +47,8 @@ class HistogramScheduleTests(unittest.TestCase):
         guard_end = source.index('  OptionalMpiSession mpiSession', guard_start)
         flags = dict(re.findall(r'\("(\w+)",\s*options\.(\w+)\s*,', source))
         string_fields = set(re.findall(r'std::string\s+(\w+)', option_struct))
-        preamble = ('#include <cmath>\n#include <iostream>\n#include <string>\n'
-                    '#include "EMI_bddc_precision.hh"\n#include "EMI_bddc_step_schedule.hh"\n'+
+        preamble = ('#include <cmath>\n#include <iostream>\n#include <string>\n#include "EMI_partitioning.hh"\n'
+                    '#include "EMI_bddc_precision.hh"\n#include "EMI_bddc_packet_packing.hh"\n#include "EMI_bddc_step_schedule.hh"\n'+
                     option_struct+'\nvoid validate(EmiOptions& options) {\n'+
                     source[guard_start:guard_end]+
                     'EmiBddc::validateStepSchedule(options, options.maximumNumberOfTimeSteps);\n}\n')
@@ -84,7 +84,7 @@ class HistogramScheduleTests(unittest.TestCase):
             cpp, exe = Path(tmp)/'guards.cpp', Path(tmp)/'guards'
             cpp.write_text(preamble+'\nint main() {\n'+'\n'.join(checks)+'\n}\n')
             subprocess.run(shlex.split(os.environ.get('CXX','c++'))+
-                           ['-std=c++20','-I',str(repo),str(cpp),'-o',str(exe)],check=True)
+                           ['-std=c++20','-I',str(repo),'-I',kaskade_include(repo),str(cpp),'-o',str(exe)],check=True)
             subprocess.run([str(exe)],check=True)
 
     def test_command_modes(self):

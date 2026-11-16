@@ -1,0 +1,115 @@
+EMI Pepe message entropy: five precisions, eight nodes
+====================================================
+
+The summarizer uses only Python core standard-library modules. SQLite is not
+required on the host or in the container.
+
+Optional one-node preflight before the five large allocations:
+  EMI_HB_PREFLIGHT_ONLY=1 EMI_HB_BITS=16 \
+    sbatch --nodes=1 --ntasks=1 --ntasks-per-node=1 \
+    --output="/scratch/htc/$USER/emi-hb/emi-hb-entropy-%j.log" \
+    --error="/scratch/htc/$USER/emi-hb/emi-hb-entropy-%j.log" \
+    tests/submit_emi_hb_entropy.sbatch pilot pepe
+It runs native tests, original/observer packet parity and the full EMI build,
+then exits with PREFLIGHT PASS. It does not run the expensive simulations.
+
+Submit the full campaigns from the EMI repository root:
+  mkdir -p /scratch/htc/$USER/emi-hb
+  for hb_bits in 8 12 16 24 32; do
+    EMI_HB_BITS="$hb_bits" EMI_HB_STEPS=3 \
+      sbatch --nodes=8 --ntasks=16 --ntasks-per-node=2 \
+      --output="/scratch/htc/$USER/emi-hb/emi-hb-entropy-%j.log" \
+      --error="/scratch/htc/$USER/emi-hb/emi-hb-entropy-%j.log" \
+      tests/submit_emi_hb_entropy.sbatch pilot pepe
+  done
+
+The existing 6184443--6184447 submissions do not enable this observer.
+Cancel only those jobs you intend to replace. This script does not cancel jobs.
+The two-node 8/12-bit jobs are independent.
+
+Study:
+- Eight nodes, sixteen MPI ranks, two ranks per node.
+- Pepe, three timesteps, fixed topology, cached optimized hierarchy.
+- Depth caps 1,2,3,4 apply to restriction AND prolongation.
+- A with prolongation splitting OFF/ON. A has no recentering switch.
+- B with all four splitting/recentering combinations.
+- Original raw baseline; three timing repeats and one warmup per timing mode.
+- Existing solver/quantization/packing settings are preserved.
+- Entropy is collected in one additional deterministic diagnostic trajectory
+  per complete, exact-validated configuration. No entropy timings are used.
+- Low-bit convergence failures stay failures. Entropy for incomplete/invalid
+  trajectories is not reported as a successful experiment.
+
+Primary outputs, replacing JOBID with each new numeric job ID:
+  /scratch/htc/$USER/emi-hb/emi-hb-entropy-JOBID.log
+  /scratch/htc/$USER/emi-hb/emi-hb-entropy-JOBID/results/message-entropy-summary.csv
+  /scratch/htc/$USER/emi-hb/emi-hb-entropy-JOBID/results/entropy-comparison.csv
+  /scratch/htc/$USER/emi-hb/emi-hb-entropy-JOBID/results/status.json
+
+Original repeated performance outputs, entropy DISABLED:
+  /scratch/htc/$USER/emi-hb/emi-hb-depth-split-JOBID/results/
+including depth-split-report.txt and phase-comparison.csv.
+
+Definitions for Martin's question:
+H0 = -sum_s p_s log2(p_s).
+
+For coefficient packets, the primary statistic is
+  sum_packets N_packet * H0(packet) / sum_packets N_packet.
+This weights by actual coefficient population, not by number of packets.
+The output contains separate restriction/prolongation and inter-rank/inter-node
+rows. Same-rank coefficient observations are retained separately in the detailed
+table and excluded from primary sent-message summaries.
+
+quantized_input_H0_bits_per_coefficient:
+  A: affine quantized nodal integers before integer lifting.
+  B: affine quantized floating-lifted coefficients before reversible recentering.
+
+encoder_H0_bits_per_coefficient:
+  Actual transmitted integer representation before the bit-length/tail split:
+  A integer lifting/zigzag; B original or recentered quantizer codes.
+  This is the main coefficient statistic to compare A versus B.
+  Exact corners, constant-split prefixes, metadata and synthetic training seeds
+  are excluded from both coefficient populations.
+
+huffman_length_H0_bits_per_length_symbol:
+  Empirical H0 of actual bit-length symbols handed to Huffman encoding.
+  Raw tail bits are NOT represented by this entropy alone.
+
+serialized_byte_H0_bits_per_byte:
+  H0 of the actual outgoing aggregated R/P MPI data-message bytes, including
+  framing, quantizer metadata, split constants and exact corners.
+  This is a different alphabet and unit from coefficient entropy.
+  It excludes codebook/hierarchy setup collectives, coarse-solver communication,
+  and MPI implementation/network headers.
+
+effective_routed_bits_per_quantized_coefficient:
+  8 * actual routed bytes / quantized coefficient count.
+  Includes metadata/corners/constants, so it is not a pure coefficient code length.
+
+Detailed entropy-comparison.csv additionally contains pooled H0 per
+phase/stage/route/encoding stratum, distinct symbols and sample/message counts.
+Pooled H0 differs from mean per-message H0 because packet distributions differ.
+It must not be reconstructed by averaging stratum pooled entropies.
+
+Reversible scalar recentering relabels symbols bijectively per packet:
+per-message coefficient H0 is unchanged. Pooled H0 can change when origins vary.
+Encoded sizes can improve because the bit-length/tail representation changes.
+Neither empirical H0 nor smaller byte counts alone establish a runtime speedup.
+
+Correctness and overhead:
+- Original production Kaskade headers and existing scripts are not edited.
+- New helper builds a separate symlink overlay on scratch with observer hooks.
+- Collector uses uint32 directly, including 32-bit precision, with no signed
+  reinterpretation and no legacy 24-bit histogram restriction.
+- It counts real messages, not synthetic seeds used to initialize codebooks.
+- Per-rank frequency maps spill at 500,000 distinct keys; sorted binary chunks
+  and a bounded sorted binary merge limit memory (no SQLite dependency). No per-interface histogram CSV flood.
+- Preflight compiles actual production transfer templates in the cluster
+  container and compares original versus observed packet and state bytes.
+- Every live entropy trajectory must match its original validation trajectory:
+  exact state snapshots, complete residual trace files, iteration counts and
+  actual routed byte counts. Recorded byte counts must match observer totals.
+- Native production gates and the complete EMI executable require the cluster
+  Dune/MPI container; local native counter/configuration tests are not a substitute.
+- No algorithm, quantization accuracy, normal production defaults or timing
+  repeats are changed by this diagnostic implementation.

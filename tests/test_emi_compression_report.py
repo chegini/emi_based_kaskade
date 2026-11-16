@@ -18,6 +18,15 @@ def extract(source, anchor):
     return source[start:end]
 
 
+def kaskade_include(repo):
+    """Locate actual lightweight ownership declarations for option fixtures."""
+    roots=([Path(os.environ['KASKADE7'])] if os.environ.get('KASKADE7') else [])
+    roots += [Path('/kaskade7')]+[p/'kaskade7_new' for p in repo.parents]
+    for root in roots:
+        if (root/'mg/bddcMpi.hh').is_file():return str(root)
+    raise RuntimeError('Set KASKADE7 to the Kaskade source tree for option tests')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path,

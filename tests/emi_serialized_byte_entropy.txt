@@ -1,0 +1,100 @@
+SERIALIZED MPI SEND-BUFFER BYTE ENTROPY
+
+Enable: --bddcSerializedByteEntropy 1  (default 0).
+The partition smoke/pilot drivers accept --byte-entropy. The existing SLURM
+script forwards that option when EMI_MPI_BYTE_ENTROPY=1. Both smoke (B+R) and
+smoke-raw (uncompressed FCG) support it. These options do not submit any jobs.
+
+Definition
+For each phase, count occurrences c_b of each byte b=0..255 in the actual final
+outgoing destination buffers. Sum counts across all messages and all ranks.
+N=sum_b c_b, p_b=c_b/N, H=-sum_{b:c_b>0} p_b log2(p_b).
+H is empirical zero-order Shannon entropy in bits/byte, between 0 and 8.
+This is entropy of the pooled byte distribution, not an average of per-message
+or rank-local entropies. It is not compressed bytes, a compression ratio, a
+measure of convergence, or a proof of an attainable practical compression rate.
+
+Observation point and scope
+The hook is after serialization, optional lossless packing, endpoint-plan reuse
+and sender parity verification, immediately before the existing destination
+exchange. It reads the same complete buffers supplied to MPI_Alltoallv.
+It includes encoded/raw payload, record headers, quantization metadata, constant
+prefixes, exact corner values, dictionaries, plan-refresh information and padding
+when these bytes are present in the final buffer. Nothing is decoded or stripped.
+
+It excludes direct same-rank copies, MPI implementation/protocol headers, count
+exchanges, codebook/setup/coarse/scalar collectives and observer-report traffic.
+This is routed restriction/prolongation application-buffer entropy, not entropy
+of every MPI operation or NIC wire traffic. A message is one nonempty destination
+buffer per phase application. Counts are sender-only, without duplicate receives.
+
+Phases: restriction, prolongation.
+Scopes: same_node, inter_node, inter_rank.
+inter_rank = same_node + inter_node for byte counts and message counts. Do not
+sum all three scopes. Entropies themselves are not additive: compute the combined
+entropy from combined counts. Physical routes use discovered shared-memory groups.
+
+Outputs, written by rank 0 under the run's output directory
+  serialized-message-byte-entropy.csv
+    Six rows: two phases x three scopes. Columns:
+    phase, scope, run_status, total_message_bytes, message_count,
+    mean_message_bytes, serialized_byte_entropy_bits_per_byte,
+    entropy_aggregation, metric_status.
+    entropy_aggregation = pooled_all_messages_all_ranks.
+    Empty streams have bytes=0, messages=0, metric_status=EMPTY and blank entropy
+    and mean size. A constant nonempty stream legitimately has entropy 0.
+  serialized-message-byte-counts.csv
+    Reproducible counts: phase, scope, byte_value, count. 256 bins per summary.
+  Log prefix: Serialized MPI send-buffer entropy:
+    Explicit unit bits/byte, pooled across messages and ranks.
+
+The smoke comparison.csv also receives phase/scope byte-entropy columns when
+enabled. Both drivers verify exported byte/message totals against the existing
+per-rank transport observations, so the sampled population is checked explicitly.
+No prior measurement files are overwritten by the observer.
+
+Distinction from existing Huffman training output
+entropy_bits_per_symbol ... (n) refers to bit-length training symbols, and (s)
+to coefficient symbols. Neither represents the final serialized message bytes.
+Those older logs and their behavior are unchanged. The new entropy is reported
+separately with its unit, scope, population size and pooled aggregation definition.
+
+Cost and numerical behavior
+The enabled observer allocates 1028 uint64 counters, 8224 bytes (~8 KiB) per rank.
+Inside exchanges it performs one byte scan and increments counters only; no
+logarithms, new MPI calls, per-message allocation or file writes. Its counter
+storage persists across retained timesteps and fixed-RHS restarts, independently
+of the per-step transport counters. Default OFF allocates no histogram storage.
+After the retained compute/profile snapshot, one histogram MPI_Reduce pools
+counts and one status broadcast propagates root I/O errors. Entropy/logarithms
+and two bounded CSV writes happen there, outside exchange loops. Controlled
+failed trajectories are labeled FAILED_PARTIAL; they are not convergence results.
+The scan adds diagnostic work proportional to sent bytes. Compare performance
+with observer-OFF runs; it is lightweight storage, not zero computational cost.
+No transform, quantizer, coding/packing choice, packet, solver scalar, tolerance,
+ownership map or reconstructed value is changed by the observer.
+
+Supported path
+Non-SDC destination-routed MPI BDDC, compressed or uncompressed. The initial
+version rejects direct/audit/probe and raw-prefix phase-switch configurations;
+these checks prevent ambiguous lifetime/overwrite behavior across solver rebuilds.
+Full CG diagnostics stay disabled as required by the fixed-topology HB guards.
+
+Validation
+  tests/test_emi_serialized_byte_entropy.py compiles the production observer and
+    independently checks every exported bin and Shannon value in Python. Cases
+    include disabled/empty, constant H=0, uniform H=8, and pooled H=1 from two
+    individually constant streams, whole-record bytes and unchanged input data.
+  tests/test_emi_partition_mpi.py compiles actual production R/P exchange methods.
+    A test-only MPI_Alltoallv wrapper independently records the final send bytes.
+    Histograms and global exports must match those counts exactly for raw and
+    packed paths, multiple maps, plan reuse, three exchanges and idle ranks.
+    Observer-OFF/ON runs must preserve actual serialized byte/order hashes and
+    decoded payload signatures. Pre-change source signatures are a control.
+  tests/test_emi_partition_options.py validates the real EMI application guards,
+    including this switch for raw and compressed configurations and invalid values.
+  The SLURM preflight includes the new native/MPI checks before any trajectories.
+
+No new cluster simulations or jobs were launched during implementation. Existing
+jobs 6192407/6192420 do not contain this measurement. Rebuild and explicitly enable
+the observer to obtain new Pepe entropy values; old byte totals cannot recover H.

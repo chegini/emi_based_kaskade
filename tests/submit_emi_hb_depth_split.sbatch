@@ -76,7 +76,7 @@ srun --mpi=pmix_v5 --nodes="$SLURM_JOB_NUM_NODES" --ntasks="$SLURM_NTASKS" --nta
 srun --mpi=none --nodes="$SLURM_JOB_NUM_NODES" --ntasks="$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 \
   /bin/bash -c 'hostname; lscpu' > "$emi_root/cpu-inventory.log"
 sha256sum --quiet -c "$emi_root/source-sha256.txt"
-emi_bits=(16)
+read -r -a emi_bits <<< "${EMI_HB_BITS:-16}"
 read -r -a emi_tiers <<< "${EMI_HB_TIERS:-0 1}"
 
 

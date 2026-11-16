@@ -1,0 +1,233 @@
+CONTROLLED EMI OWNERSHIP: IMPLEMENTATION AND PRE-EXECUTION REVIEW
+Date: 2026-11-15
+Status: implemented; local correctness checks; cluster execution NOT authorized or performed.
+
+Runtime options
+  --bddcPartitionMode baseline|coupled|separated (also P2|P1|P3)
+  --bddcPartitionReport 0|1
+  --bddcPartitionBalanceFactor 1.0
+  --bddcIntracellularNodes 0,1,2,3
+  --bddcExtracellularNodes 4,5,6,7
+  --bddcPartitionMap path/to/owners.csv
+
+P2/baseline remains default, with report=0 and no explicit map. The legacy cyclic
+owner expression is retained. No new topology discovery, metadata export, or
+partition-step recorder is activated on this default path. Destination routing
+and all original numerical/compression switches retain their existing defaults.
+Controlled placement/reporting is restricted to non-SDC MPI BDDC CG/FCG with
+destination routing, masterWorker=0, and no direct/audit/probe. It does not
+introduce another solver or alter quantizer, transform, predictor, or packet code.
+
+Ownership contract
+EMI_partitioning.hh builds one immutable shared subdomain-to-world-rank vector
+after full material/overlap DOF metadata exists, BEFORE distributed material and
+interface assembly. It is passed through material/interface layouts, owned local
+subdomain construction, BDDC domain setup, averaging-weight exchange, coarse
+assembly and destination routing. Material IDs, local DOF indices, interface
+groups and coarse constraints are not repartitioned. The pointer remains in the
+copied options for all retained timesteps; no per-step remapping occurs.
+Every map entry is checked for length, class, valid rank and collective agreement.
+Map disagreement/error is agreed collectively before owner-specific assembly.
+Explicit owner maps cannot be replaced through the old post-setup enable setter.
+Histogram/entropy metadata also uses actual ownership rather than subdomain%rank.
+
+P1/coupled
+Uses actual algebraic shared-DOF incidence, and the actual I/E material lists;
+does not infer anatomical myocytes from tags. Full overlapped local DOFs provide
+a setup-time computational-weight proxy. Deterministic strongest-I/E bundling,
+least-loaded node/rank assignment and bounded owner-swap refinement minimize the
+lexicographic (inter-node I/E interface DOFs, all inter-node interface DOFs) cost.
+Accepted candidates keep all ranks active and do not exceed baseline maximum
+DOF load per rank or per node times bddcPartitionBalanceFactor (default 1).
+The original cyclic map remains a feasible fallback. This is a heuristic, not a
+global optimum. P1 can equal P2 when baseline already places strong pairs well.
+DOF balance is not a guarantee of equal factorization time or matrix sparsity.
+
+P3/separated
+Uses disjoint I/E physical shared-memory node groups, with logical group indices
+ordered by actual minimum world-rank leaders. It does not assume adjacent ranks
+share a node. Configured pools must be nonempty, disjoint and cover all groups.
+One empty pool selects the complement. If both are empty, a deterministic
+DOF-weighted split selects pools compatible with region/rank counts. Assignment
+is least-loaded node then rank, with unused eligible ranks filled first.
+At least two physical node groups are required. More eligible ranks than material
+regions is rejected. Optional owner CSVs must respect pool boundaries, cover all
+subdomains and keep every allocated rank active; P1 CSVs must also meet its cut/
+load bounds. CSV header: subdomain_id,material_tag,owner_rank (one row per region).
+P2 rejects a CSV that changes its cyclic mapping.
+
+Source changes
+Kaskade:
+  mg/bddcMpi.hh: immutable optional ownership map, unchanged cyclic fallback.
+  mg/bddc.hh, mg/bddc.hpp: constructor plumbing; actual-owner setup/histograms;
+    optional transport snapshots and nested R/P/coarse timers.
+  mg/bddcMpiRouting.hh: sender-counted phase/scope buckets and local elapsed
+    timers around the existing count, validation and payload collectives.
+  mg/bddcSpaceTransfer.hh: read-only raw scalar interface byte-size query.
+  mg/bddcTransferTiming.hh: append-only diagnostic stage names.
+  RELEASENOTES.md: opt-in feature and measurement semantics.
+EMI:
+  EMI_model.cpp: options/guards; pre-assembly map; assembly layout forwarding.
+  EMI_bddc.hh: same map for owned storage and solver; retained step recorder;
+    actual coarse-row fingerprint; completed/partial failure export.
+  EMI_bddc_time_study.hh: read-only accessor for existing solve-call time.
+  EMI_partitioning.hh, EMI_partition_report.hh: planner and buffered reports.
+  tests/emi_message_entropy.hh, prepare_emi_entropy_overlay.py: diagnostic
+    owner-aware entropy scope classification (observer remains optional).
+  New policy, runtime-MPI, owner-only production routing, report and pilot tests.
+  Existing options/FCG test fixtures include their real new dependencies.
+No Poisson source modification. No changes to predictor/quantizer/entropy coder,
+constant splitting, recentering arithmetic, tolerances or physical parameters.
+Pre-existing working-tree changes were preserved. No commit or push performed.
+
+Instrumentation and definitions
+partition-ranks.csv: actual rank, shared group, leader, hostname, CPU affinity.
+partition-mpi.csv: MPI library version.
+partition-ownership.csv: region/tag, class, owner, local DOFs, matrix nonzeros.
+partition-interfaces.csv: undirected algebraic edges, DOFs, owners, node route.
+partition-work.csv: rank/node DOF, nnz and region-count loads (work proxies).
+partition-problem.csv: metadata/operator/local-matrix/weight fingerprints and
+  root-local planning time. Fingerprints are noncryptographic diagnostics.
+partition-coarse.csv: actual coarse incidence and local constraint-row fingerprint.
+partition-transport-rank-N.csv: per-step R/P, same_node/inter_node/inter_rank
+  sent bytes, message count, mean/max message size, raw reference and prepacking.
+partition-timing-rank-N.csv: codec, packing/serialization, deserialization,
+  existing mixed payload/count/layout-validation collectives; nested phase wall.
+partition-steps-rank-N.csv: solve calls, accepted updates, status, FCG call time,
+  local step wall and coarse time. Controlled failures retain partial records.
+Existing hb-time profiles retain setup, trajectory/application timing, per-level
+diagnostic kernels, and peak process RSS. Residual/state validation files remain.
+The fixed-topology HB guard prohibits the heavyweight bddcCgDiagnostics
+observer, so it remains OFF in these validation/timing runs. True-residual
+histories and state snapshots are retained; no full rho/conjugacy CSV is
+claimed. A negative rho alone does not establish loss of definiteness of
+the original EMI matrix.
+
+Only directed sender-counted nonempty MPI peer buffers are counted as messages.
+Same-rank transfers are not MPI messages. Inter-rank = inter-node + same-node;
+never sum all three scopes. These are routed R/P application-buffer bytes,
+including their serialization/packet headers, dictionaries and padding. They are
+not NIC wire bytes. Coarse/setup/codebook/scalar-collective payloads and MPI's
+internal protocol headers are not included in these byte buckets.
+raw_reference_bytes is counterfactual all-raw scalar serialization (+ legacy
+record framing) for THE SAME active endpoints/applications. prepacking_bytes is
+the actual codec representation before batch compaction. A separate observed
+raw trajectory with the SAME ownership supplies end-to-end savings/speedup.
+Unknown raw references and undefined means/maxima are blank, not zero.
+Per-step maxima are interval maxima, not lifetime maxima carried forward.
+
+MPI_Alltoallv includes same-node and inter-node buffers in one collective.
+Only its TOTAL local elapsed duration is reported. No network-only elapsed time
+or bandwidth is inferred. Count exchanges, validation reductions and total
+observed phase MPI time are separate nested diagnostics. Parent phase, codec,
+MPI and child kernel counters overlap; never add them as independent costs.
+Accumulate each rank's samples before computing a rank maximum; do not sum
+separate maxima. No new synchronization is added per exchange for reporting.
+Timers/counters perturb kernels; primary runtime uses timing tier 0, fine codec
+measurements tier 2 in separate repeated trajectories. The new opt-in transport
+observer still times serialization/collectives in both tiers. Setup metadata
+fingerprinting/export is one-time and included in all pilot setup/application
+walls; final profiler export is after the retained compute timer.
+The current transport is blocking; no new nonblocking overlap is claimed.
+
+Correctness evidence and limits
+Local four-rank actual production constructor/averaging/R/P extraction tests use
+owner-only storage (non-owned access throws), cyclic/shifted/reversed/all-on-one
+maps, raw and losslessly packed records, and three repeated exchanges. P2
+payload signatures and logical counts match a saved original implementation.
+A small MPI SPD assembly/solution/true-residual test exercises actual collective
+map preparation and metadata exporters across repeated steps. On this one-host
+machine P3 is correctly rejected; synthetic nonconsecutive node-group policy
+tests exercise P3 positive assignment. No real two-host P3 EMI trajectory has
+been run. Full Linux/Dune EMI compilation and physical multi-node validation
+remain a cluster preflight, explicitly separate from local correctness results.
+The full production transfer template passed 200 fixed-input cases (5 precisions,
+4 depths, 2 split modes, 5 input kinds), each with recentering off/on, checking
+exact uint32 codes, reconstructed states, grids, corners/constants and packing.
+The optional entropy observer preserved packet/state bytes in 240 cases
+(including Method A depth 1-4). These local codec builds substitute only minimal
+Dune vector STORAGE headers; no quantizer/codec mathematics is substituted.
+They establish neither EMI convergence nor performance on new ownership maps.
+
+Pilot matrix (prepared, not executed)
+Same Pepe mesh; 8 nodes / 16 ranks / 2 ranks per node; 3 timesteps; FCG;
+true relative tolerance 1e-7; fixed affinity and existing OpenMPI ob1,
+self,vader,tcp stack. Hold geometry, materials, initial state, solver settings,
+overlap and coarse constraints fixed. Compression bypass disabled.
+          Raw    A(16,d1,split ON)    B(16,d1,split ON)    B+R(16,d1,split ON)
+  P2       1             1                   1                      1
+  P1       1             1                   1                      1
+  P3       1             1                   1                      1
+A uses previously validated optimization mask 5; B/B+R mask 4. These masks do not
+vary between placement policies. Raw has no lifting/splitting/quantization.
+No depth/precision expansion or 363-configuration experiment is implemented here.
+P3 defaults to DOF-weighted pools; explicit pool environment variables below can
+fix a requested split. Actual mapping and imbalance must be reviewed, not assumed.
+
+Execution gates and retained outputs
+The driver requires an existing exact 8-node/16-rank SLURM allocation. It never
+submits a job. --plan-only prints the 12 cases without launching anything.
+First validate all three raw trajectories and compare their states with P2 raw.
+Then validate A/B/B+R against each policy's raw, and B+R byte-exact state/residual
+history parity with that policy's B. Initial states must match exactly.
+All successful steps must satisfy the existing true-residual convergence checks.
+Map/CPU placement, global/local operators, weights and actual coarse rows must
+have invariant fingerprints. A mismatch STOPS validation for inspection; a hash
+difference can reflect roundoff/reduction order and alone does not prove that the
+mathematical problem changed. No unapproved universal state-error threshold is
+invented; state-error tables are retained for scientific review.
+Routed raw-reference bytes and actual aggregated peer counts reconcile with the
+exported graph, and new sent-byte totals reconcile with existing packet counters.
+Phase application counts are measured, checked against accepted updates for this
+one-pass FCG pilot, and retained explicitly for all normalization.
+Failed/skipped rows stay explicit; a failed B validation causes B+R SKIPPED,
+not an independently observed B+R convergence failure. Failure records and logs
+are retained. No failed partial trajectory is divided by three.
+Timing: one warmup + three repeats per configuration, in each of tiers 0 and 2.
+Thus 12 validation + 48 primary + 48 diagnostic = 108 planned trajectories.
+Randomized balanced order per repetition. Matched raw comparisons pair within
+policy and repetition. Means/sample SD, actual per-step counts, phase/scoped
+bytes/application, message sizes, timing, solution errors and failed records are
+written; missing values remain blank. Do not infer network time from byte entropy.
+Retained tables: runs.json, steps.csv, transport.csv, timing.csv, phase-runs.csv,
+phase-comparison.csv, comparison.csv, paired-comparison.csv,
+validation-state-errors.csv, manifest.json, report.txt; each run's full logs,
+hardware/placement data, fingerprints and existing profiles stay available.
+
+Resource estimate (not a measured P3 runtime)
+Historical Pepe launch times suggest roughly 3-4 hours for 108 trajectories,
+plus full build/preflight and placement-dependent variability. Reserve 6 hours
+on 8 nodes (48 allocated node-hours upper reservation), 16 ranks, 64 GiB/node.
+This is not a guarantee; P3 imbalance or convergence changes can extend runtime.
+No full performance or scaling conclusion is possible before these measurements.
+
+Exact CLUSTER commands, FOR REVIEW ONLY; do not execute without separate approval
+Run from the EMI repository root on htc-login:
+  mkdir -p /scratch/htc/$USER/emi-hb
+Small full-build/multi-node correctness preflight (no EMI trajectory):
+  sbatch --nodes=2 --ntasks=4 --ntasks-per-node=2 --time=01:00:00 \
+    --output="/scratch/htc/$USER/emi-hb/emi-partition-preflight-%j.log" \
+    --error="/scratch/htc/$USER/emi-hb/emi-partition-preflight-%j.log" \
+    tests/submit_emi_partition_pilot.sbatch preflight
+After reviewing and approving the preflight, the 12-case pilot:
+  sbatch --nodes=8 --ntasks=16 --ntasks-per-node=2 --time=06:00:00 \
+    --output="/scratch/htc/$USER/emi-hb/emi-partition-pilot-%j.log" \
+    --error="/scratch/htc/$USER/emi-hb/emi-partition-pilot-%j.log" \
+    tests/submit_emi_partition_pilot.sbatch pilot
+Optional explicit 4+4 P3 pools: prefix the pilot submission with
+  EMI_PARTITION_INTRA_NODES=0,1,2,3 EMI_PARTITION_EXTRA_NODES=4,5,6,7
+These are logical group indices, not hostname numbers; actual hosts are exported.
+Preflight defaults to a fresh isolated build and tiny MPI/codec tests only.
+Pilot rebuilds and reruns its gates before any trajectories. Results live below
+/scratch/htc/$USER/emi-hb/emi-partition-{preflight|pilot}-JOBID.
+
+Scientific interpretation
+Topology-aware ownership may alter communication and workload simultaneously.
+P1 may match an already well-colocated P2. Strict P3 forces all I/E edges across
+nodes but can increase DOF/nnz imbalance and change summation order.
+The prior 28.47% value is only a graph-derived lower-bound estimate for logical
+inter-node R/P traffic on the archived topology, not an observed byte/runtime
+change for this implementation and not a compression speedup.
+Only matched raw/compressed solver measurements can answer whether bytes saved
+offset codec work and any extra accepted FCG iterations. Three timesteps cannot
+establish long-term stability or strong/weak scaling.

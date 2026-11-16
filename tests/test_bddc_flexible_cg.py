@@ -13,6 +13,7 @@ from test_bddc_cg_observer import block
 
 PREAMBLE = r'''
 #include "mg/bddcPacketPacking.hh"
+#include "mg/bddcTransferTiming.hh"
 #include <array>
 #include <cassert>
 #include <cmath>

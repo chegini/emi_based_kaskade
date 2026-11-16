@@ -19,12 +19,20 @@ int main(int argc, char** argv)
   try
   {
     int const subdomains = std::max(2,ranks);
-    for (bool masterWorker : {false,true})
+    for (bool masterWorker : {false,true}) for (bool explicitOwners : {false,true})
     {
       if (masterWorker && ranks == 1)
         continue;
       Kaskade::BDDC::MpiDomainLayout layout;
-      layout.configure(true,subdomains,masterWorker);
+      Kaskade::BDDC::MpiOwnerMap owners;
+      if (explicitOwners)
+      {
+        auto map=std::make_shared<std::vector<int>>(subdomains);
+        for (int s=0; s<subdomains; ++s)
+          (*map)[s]=masterWorker ? 1+(s+1)%(ranks-1) : (s+1)%ranks;
+        owners=map;
+      }
+      layout.configure(true,subdomains,masterWorker,owners);
       EmiBddc::InterfaceBlocks expected, local;
       // Only subdomain 0 and 1 have interface mass: other workers send zero
       // words, while all ranks must receive the same replicated operators.

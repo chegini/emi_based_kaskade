@@ -39,6 +39,8 @@
 #include "timestepping/sdc.hh"
 #include "utilities/threading.hh"
 
+#include "EMI_partitioning.hh"
+#include "EMI_partition_report.hh"
 #include "EMI_bddc_stopping.hh"
 #include "EMI_bddc_time_study.hh"
 #include "EMI_bddc_condition.hh"
@@ -1388,10 +1390,11 @@ namespace EmiBddc
                            Interfaces const& interfaces,
                            int nThreads,
                            bool mpiEnabled,
-                           bool masterWorker=false)
+                           bool masterWorker=false,
+                           Kaskade::BDDC::MpiOwnerMap owners={})
   {
     Kaskade::BDDC::MpiDomainLayout layout;
-    layout.configure(mpiEnabled, localOperators.size(), masterWorker);
+    layout.configure(mpiEnabled, localOperators.size(), masterWorker, owners);
     Kaskade::BDDC::OwnedSubdomainStorage<Subdomain> subdomains(localOperators.size());
     std::exception_ptr constructionError;
     std::mutex constructionErrorMutex;
@@ -1982,6 +1985,7 @@ State runBddcSdc(Functional& F,
                                                               data.subdomainSizes,
                                                               options.bddcInterfaceTypes,
                                                               data.interfaceComponents);
+    Partitioning::writeCoarseMetadata(options,interfaceAverages,data.tags.size());
     auto const interfaceCount = interfaceAverages.interfaceCount();
     if (mpiRankZero(options.mpi != 0))
       std::cout << "BDDC coarse interfaces: corners=" << interfaceCount[0]
@@ -2008,7 +2012,8 @@ State runBddcSdc(Functional& F,
                                                                interfaceAverages,
                                                                options.assemblyThreads,
                                                                options.mpi != 0,
-                                                               options.masterWorker != 0);
+                                                               options.masterWorker != 0,
+                                                               Partitioning::ownerMap(options));
     if (timeStudy)
     {
       std::uint64_t owned=0, localDofs=0;
@@ -2038,7 +2043,8 @@ State runBddcSdc(Functional& F,
       Kaskade::BDDC::MpiNodeTopology topology;
       topology.configure();
       Kaskade::BDDC::MpiDomainLayout owners;
-      owners.configure(true,subdomains.size(),options.masterWorker!=0);
+      owners.configure(true,subdomains.size(),options.masterWorker!=0,
+                       Partitioning::ownerMap(options));
       for (std::size_t id=0; id<subdomains.size(); ++id)
         compressionNodes.push_back(topology.leaders().at(owners.owner(id)));
       if (mpiRankZero(true))
@@ -2138,8 +2144,20 @@ State runBddcSdc(Functional& F,
                                                     useCgSolver,
                                                     verbose,
                                                     options.mpi != 0,
-                                                    options.masterWorker != 0);
+                                                    options.masterWorker != 0,
+                                                    Partitioning::ownerMap(options));
     solver.setMpiDestinationRouting(options.bddcMpiRouting != 0);
+    bool observeSerializedBytes=false;
+    if constexpr (requires { options.bddcSerializedByteEntropy; })
+      observeSerializedBytes=options.bddcSerializedByteEntropy!=0;
+    if (observeSerializedBytes) solver.setMpiSerializedByteEntropy(true);
+    bool observePartition=false;
+    if constexpr (requires { options.bddcPartitionReport; })
+      observePartition=options.bddcPartitionReport!=0;
+    solver.setMpiTransportObserver(observePartition);
+    std::unique_ptr<Partitioning::TransportReport> partitionReport;
+    if (observePartition)
+      partitionReport=std::make_unique<Partitioning::TransportReport>(true);
     configureLosslessPacketPacking(solver,options);
     if constexpr (requires { options.bddcRestrictionPasses; })
       solver.setRestrictionPasses(options.bddcRestrictionPasses);
@@ -2268,6 +2286,7 @@ State runBddcSdc(Functional& F,
     for (int step = firstStep; step < firstStep+steps; ++step)
     {
       if (timeStudy) timeStudy->beginStep();
+      if (partitionReport) partitionReport->beginStep();
       if (!histogramSteps.empty())
       {
         bool const capture=std::binary_search(histogramSteps.begin(),histogramSteps.end(),step+1);
@@ -2567,7 +2586,7 @@ State runBddcSdc(Functional& F,
               checkCgDiagnosticOutput(cgDiagnostics.good());
             }
             recordCgStep();
-            if (options.bddcConvergenceReport)
+            if (options.bddcConvergenceReport || partitionReport)
             {
               auto const& cgStep = solver.lastCgStep();
               if (cgStep.applied)
@@ -2606,6 +2625,7 @@ State runBddcSdc(Functional& F,
             ++profile.bddcSolveCalls;
           ++solveCalls;
           residual = solver.solve();
+          if (partitionReport && solver.lastCgStep().applied) ++reportedUpdates;
           recordCgStep();
           if (solver.stopped())
           {
@@ -2729,6 +2749,18 @@ State runBddcSdc(Functional& F,
         std::cout << std::flush;
       if (relativeStopping && !trueResult.converged())
       {
+        if (observeSerializedBytes)
+          solver.writeMpiSerializedByteEntropy(options.outputDir,"FAILED_PARTIAL");
+        if (partitionReport)
+        {
+          int partitionRank=0;
+#ifdef KASKADE_HAVE_MPI
+          if (options.mpi) MPI_Comm_rank(MPI_COMM_WORLD,&partitionRank);
+#endif
+          partitionReport->endStep(step+1,solveCalls,reportedUpdates,"FAILED_PARTIAL",
+              solver.takeMpiTransportTraffic(),timeStudy ? timeStudy->recordedFcgSeconds() : -1);
+          partitionReport->write(options.outputDir,partitionRank);
+        }
         if (rankZero)
           std::cout << "BDDC outer solver logical payload bytes: " << outerTraffic.bytes
                     << " collectives=" << outerTraffic.collectives << '\n';
@@ -2750,6 +2782,9 @@ State runBddcSdc(Functional& F,
       Kaskade::component<0>(state) += Kaskade::component<0>(stepState);
       if (timeStudy)
         timeStudy->endStep(step+1,solveCalls,trueResult.measured.relative(),solver.packetTransportSnapshot(),solver.packetPhaseSnapshot());
+      if (partitionReport)
+        partitionReport->endStep(step+1,solveCalls,reportedUpdates,"PASS",
+            solver.takeMpiTransportTraffic(),timeStudy ? timeStudy->recordedFcgSeconds() : -1);
       capturePotentialState(options.potentialDiagnostics != 0,rankZero,options.mpi != 0,
                             options.outputDir,step+1,globalMatrix,
                             boost::fusion::at_c<0>(state.data).coefficients(),stepVector,rhs);
@@ -2772,6 +2807,17 @@ State runBddcSdc(Functional& F,
 #endif
       timeStudy->write(options.outputDir,studyRank);
     }
+
+    if (observePartition)
+    {
+      int partitionRank=0;
+#ifdef KASKADE_HAVE_MPI
+      if (options.mpi) MPI_Comm_rank(MPI_COMM_WORLD,&partitionRank);
+#endif
+      partitionReport->write(options.outputDir,partitionRank);
+    }
+
+    if (observeSerializedBytes) solver.writeMpiSerializedByteEntropy(options.outputDir);
 
     if (finalPhase && options.bddcConstantCorrection && rankZero)
     {

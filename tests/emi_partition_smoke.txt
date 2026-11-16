@@ -1,0 +1,61 @@
+PEPE P1/P2/P3 CORRECTNESS CHECK
+
+Configuration: 2 physical nodes, 4 MPI ranks, 2 ranks/node, one timestep.
+FCG with unchanged true-relative tolerance 1e-7 and existing iteration cap.
+16-bit Method B, graph lifting depth 1, reversible recentering ON, constant
+splitting ON for prolongation. Lifting-plan reuse and optimization mask 4.
+Only placement varies: P2 baseline first, P1 coupled, then P3 separated.
+P3 uses intracellular node group 0 and extracellular node group 1.
+
+One submission builds a separate executable, performs the existing correctness
+preflight, and runs exactly these three compressed trajectories. No raw EMI
+reference, repetitions, other precisions/depths or 12-case pilot are launched.
+State errors compare against compressed P2; they are not errors against raw EMI.
+True-residual histories, states and per-phase transport files are retained.
+The fixed-topology HB guard prohibits heavyweight bddcCgDiagnostics; it stays OFF.
+Timings include correctness instrumentation; this is not a speedup benchmark.
+
+Submit from the EMI repository root on the cluster:
+
+mkdir -p /scratch/htc/$USER/emi-hb
+sbatch --nodes=2 --ntasks=4 --ntasks-per-node=2 --time=01:00:00 \
+  --job-name=emi-pepe-p123 \
+  --output="/scratch/htc/$USER/emi-hb/emi-partition-smoke-%j.log" \
+  --error="/scratch/htc/$USER/emi-hb/emi-partition-smoke-%j.log" \
+  tests/submit_emi_partition_pilot.sbatch smoke
+
+Log: /scratch/htc/$USER/emi-hb/emi-partition-smoke-JOBID.log
+Results: /scratch/htc/$USER/emi-hb/emi-partition-smoke-JOBID/results/
+  report.txt: overall PASS/FAILED/REVIEW_REQUIRED status for all three cases.
+  comparison.csv: convergence, iterations, R/P bytes/application counts,
+    scoped bytes/messages, diagnostic times, and same_owners_as_P2.
+  state-errors-vs-P2.csv: actual solution differences at steps 0 and 1.
+  P2-B-recenter/, P1-B-recenter/, P3-B-recenter/: full logs, residual histories,
+    placement, topology, invariants, and per-rank timing/transport observations.
+
+PASS requires convergence plus ownership/routing/count checks. Fingerprint
+differences from P2 request review; roundoff from reduction order alone can
+change hashes and does not establish that the mathematical operator changed.
+P1 is a bounded heuristic and may legitimately equal the baseline placement.
+
+Local verification:
+  python3 tests/test_emi_partition_smoke.py     (4 offline tests passed)
+  python3 tests/test_emi_partition_pilot.py     (4 existing tests passed)
+  bash -n tests/submit_emi_partition_pilot.sbatch (syntax passed)
+No cluster jobs or EMI simulations were executed from the Mac.
+
+MATCHED UNCOMPRESSED CHECK
+The smoke-raw mode uses the same Pepe mesh, FCG tolerance, two nodes/four ranks,
+one timestep and P1/P2/P3 placement rules. Compression, transforms, recentering,
+splitting and packet compaction are disabled. The raw output rows have no bit
+precision or lifting depth. Existing compressed results are preserved.
+
+sbatch --nodes=2 --ntasks=4 --ntasks-per-node=2 --time=01:00:00 \
+  --job-name=emi-pepe-raw \
+  --output="/scratch/htc/$USER/emi-hb/emi-partition-smoke-raw-%j.log" \
+  --error="/scratch/htc/$USER/emi-hb/emi-partition-smoke-raw-%j.log" \
+  tests/submit_emi_partition_pilot.sbatch smoke-raw
+
+Results: /scratch/htc/$USER/emi-hb/emi-partition-smoke-raw-JOBID/results/
+Comparisons across separate allocations are diagnostic observations, not a
+paired repeated benchmark on guaranteed identical physical hosts.

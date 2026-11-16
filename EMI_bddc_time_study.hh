@@ -75,6 +75,7 @@ class TimeStudy
 
 public:
   static void beginApplication() { applicationStart=Clock::now(); }
+  double recordedFcgSeconds() const { return fcgSeconds; }
 
   explicit TimeStudy(bool observe):enabled(observe)
   {

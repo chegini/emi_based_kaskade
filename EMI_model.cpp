@@ -70,6 +70,16 @@ struct EmiOptions
   std::string excitedSet = "./input/10Cells3d_10extra_early_excited.txt";
   std::string outputDir = "output";
   std::string directBackend = "umfpack";
+  std::string bddcPartitionMode = "baseline";
+  std::string bddcPartitionMap;
+  std::string bddcIntracellularNodes;
+  std::string bddcExtracellularNodes;
+  double bddcPartitionBalanceFactor = 1.0;
+  int bddcPartitionReport = 0;
+  int bddcSerializedByteEntropy = 0;
+  Kaskade::BDDC::MpiOwnerMap bddcOwnership;
+  std::shared_ptr<EmiBddc::Partitioning::State const> bddcPartitionState;
+
 
   int refinements = 0;
   int order = 1;
@@ -966,6 +976,21 @@ int main(int argc, char* argv[])
     ("bddcAudit", options.bddcAudit, options.bddcAudit, "audit constant mode and coarse interface groups (requires bddc=1, sdc=0)")
     ("bddcOperatorAudit", options.bddcOperatorAudit, options.bddcOperatorAudit, "audit uncompressed BDDC weights and operators, then exit without timesteps")
     ("bddcSplitInterfaces", options.bddcSplitInterfaces, options.bddcSplitInterfaces, "split coarse interface averages by cell-connected electrical component (requires bddc=1, sdc=0)")
+    ("bddcPartitionMode", options.bddcPartitionMode, options.bddcPartitionMode,
+     "ownership: baseline/P2 (default), coupled/P1, separated/P3; fixed across timesteps")
+    ("bddcPartitionMap", options.bddcPartitionMap, options.bddcPartitionMap,
+     "optional CSV: subdomain_id,material_tag,owner_rank; validated before assembly")
+    ("bddcIntracellularNodes", options.bddcIntracellularNodes, options.bddcIntracellularNodes,
+     "P3 comma-separated logical node groups; empty selects a DOF-weighted pool")
+    ("bddcExtracellularNodes", options.bddcExtracellularNodes, options.bddcExtracellularNodes,
+     "P3 comma-separated node groups; one empty pool is the other's complement")
+    ("bddcPartitionBalanceFactor", options.bddcPartitionBalanceFactor,
+     options.bddcPartitionBalanceFactor, "P1 max DOF load relative to cyclic rank/node maxima; >=1")
+    ("bddcPartitionReport", options.bddcPartitionReport, options.bddcPartitionReport,
+     "placement, work, matrix fingerprints and per-step transport CSVs; automatic for P1/P3")
+    ("bddcSerializedByteEntropy", options.bddcSerializedByteEntropy,
+     options.bddcSerializedByteEntropy,
+     "pooled final MPI send-buffer entropy in bits/byte; includes headers/metadata; 0=off, 1=on")
     ("bddcMaterialAssembly", options.bddcMaterialAssembly, options.bddcMaterialAssembly, "material assembly: 0=replicated, 1=MPI owner assembly and sparse exchange")
     ("bddcMaterialAssemblyCheck", options.bddcMaterialAssemblyCheck, options.bddcMaterialAssemblyCheck, "compare owner-assembled material matrices with replicated assembly")
     ("bddcInterfaceAssembly", options.bddcInterfaceAssembly, options.bddcInterfaceAssembly, "interface mass assembly: 0=legacy pairs, 1=shared traversal, 2=MPI owner shared traversal")
@@ -1105,6 +1130,26 @@ int main(int argc, char* argv[])
        options.bddcRestrictZeroPreserving || options.bddcProlongateZeroPreserving ||
        options.bddcCompressionMinInterfaceSize)))
     throw std::runtime_error("Local bypass requires compressed destination MPI routing, affine ungrouped quantization, no threshold or histograms");
+  options.bddcPartitionMode=EmiBddc::Partitioning::mode(options.bddcPartitionMode);
+  if (options.bddcSerializedByteEntropy<0 || options.bddcSerializedByteEntropy>1 ||
+      (options.bddcSerializedByteEntropy && (!options.bddc || !options.mpi || options.sdc ||
+       options.direct || !options.bddcMpiRouting || options.bddcOperatorAudit ||
+       options.bddcPreconditionerProbe || options.bddcUncompressedSteps)))
+    throw std::runtime_error("Serialized byte entropy requires non-SDC destination MPI BDDC, "
+                             "without direct/audit/probe or raw-prefix phase switches");
+  bool const controlledPartition=options.bddcPartitionMode!="baseline" ||
+      !options.bddcPartitionMap.empty() || options.bddcPartitionReport;
+  if (options.bddcPartitionReport<0 || options.bddcPartitionReport>1 ||
+      !std::isfinite(options.bddcPartitionBalanceFactor) || options.bddcPartitionBalanceFactor<1)
+    throw std::runtime_error("Invalid partition observer or balance factor");
+  if (controlledPartition && (!options.bddc || !options.mpi || options.sdc || options.direct ||
+      options.masterWorker || !options.bddcMpiRouting || !options.bddcUseCg ||
+      options.bddcOperatorAudit || options.bddcPreconditionerProbe))
+    throw std::runtime_error("Controlled ownership requires non-SDC MPI BDDC CG/FCG, masterWorker=0, destination routing, no direct/audit/probe");
+  if (options.bddcPartitionMode!="separated" &&
+      (!options.bddcIntracellularNodes.empty() || !options.bddcExtracellularNodes.empty()))
+    throw std::runtime_error("I/E node pools apply only to separated/P3 ownership");
+  if (options.bddcPartitionMode!="baseline") options.bddcPartitionReport=1;
   if (options.bddcTolerance <= 0.0)
     throw std::runtime_error("bddcTolerance must be positive");
   if (options.potentialDiagnostics < 0 || options.potentialDiagnostics > 1 ||
@@ -1590,6 +1635,7 @@ int main(int argc, char* argv[])
       gridManager.grid(),uSpace,material,nDofs,options.assemblyThreads,options.mpi != 0,!options.quiet);
     EmiBddc::expandSubdomainsToLegacyInterfaceDofs(
       bddcData,gridManager.grid(),uSpace,material,options.mpi != 0,!options.quiet);
+    EmiBddc::Partitioning::prepare(options,bddcData,extraTags,intraTags);
     EmiBddc::printUncoveredMatrixCouplings(
       bddcData,lhs,"before material contributions",options.mpi != 0,!options.quiet);
 
@@ -1605,7 +1651,7 @@ int main(int argc, char* argv[])
                 << bddcData.tags.size() << " subdomains)\n";
     Kaskade::BDDC::MpiDomainLayout materialLayout;
     materialLayout.configure(options.bddcMaterialAssembly && options.mpi != 0,
-                             bddcData.tags.size(),options.masterWorker != 0);
+                             bddcData.tags.size(),options.masterWorker != 0,options.bddcOwnership);
     EmiBddc::MaterialProgress materialProgress(materialLayout.rank());
     materialProgress.mark("assembly begin");
     std::exception_ptr materialError;
@@ -1749,7 +1795,8 @@ int main(int argc, char* argv[])
     else
     {
       Kaskade::BDDC::MpiDomainLayout interfaceLayout;
-      interfaceLayout.configure(options.mpi != 0,bddcData.tags.size(),options.masterWorker != 0);
+      interfaceLayout.configure(options.mpi != 0,bddcData.tags.size(),
+                                options.masterWorker != 0,options.bddcOwnership);
       F.setMassSubmatrix(false);
       phaseProfile.next(Phase::interfaceAssembly);
       auto blocks = EmiBddc::assembleInterfaceMassBlocks(
@@ -1852,6 +1899,7 @@ int main(int argc, char* argv[])
     phaseProfile.next(Phase::diagonalWeights);
     EmiBddc::buildDiagonalWeights(bddcData,bddcData.localMatrices,lhs,
                                   options.mpi != 0,!options.quiet);
+    EmiBddc::Partitioning::writeMetadata(options,bddcData,lhs);
     phaseProfile.next(Phase::diagnostics);
     if (options.bddcSplitInterfaces)
       EmiBddc::splitInterfaceGroups(

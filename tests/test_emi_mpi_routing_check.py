@@ -11,7 +11,7 @@ import contextlib
 import io
 from pathlib import Path
 from run_emi_mpi_routing_check import arguments, make_command, planned_modes, routing_counts, slurm_container_command
-from test_emi_compression_report import extract
+from test_emi_compression_report import extract, kaskade_include
 
 
 class RoutingCheck(unittest.TestCase):
@@ -71,9 +71,9 @@ int main() {
 '''
         with tempfile.TemporaryDirectory(prefix='emi-bypass-backend-') as tmp:
             cpp, binary = Path(tmp)/'backend.cpp', Path(tmp)/'backend'
-            cpp.write_text('#include <string>\n#include "EMI_bddc_precision.hh"\n'+options+'\n'+helper+'\n'+checks)
+            cpp.write_text('#include <string>\n#include "EMI_partitioning.hh"\n#include "EMI_bddc_precision.hh"\n'+options+'\n'+helper+'\n'+checks)
             subprocess.run(shlex.split(os.environ.get('CXX', 'c++'))+
-                           ['-std=c++20', '-I', str(repo), str(cpp), '-o', str(binary)], check=True)
+                           ['-std=c++20', '-I', str(repo), '-I', kaskade_include(repo), str(cpp), '-o', str(binary)], check=True)
             subprocess.run([str(binary)], check=True)
 
     def test_local_bypass_commands(self):
@@ -187,14 +187,23 @@ int main() {
             invalid = list(cmd)
             invalid[invalid.index(flag)+1] = value
             add(invalid, False)
-        preamble = ('#include <cmath>\n#include <iostream>\n#include <string>\n'
-                    '#include "EMI_bddc_precision.hh"\n#include "EMI_bddc_step_schedule.hh"\n'+options+
+        for mode in ['P1','P2','P3','coupled','baseline','separated']:
+            cmd=make_command(a,Path('/tmp/out'),['mpirun'],'fcg',True,True)
+            cmd+=['--bddcPartitionMode',mode,'--bddcPartitionReport','1']
+            add(cmd,True)
+        for flag,value in [('bddcUseCg','0'),('masterWorker','1'),('mpi','0'),('bddcMpiRouting','0')]:
+            cmd=make_command(a,Path('/tmp/out'),['mpirun'],'fcg',True,True)
+            cmd+=['--bddcPartitionMode','coupled']
+            cmd[cmd.index('--'+flag)+1]=value
+            add(cmd,False)
+        preamble = ('#include <cmath>\n#include <iostream>\n#include <string>\n#include "EMI_partitioning.hh"\n'
+                    '#include "EMI_bddc_precision.hh"\n#include "EMI_bddc_packet_packing.hh"\n#include "EMI_bddc_step_schedule.hh"\n'+options+
                     '\nvoid validate(EmiOptions& options) {\n'+guards+'}\n')
         with tempfile.TemporaryDirectory(prefix='emi-routing-guards-') as tmp:
             cpp, binary = Path(tmp)/'guards.cpp', Path(tmp)/'guards'
             cpp.write_text(preamble+'int main() {\n'+''.join(checks)+'}\n')
             subprocess.run(shlex.split(os.environ.get('CXX', 'c++'))+
-                           ['-std=c++20', '-I', str(repo), str(cpp), '-o', str(binary)], check=True)
+                           ['-std=c++20', '-I', str(repo), '-I', kaskade_include(repo), str(cpp), '-o', str(binary)], check=True)
             subprocess.run([str(binary)], check=True)
 
     def test_controls(self):
