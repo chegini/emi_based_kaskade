@@ -1,0 +1,9 @@
+Local preparation checks, 2026-11-17
+PASS: five offline tests, including 18 generated production option sets (12/16 bits).
+PASS: nine-case matrix at requested precision; plan-only does not execute.
+PASS: execution requires a user-submitted 2-node/4-rank allocation.
+PASS: synthetic failed raw reference skips all eight compressed trajectories.
+PASS: synthetic depth-parity failure remains FAILED while later cases continue.
+PASS: bash -n submit_check.sbatch.
+No PDE trajectories run locally. No SLURM jobs submitted by the assistant.
+Production container build/native checks and actual convergence remain pending.
